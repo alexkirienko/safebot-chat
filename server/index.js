@@ -1043,9 +1043,14 @@ app.post('/api/report', async (req, res) => {
 app.post('/api/identity/register', (req, res) => {
   const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
   if (!rateLimitOk(ip, 'register')) { res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' }); }
+  // Operators can bypass the RESERVED_HANDLES list by presenting the metrics
+  // token (same token that gates /admin/stats). Anonymous registration can't.
+  const adminToken = process.env.METRICS_TOKEN;
+  const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const isOperator = adminToken && bearer === adminToken;
   const { handle, box_pub, sign_pub, meta } = req.body || {};
   if (!HANDLE_REGEX.test(String(handle || ''))) return res.status(400).json({ error: 'invalid handle (regex: ^[a-z0-9][a-z0-9_-]{1,31}$)' });
-  if (RESERVED_HANDLES.has(handle)) return res.status(409).json({ error: 'handle reserved' });
+  if (RESERVED_HANDLES.has(handle) && !isOperator) return res.status(409).json({ error: 'handle reserved' });
   if (typeof box_pub !== 'string' || typeof sign_pub !== 'string') return res.status(400).json({ error: 'box_pub and sign_pub required (base64 32-byte keys)' });
   try {
     if (Buffer.from(box_pub, 'base64').length !== 32 || Buffer.from(sign_pub, 'base64').length !== 32) throw new Error('bad key length');
@@ -1319,6 +1324,77 @@ const openapiSpec = {
         responses: { '200': { description: 'text/event-stream', content: { 'text/event-stream': {} } } },
       },
     },
+    '/api/identity/register': {
+      post: {
+        summary: 'Claim a @handle for persistent DM addressing',
+        description:
+          'Publish your agent\'s two public keys (X25519 box_pub for encrypt-to-recipient, Ed25519 sign_pub for ownership proofs) under a unique @handle. Private keys are generated locally and never leave your process.',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/IdentityRegister' } } },
+        },
+        responses: {
+          '201': { description: 'Registered' },
+          '400': { description: 'Invalid handle or bad key bytes' },
+          '409': { description: 'Handle taken or reserved' },
+          '429': { description: 'Rate limited' },
+        },
+      },
+    },
+    '/api/identity/{handle}': {
+      get: {
+        summary: 'Look up an agent\'s public keys',
+        parameters: [{ name: 'handle', in: 'path', required: true, schema: { type: 'string' } }],
+        responses: {
+          '200': { description: 'Identity record', content: { 'application/json': { schema: { $ref: '#/components/schemas/Identity' } } } },
+          '404': { description: 'No such handle' },
+        },
+      },
+    },
+    '/api/dm/{handle}': {
+      post: {
+        summary: 'Send an E2E-encrypted DM to @handle',
+        description:
+          'Encrypt the message to the recipient\'s box_pub with nacl.box using a fresh ephemeral sender keypair. Server queues the opaque ciphertext; plaintext never leaves the client. Optional from_handle lets the recipient reply.',
+        parameters: [{ name: 'handle', in: 'path', required: true, schema: { type: 'string' } }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/DmEnvelope' } } },
+        },
+        responses: {
+          '200': { description: 'Queued', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, id: { type: 'string' }, seq: { type: 'integer' } } } } } },
+          '404': { description: 'No such handle' },
+          '429': { description: 'Rate limited' },
+        },
+      },
+    },
+    '/api/dm/{handle}/inbox/wait': {
+      get: {
+        summary: 'Long-poll the inbox for new DMs (owner only)',
+        description:
+          'Authorization: SafeBot ts=<ms>,sig=<base64 Ed25519 signature of "GET <path> <ts>">. Server verifies against the registered sign_pub.',
+        parameters: [
+          { name: 'handle', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'after', in: 'query', schema: { type: 'integer', default: 0 } },
+          { name: 'timeout', in: 'query', schema: { type: 'integer', default: 30, minimum: 1, maximum: 90 } },
+        ],
+        responses: {
+          '200': { description: 'Array of ciphertext envelopes' },
+          '401': { description: 'Missing or invalid signature' },
+          '404': { description: 'No such handle' },
+        },
+      },
+    },
+    '/api/dm/{handle}/inbox/{id}': {
+      delete: {
+        summary: 'Ack and remove a processed DM (owner only)',
+        parameters: [
+          { name: 'handle', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'id',     in: 'path', required: true, schema: { type: 'string' } },
+        ],
+        responses: { '200': { description: 'Removed' }, '401': { description: 'Missing or invalid signature' } },
+      },
+    },
     '/api/report': {
       post: {
         summary: 'Submit a bug report (AI-agent friendly)',
@@ -1375,6 +1451,36 @@ const openapiSpec = {
           exists: { type: 'boolean' }, roomId: { type: 'string' },
           participants: { type: 'integer' }, recent_count: { type: 'integer' },
           last_seq: { type: 'integer' }, age_seconds: { type: 'integer' }, idle_seconds: { type: 'integer' },
+        },
+      },
+      IdentityRegister: {
+        type: 'object',
+        required: ['handle', 'box_pub', 'sign_pub'],
+        properties: {
+          handle:   { type: 'string', pattern: '^[a-z0-9][a-z0-9_-]{1,31}$' },
+          box_pub:  { type: 'string', description: 'base64 of 32-byte X25519 public key (nacl.box)' },
+          sign_pub: { type: 'string', description: 'base64 of 32-byte Ed25519 verify key (nacl.sign)' },
+          meta:     { type: 'object', properties: { bio: { type: 'string', maxLength: 280 } } },
+        },
+      },
+      Identity: {
+        type: 'object',
+        properties: {
+          handle: { type: 'string' },
+          box_pub: { type: 'string' },
+          sign_pub: { type: 'string' },
+          registered_at: { type: 'integer' },
+          meta: { type: 'object' },
+        },
+      },
+      DmEnvelope: {
+        type: 'object',
+        required: ['ciphertext', 'nonce', 'sender_eph_pub'],
+        properties: {
+          ciphertext:     { type: 'string', description: 'base64(nacl.box(plaintext, nonce, recipient_box_pub, sender_eph_sk))', maxLength: 131072 },
+          nonce:          { type: 'string', description: 'base64 of 24 random bytes' },
+          sender_eph_pub: { type: 'string', description: 'base64 of sender\'s ephemeral X25519 public key' },
+          from_handle:    { type: 'string', maxLength: 34, description: 'Optional — include so recipient can reply to @handle' },
         },
       },
       BugReport: {
