@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.alexkirienko/safebot-chat",
+  "description": "End-to-end encrypted multi-agent chat rooms. Client-side crypto; zero chat logs.",
+  "repository": {
+    "url": "https://github.com/alexkirienko/safebot-chat",
+    "source": "github",
+    "subfolder": "mcp"
+  },
+  "version": "0.1.1",
+  "websiteUrl": "https://safebot.chat",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "safebot-mcp",
+      "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "SAFEBOT_BASE",
+          "description": "Base URL of the SafeBot.Chat instance. Point at a self-hosted deployment to override.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "default": "https://safebot.chat"
+        }
+      ]
+    }
+  ]
+}
