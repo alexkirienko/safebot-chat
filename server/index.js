@@ -49,9 +49,16 @@ for (const label of ['server/index.js', 'sdk/safebot.py', 'public/js/crypto.js',
 const STARTED_AT = new Date().toISOString();
 
 // --- Metrics (admin-only, aggregate, no message content ever) -------------
-const METRICS = {
+// Persisted to METRICS_STATE_PATH once a minute so restart-induced zeroing
+// stops surprising the operator on the dashboard. All counters are content-
+// free (no keys, no plaintext, no room IDs) — same privacy posture as the
+// rest of the server.
+const METRICS_STATE_PATH = process.env.METRICS_STATE_PATH || '/var/lib/safebot/metrics.json';
+
+const METRICS_DEFAULTS = {
   started_at: STARTED_AT,
   started_ms: Date.now(),
+  first_boot_at: STARTED_AT,
   // cumulative counters
   rooms_created_total: 0,
   rooms_evicted_total: 0,
@@ -67,11 +74,52 @@ const METRICS = {
   // peaks
   peak_concurrent_rooms: 0,
   peak_concurrent_subs: 0,
+  // restart bookkeeping
+  process_starts_total: 0,
+  last_restart_at: STARTED_AT,
 };
+
+function loadPersistedMetrics() {
+  try {
+    const raw = fs.readFileSync(METRICS_STATE_PATH, 'utf8');
+    const saved = JSON.parse(raw);
+    const m = { ...METRICS_DEFAULTS, ...saved };
+    // This process just started: bump restart counter, but preserve cumulative
+    // totals and first_boot_at.
+    m.started_at = STARTED_AT;
+    m.started_ms = Date.now();
+    m.last_restart_at = STARTED_AT;
+    m.process_starts_total = (saved.process_starts_total || 0) + 1;
+    return m;
+  } catch (_) {
+    // No file or unreadable: start fresh with process_starts = 1.
+    return { ...METRICS_DEFAULTS, process_starts_total: 1 };
+  }
+}
+
+const METRICS = loadPersistedMetrics();
 // Ring buffer: one snapshot every 60s for 24h = 1440 entries.
 const METRICS_HISTORY = [];
 const METRICS_HISTORY_MAX = 1440;
 let prevSnapshot = null;
+
+function persistMetrics() {
+  try {
+    const dir = path.dirname(METRICS_STATE_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const tmp = METRICS_STATE_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(METRICS));
+    fs.renameSync(tmp, METRICS_STATE_PATH);
+  } catch (e) {
+    console.error('[metrics] persist failed:', e.message);
+  }
+}
+setInterval(persistMetrics, 60_000).unref?.();
+// Also flush on graceful shutdown so a planned deploy doesn't lose the last
+// minute of counters.
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => { try { persistMetrics(); } catch (_) {} process.exit(0); });
+}
 
 function metricsSnapshot() {
   let totalSubs = 0;
@@ -524,6 +572,18 @@ app.get('/llms.txt', (_req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=300');
   res.type('text/plain; charset=utf-8').sendFile(path.join(PUBLIC_DIR, 'llms.txt'));
 });
+
+// Expose the MCP folder (README + CUSTOMGPT walkthrough) as plain-text
+// markdown so operators can grab the instructions from any device.
+const MCP_DIR = path.join(__dirname, '..', 'mcp');
+for (const f of ['README.md', 'CUSTOMGPT.md', 'server.json']) {
+  const route = '/mcp/' + f;
+  app.get(route, (_req, res) => {
+    const ct = f.endsWith('.json') ? 'application/json' : 'text/markdown';
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.type(`${ct}; charset=utf-8`).sendFile(path.join(MCP_DIR, f));
+  });
+}
 
 // /source — publicly auditable view of what's actually running on the server.
 app.get('/source', (_req, res) => {
