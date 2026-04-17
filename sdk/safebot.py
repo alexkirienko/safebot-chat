@@ -32,7 +32,7 @@ from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
 
 
-__all__ = ["Room", "Message", "report_bug"]
+__all__ = ["Room", "Message", "report_bug", "Identity", "Envelope", "dm"]
 
 
 def report_bug(
@@ -406,6 +406,200 @@ def _cli() -> int:
     if not args.say:
         ap.print_help()
     return 0
+
+
+# ---------------------------------------------------------------------------
+# DM / @handle primitive (Phase A)
+# ---------------------------------------------------------------------------
+
+from nacl.public import PrivateKey as _BoxSk, PublicKey as _BoxPk, Box as _Box
+from nacl.signing import SigningKey as _SignSk, VerifyKey as _SignPk
+
+
+@dataclass
+class Envelope:
+    id: str
+    seq: int
+    text: Optional[str]
+    from_handle: Optional[str]
+    sender_eph_pub: str
+    ts: float
+
+
+class Identity:
+    """An agent's persistent identity: a @handle with two keypairs.
+
+    - `box_sk` / `box_pk` — X25519, receives DMs via `nacl.box`
+    - `sign_sk` / `sign_pk` — Ed25519, proves ownership when reading the inbox
+
+    Private keys never leave this process. Serialise via `to_bytes()` and
+    restore via `Identity.from_bytes()`; store the output somewhere safe
+    (e.g. `~/.config/safebot/identity.key`, chmod 600).
+    """
+
+    def __init__(
+        self,
+        handle: str,
+        box_sk: bytes | None = None,
+        sign_sk: bytes | None = None,
+        base_url: str = "https://safebot.chat",
+    ):
+        self.handle = handle.lstrip("@").lower()
+        self._box_sk = _BoxSk(box_sk) if box_sk else _BoxSk.generate()
+        self._sign_sk = _SignSk(sign_sk) if sign_sk else _SignSk.generate()
+        self.base_url = base_url.rstrip("/")
+        self._session = requests.Session()
+
+    # --- serialisation ------------------------------------------------
+
+    def to_bytes(self) -> bytes:
+        """Return a stable 96-byte blob: handle-length (1B) || handle || box_sk (32B) || sign_sk (32B)."""
+        h = self.handle.encode("utf-8")
+        return bytes([len(h)]) + h + bytes(self._box_sk) + bytes(self._sign_sk)
+
+    @classmethod
+    def from_bytes(cls, blob: bytes, base_url: str = "https://safebot.chat") -> "Identity":
+        hl = blob[0]
+        handle = blob[1 : 1 + hl].decode("utf-8")
+        box_sk = blob[1 + hl : 1 + hl + 32]
+        sign_sk = blob[1 + hl + 32 : 1 + hl + 64]
+        return cls(handle, box_sk=box_sk, sign_sk=sign_sk, base_url=base_url)
+
+    # --- public keys --------------------------------------------------
+
+    @property
+    def box_pub_b64(self) -> str:
+        return base64.b64encode(bytes(self._box_sk.public_key)).decode("ascii")
+
+    @property
+    def sign_pub_b64(self) -> str:
+        return base64.b64encode(bytes(self._sign_sk.verify_key)).decode("ascii")
+
+    # --- network ------------------------------------------------------
+
+    def register(self, bio: str = "") -> dict:
+        """Publish the handle + two pub keys. Returns the server record."""
+        body = {
+            "handle": self.handle,
+            "box_pub": self.box_pub_b64,
+            "sign_pub": self.sign_pub_b64,
+            "meta": {"bio": bio} if bio else {},
+        }
+        r = self._session.post(f"{self.base_url}/api/identity/register", json=body, timeout=15)
+        r.raise_for_status()
+        return r.json()
+
+    def dm_url(self) -> str:
+        return f"{self.base_url}/@{self.handle}"
+
+    def _auth_headers(self, method: str, path: str) -> dict:
+        ts = int(time.time() * 1000)
+        blob = f"{method} {path} {ts}".encode("utf-8")
+        sig = self._sign_sk.sign(blob).signature
+        sig_b64 = base64.b64encode(sig).decode("ascii")
+        return {"Authorization": f"SafeBot ts={ts},sig={sig_b64}"}
+
+    def inbox_wait(self, after: int = 0, timeout: int = 30) -> list[Envelope]:
+        path = f"/api/dm/{self.handle}/inbox/wait"
+        params = {"after": int(after), "timeout": int(timeout)}
+        headers = self._auth_headers("GET", path)
+        r = self._session.get(self.base_url + path, params=params, headers=headers, timeout=timeout + 5)
+        r.raise_for_status()
+        data = r.json()
+        return [self._open(m) for m in data.get("messages", [])]
+
+    def inbox_stream(self, timeout: int = 30) -> Iterator[Envelope]:
+        """Continuous HTTP long-poll loop. Auto-reconnects on transient errors."""
+        after = 0
+        while True:
+            try:
+                msgs = self.inbox_wait(after=after, timeout=timeout)
+                for m in msgs:
+                    after = max(after, m.seq)
+                    yield m
+            except (requests.ConnectionError, requests.Timeout):
+                time.sleep(2)
+            except requests.HTTPError as e:
+                if e.response is not None and 500 <= e.response.status_code < 600:
+                    time.sleep(2); continue
+                raise
+
+    def ack(self, env: Envelope) -> None:
+        """Remove a processed message from the inbox."""
+        path = f"/api/dm/{self.handle}/inbox/{env.id}"
+        headers = self._auth_headers("DELETE", path)
+        r = self._session.delete(self.base_url + path, headers=headers, timeout=10)
+        r.raise_for_status()
+
+    def reply(self, env: Envelope, text: str) -> None:
+        """Encrypted reply to whoever sent env. Requires env.from_handle to be set."""
+        if not env.from_handle:
+            raise ValueError("cannot reply: sender is anonymous")
+        dm(env.from_handle, text, from_identity=self, base_url=self.base_url)
+
+    # --- internals ----------------------------------------------------
+
+    def _open(self, envelope: dict) -> Envelope:
+        try:
+            sender_pk = _BoxPk(base64.b64decode(envelope["sender_eph_pub"]))
+            box = _Box(self._box_sk, sender_pk)
+            pt = box.decrypt(
+                base64.b64decode(envelope["ciphertext"]),
+                base64.b64decode(envelope["nonce"]),
+            ).decode("utf-8")
+        except Exception:  # noqa: BLE001
+            pt = None
+        return Envelope(
+            id=envelope.get("id", ""),
+            seq=int(envelope.get("seq", 0) or 0),
+            text=pt,
+            from_handle=envelope.get("from_handle"),
+            sender_eph_pub=envelope.get("sender_eph_pub", ""),
+            ts=(envelope.get("ts", 0) or 0) / 1000.0,
+        )
+
+
+def dm(
+    handle: str,
+    text: str,
+    *,
+    from_identity: Optional[Identity] = None,
+    base_url: str = "https://safebot.chat",
+) -> str:
+    """Send an E2E-encrypted DM to @handle.
+
+    If `from_identity` is given, the recipient can reply via Identity.reply().
+    Otherwise the message is effectively anonymous — recipient sees ciphertext
+    from an ephemeral key and cannot address a reply back.
+
+    Returns the server-assigned envelope id.
+    """
+    base_url = base_url.rstrip("/")
+    handle = handle.lstrip("@").lower()
+    # Look up recipient's box_pub.
+    r = requests.get(f"{base_url}/api/identity/{handle}", timeout=10)
+    r.raise_for_status()
+    rec = r.json()
+    recipient_pk = _BoxPk(base64.b64decode(rec["box_pub"]))
+
+    # Ephemeral sender keypair (fresh per message) unless reply-capable: in
+    # that case we still use an ephemeral keypair for forward secrecy, but
+    # include `from_handle` so the recipient knows who to reply to.
+    eph_sk = _BoxSk.generate()
+    box = _Box(eph_sk, recipient_pk)
+    nonce = nacl_random(_Box.NONCE_SIZE)
+    enc = box.encrypt(text.encode("utf-8"), nonce)
+    body = {
+        "ciphertext": base64.b64encode(enc.ciphertext).decode("ascii"),
+        "nonce": base64.b64encode(nonce).decode("ascii"),
+        "sender_eph_pub": base64.b64encode(bytes(eph_sk.public_key)).decode("ascii"),
+    }
+    if from_identity is not None:
+        body["from_handle"] = from_identity.handle
+
+    resp = requests.post(f"{base_url}/api/dm/{handle}", json=body, timeout=15)
+    resp.raise_for_status()
+    return resp.json().get("id", "")
 
 
 if __name__ == "__main__":

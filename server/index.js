@@ -158,6 +158,105 @@ setInterval(() => {
   prevSnapshot = snap;
 }, 60_000).unref?.();
 
+// --- Identity / DM primitive (Phase A) ------------------------------------
+// Every agent can claim a @handle backed by two public keys (one for
+// receiving encrypted DMs via nacl.box, one for signing ownership proofs via
+// nacl.sign). The server stores ONLY the public keys + inbox ciphertexts;
+// private keys never leave the owner's process.
+//
+// Wire primitives intentionally reuse the conventions of the rooms API:
+//   - base64 for ciphertext / nonces
+//   - numeric monotonic seq for inbox ordering
+//   - same rate-limit bucket + metrics shape
+//
+// Identities survive restarts (persisted alongside metrics.json). Inbox is
+// RAM-only with a short TTL (7 days) + per-handle cap (256) — "queued in
+// flight", not an archive, so the zero-chat-logs posture holds.
+
+const nacl = require('tweetnacl');
+const IDENTITIES_STATE_PATH = process.env.IDENTITIES_STATE_PATH || '/var/lib/safebot/identities.json';
+const HANDLE_REGEX = /^[a-z0-9][a-z0-9_-]{1,31}$/;
+const RESERVED_HANDLES = new Set(['anon', 'admin', 'safebot', 'system', 'root', 'support', 'help', 'demo', 'echo']);
+const DM_MAX_BYTES = 128 * 1024;          // ciphertext ceiling, matches room msgs
+const INBOX_MAX = 256;                    // undelivered per handle
+const INBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SIG_MAX_SKEW_MS = 60 * 1000;        // signed-challenge clock drift tolerance
+
+// identities: Map<handle, { box_pub, sign_pub, registered_at, meta, inbox_seq }>
+const identities = new Map();
+// inboxes: Map<handle, Array<{ seq, id, ciphertext, nonce, sender_eph_pub, from_handle?, ts }>>
+const inboxes = new Map();
+// dmWaiters: Map<handle, Set<{ resolve, timer }>>
+const dmWaiters = new Map();
+
+function loadIdentities() {
+  try {
+    const raw = fs.readFileSync(IDENTITIES_STATE_PATH, 'utf8');
+    const obj = JSON.parse(raw);
+    for (const [handle, rec] of Object.entries(obj.identities || {})) {
+      identities.set(handle, rec);
+    }
+    console.log(`[identities] loaded ${identities.size} from disk`);
+  } catch (_) { /* fresh slate */ }
+}
+function persistIdentities() {
+  try {
+    const dir = path.dirname(IDENTITIES_STATE_PATH);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const tmp = IDENTITIES_STATE_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ identities: Object.fromEntries(identities) }));
+    fs.renameSync(tmp, IDENTITIES_STATE_PATH);
+  } catch (e) { console.error('[identities] persist failed:', e.message); }
+}
+loadIdentities();
+setInterval(persistIdentities, 60_000).unref?.();
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, () => { try { persistIdentities(); } catch (_) {} });
+}
+
+function b64BytesLen(s) {
+  if (typeof s !== 'string') return -1;
+  return s.length; // We limit on the base64 length — 4/3 of raw bytes, fine for bounds.
+}
+
+function pruneInbox(handle) {
+  const inbox = inboxes.get(handle);
+  if (!inbox) return;
+  const cutoff = Date.now() - INBOX_TTL_MS;
+  while (inbox.length && inbox[0].ts < cutoff) inbox.shift();
+  while (inbox.length > INBOX_MAX) inbox.shift();
+}
+
+function wakeDmWaiters(handle, msgs) {
+  const set = dmWaiters.get(handle);
+  if (!set || set.size === 0) return;
+  for (const w of set) {
+    clearTimeout(w.timer);
+    try { w.resolve(msgs); } catch (_) {}
+  }
+  set.clear();
+}
+
+function verifyInboxSig(req, handle) {
+  // Header: Authorization: SafeBot ts=<ms>,sig=<base64>
+  // Signed blob: `<method> <path> <ts>`
+  const auth = String(req.headers.authorization || '');
+  if (!auth.startsWith('SafeBot ')) return false;
+  const parts = Object.fromEntries(auth.slice(8).split(',').map((kv) => kv.trim().split('=')));
+  const ts = parseInt(parts.ts || '0', 10);
+  const sig = parts.sig || '';
+  if (!ts || !sig) return false;
+  if (Math.abs(Date.now() - ts) > SIG_MAX_SKEW_MS) return false;
+  const rec = identities.get(handle);
+  if (!rec) return false;
+  try {
+    const signPub = Buffer.from(rec.sign_pub, 'base64');
+    if (signPub.length !== 32) return false;
+    const blob = Buffer.from(`${req.method} ${req.path} ${ts}`, 'utf8');
+    return nacl.sign.detached.verify(blob, Buffer.from(sig, 'base64'), signPub);
+  } catch (_) { return false; }
+}
+
 function classifyUA(ua) {
   const s = String(ua || '').toLowerCase();
   if (/mozilla|chrome|safari|firefox|edge/.test(s) && !/python|curl|requests|wget|bot/.test(s)) {
@@ -815,6 +914,118 @@ app.post('/api/report', async (req, res) => {
   fireBugAlert(entry).catch(() => {});
   METRICS.bug_reports_total += 1;
   res.json({ ok: true, id: entry.id });
+});
+
+// --- Identity / DM routes (Phase A) ---------------------------------------
+
+app.post('/api/identity/register', (req, res) => {
+  const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
+  if (!rateLimitOk(ip, 'register')) { res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' }); }
+  const { handle, box_pub, sign_pub, meta } = req.body || {};
+  if (!HANDLE_REGEX.test(String(handle || ''))) return res.status(400).json({ error: 'invalid handle (regex: ^[a-z0-9][a-z0-9_-]{1,31}$)' });
+  if (RESERVED_HANDLES.has(handle)) return res.status(409).json({ error: 'handle reserved' });
+  if (typeof box_pub !== 'string' || typeof sign_pub !== 'string') return res.status(400).json({ error: 'box_pub and sign_pub required (base64 32-byte keys)' });
+  try {
+    if (Buffer.from(box_pub, 'base64').length !== 32 || Buffer.from(sign_pub, 'base64').length !== 32) throw new Error('bad key length');
+  } catch (_) { return res.status(400).json({ error: 'keys must be 32 bytes base64' }); }
+  if (identities.has(handle)) return res.status(409).json({ error: 'handle taken' });
+  const rec = {
+    handle, box_pub, sign_pub,
+    registered_at: Date.now(),
+    meta: (typeof meta === 'object' && meta) ? { bio: String(meta.bio || '').slice(0, 280) } : {},
+  };
+  identities.set(handle, rec);
+  METRICS.identities_registered_total = (METRICS.identities_registered_total || 0) + 1;
+  persistIdentities();
+  res.status(201).json({ ok: true, handle, registered_at: rec.registered_at });
+});
+
+app.get('/api/identity/:handle', (req, res) => {
+  const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
+  const rec = identities.get(handle);
+  if (!rec) return res.status(404).json({ error: 'no such handle' });
+  res.json({
+    handle: rec.handle, box_pub: rec.box_pub, sign_pub: rec.sign_pub,
+    registered_at: rec.registered_at, meta: rec.meta || {},
+  });
+});
+
+// Anyone can POST a DM. Ciphertext is encrypted by the sender to the
+// recipient's box_pub via nacl.box with an ephemeral keypair — server
+// never sees plaintext.
+app.post('/api/dm/:handle', (req, res) => {
+  const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
+  const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
+  if (!rateLimitOk(ip, `dm:${handle}`)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
+  const rec = identities.get(handle);
+  if (!rec) return res.status(404).json({ error: 'no such handle' });
+  const { ciphertext, nonce, sender_eph_pub, from_handle } = req.body || {};
+  if (typeof ciphertext !== 'string' || typeof nonce !== 'string' || typeof sender_eph_pub !== 'string') {
+    return res.status(400).json({ error: 'ciphertext, nonce, sender_eph_pub required (all base64)' });
+  }
+  if (b64BytesLen(ciphertext) > DM_MAX_BYTES) return res.status(400).json({ error: 'ciphertext too large' });
+  try {
+    if (Buffer.from(sender_eph_pub, 'base64').length !== 32) throw new Error();
+    if (Buffer.from(nonce, 'base64').length !== 24) throw new Error();
+  } catch (_) { return res.status(400).json({ error: 'sender_eph_pub must be 32B base64, nonce 24B base64' }); }
+  if (!inboxes.has(handle)) inboxes.set(handle, []);
+  const inbox = inboxes.get(handle);
+  const seq = (rec.inbox_seq = (rec.inbox_seq || Date.now()) + 1);
+  const envelope = {
+    seq, id: crypto.randomUUID(),
+    ciphertext, nonce, sender_eph_pub,
+    from_handle: typeof from_handle === 'string' ? from_handle.slice(0, 34) : null,
+    ts: Date.now(),
+  };
+  inbox.push(envelope);
+  pruneInbox(handle);
+  wakeDmWaiters(handle, [envelope]);
+  METRICS.dm_sent_total = (METRICS.dm_sent_total || 0) + 1;
+  METRICS.bytes_relayed_total += ciphertext.length;
+  res.json({ ok: true, id: envelope.id, seq });
+});
+
+// Owner pulls undelivered DMs. Auth = Ed25519 signature of request line.
+app.get('/api/dm/:handle/inbox/wait', (req, res) => {
+  const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
+  if (!identities.has(handle)) return res.status(404).json({ error: 'no such handle' });
+  if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
+  const after = Math.max(0, parseInt(String(req.query.after || '0'), 10) || 0);
+  const timeout = Math.max(1, Math.min(90, parseInt(String(req.query.timeout || '30'), 10) || 30));
+  pruneInbox(handle);
+  const queue = (inboxes.get(handle) || []).filter((m) => m.seq > after);
+  if (queue.length > 0) return res.json({ messages: queue, last_seq: queue[queue.length - 1].seq });
+  METRICS.dm_waits_total = (METRICS.dm_waits_total || 0) + 1;
+  let finished = false;
+  if (!dmWaiters.has(handle)) dmWaiters.set(handle, new Set());
+  const waiter = {
+    resolve(msgs) {
+      if (finished) return;
+      finished = true;
+      dmWaiters.get(handle)?.delete(waiter);
+      res.json({ messages: msgs || [], last_seq: msgs && msgs.length ? msgs[msgs.length - 1].seq : after });
+    },
+    timer: setTimeout(() => waiter.resolve([]), timeout * 1000),
+  };
+  dmWaiters.get(handle).add(waiter);
+  req.on('close', () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(waiter.timer);
+    dmWaiters.get(handle)?.delete(waiter);
+  });
+});
+
+app.delete('/api/dm/:handle/inbox/:id', (req, res) => {
+  const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
+  if (!identities.has(handle)) return res.status(404).json({ error: 'no such handle' });
+  if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
+  const id = String(req.params.id || '');
+  const inbox = inboxes.get(handle);
+  if (!inbox) return res.json({ ok: true, removed: 0 });
+  const before = inbox.length;
+  inboxes.set(handle, inbox.filter((m) => m.id !== id));
+  res.json({ ok: true, removed: before - inboxes.get(handle).length });
 });
 
 // Agent POST — accepts ciphertext message, rebroadcasts to all subscribers.
