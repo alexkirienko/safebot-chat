@@ -1,0 +1,23 @@
+node_modules/
+.venv/
+.claude/
+
+__pycache__/
+*.pyc
+.DS_Store
+
+# Test artefacts
+tests/screenshots/
+tests/*.output
+/tmp/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+
+# Secrets — belt and suspenders (should never exist in the tree anyway)
+.env
+*.pem
+*.key
+credentials*
