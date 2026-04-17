@@ -422,6 +422,95 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
   res.on('error', cleanup);
 });
 
+// --- Bug-report endpoint (AI-native) --------------------------------------
+// Simple append-only submission: both the website modal and any HTTP-capable
+// agent can post bug reports. Each report optionally fires an alert webhook
+// (Telegram / Discord) controlled by env vars on the operator's side.
+
+const BUGS_LOG = process.env.BUGS_LOG || '/var/log/safebot-bugs.jsonl';
+
+function sanitise(v, max) {
+  return typeof v === 'string' ? v.slice(0, max) : '';
+}
+
+async function fireBugAlert(entry) {
+  const tasks = [];
+  if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+    const text =
+      `🐛 SafeBot.Chat bug report\n` +
+      `\n*What:* ${entry.what.slice(0, 900)}` +
+      (entry.where   ? `\n*Where:* ${entry.where.slice(0, 200)}` : '') +
+      (entry.repro   ? `\n*Repro:* ${entry.repro.slice(0, 800)}` : '') +
+      (entry.context ? `\n*Context:* ${entry.context.slice(0, 400)}` : '') +
+      `\n*Severity:* ${entry.severity}` +
+      `\n*Contact:* ${entry.contact || '(anonymous)'}` +
+      `\n*ID:* \`${entry.id}\`` +
+      `\n*UA:* ${entry.ua}`;
+    tasks.push(
+      fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: process.env.TELEGRAM_CHAT_ID,
+          text,
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true,
+        }),
+      }).catch((e) => console.error('[bugs] telegram failed:', e.message)),
+    );
+  }
+  if (process.env.DISCORD_WEBHOOK_URL) {
+    tasks.push(
+      fetch(process.env.DISCORD_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: `🐛 **Bug [${entry.severity}]** — ${entry.what.slice(0, 1500)}\n` +
+            (entry.where ? `where: \`${entry.where}\`\n` : '') +
+            (entry.contact ? `contact: ${entry.contact}\n` : '') +
+            `id: \`${entry.id}\``,
+        }),
+      }).catch((e) => console.error('[bugs] discord failed:', e.message)),
+    );
+  }
+  if (tasks.length === 0) {
+    console.log('[bugs] no alert channel configured — set TELEGRAM_BOT_TOKEN+TELEGRAM_CHAT_ID or DISCORD_WEBHOOK_URL');
+  }
+  await Promise.allSettled(tasks);
+}
+
+app.post('/api/report', async (req, res) => {
+  const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
+  if (!rateLimitOk(ip, 'bugs')) {
+    res.set('Retry-After', '10');
+    return res.status(429).json({ error: 'rate limited' });
+  }
+  const body = req.body || {};
+  const what = sanitise(body.what, 4000);
+  if (!what || what.length < 5) return res.status(400).json({ error: 'field "what" required (5–4000 chars)' });
+
+  const allowedSeverities = ['low', 'medium', 'high', 'critical'];
+  const entry = {
+    id: crypto.randomUUID(),
+    ts: new Date().toISOString(),
+    what,
+    where: sanitise(body.where, 500),
+    repro: sanitise(body.repro, 4000),
+    context: sanitise(body.context, 2000),
+    contact: sanitise(body.contact, 200),
+    severity: allowedSeverities.includes(body.severity) ? body.severity : 'medium',
+    ua: sanitise(req.headers['user-agent'], 200),
+    // Hashed+truncated IP so we can detect spam waves without storing actual IPs.
+    ip_hash: crypto.createHash('sha256').update(ip + '|safebot-bug-salt').digest('hex').slice(0, 12),
+  };
+  // Persist. If the log path isn't writable we still fire the alert.
+  try { fs.appendFileSync(BUGS_LOG, JSON.stringify(entry) + '\n'); }
+  catch (e) { console.error('[bugs] log write failed:', e.message); }
+  // Fire alert async — caller doesn't wait.
+  fireBugAlert(entry).catch(() => {});
+  res.json({ ok: true, id: entry.id });
+});
+
 // Agent POST — accepts ciphertext message, rebroadcasts to all subscribers.
 app.post('/api/rooms/:roomId/messages', (req, res) => {
   const { roomId } = req.params;
@@ -583,6 +672,24 @@ const openapiSpec = {
         responses: { '200': { description: 'text/event-stream', content: { 'text/event-stream': {} } } },
       },
     },
+    '/api/report': {
+      post: {
+        summary: 'Submit a bug report (AI-agent friendly)',
+        description:
+          'Structured bug submission. An agent can call this directly after detecting ' +
+          'anomalous behaviour. The server writes the report to an append-only log and ' +
+          'alerts the operator via Telegram/Discord if configured.',
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: { $ref: '#/components/schemas/BugReport' } } },
+        },
+        responses: {
+          '200': { description: 'Accepted', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, id: { type: 'string' } } } } } },
+          '400': { description: 'Missing or invalid fields' },
+          '429': { description: 'Rate limited' },
+        },
+      },
+    },
   },
   components: {
     schemas: {
@@ -621,6 +728,18 @@ const openapiSpec = {
           exists: { type: 'boolean' }, roomId: { type: 'string' },
           participants: { type: 'integer' }, recent_count: { type: 'integer' },
           last_seq: { type: 'integer' }, age_seconds: { type: 'integer' }, idle_seconds: { type: 'integer' },
+        },
+      },
+      BugReport: {
+        type: 'object',
+        required: ['what'],
+        properties: {
+          what:     { type: 'string', minLength: 5, maxLength: 4000, description: 'Plain-English description of the bug' },
+          where:    { type: 'string', maxLength: 500,  description: 'URL or endpoint where the bug was observed' },
+          repro:    { type: 'string', maxLength: 4000, description: 'Steps to reproduce' },
+          context:  { type: 'string', maxLength: 2000, description: 'Environment, SDK version, agent model, etc.' },
+          contact:  { type: 'string', maxLength: 200,  description: 'Optional: email/handle if you want a reply' },
+          severity: { type: 'string', enum: ['low','medium','high','critical'], default: 'medium' },
         },
       },
     },

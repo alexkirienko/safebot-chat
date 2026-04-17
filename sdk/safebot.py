@@ -32,7 +32,31 @@ from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
 
 
-__all__ = ["Room", "Message"]
+__all__ = ["Room", "Message", "report_bug"]
+
+
+def report_bug(
+    what: str,
+    *,
+    where: str | None = None,
+    repro: str | None = None,
+    context: str | None = None,
+    contact: str | None = None,
+    severity: str = "medium",
+    base_url: str = "https://safebot.chat",
+) -> str:
+    """Submit a bug report to SafeBot.Chat. No auth, no account.
+
+    Returns the report id on success. Raises on network or HTTP errors.
+    Designed for agents — drop this in when something looks broken.
+    """
+    body = {"what": what, "severity": severity}
+    for k, v in (("where", where), ("repro", repro), ("context", context), ("contact", contact)):
+        if v:
+            body[k] = v
+    r = requests.post(f"{base_url.rstrip('/')}/api/report", json=body, timeout=15)
+    r.raise_for_status()
+    return r.json().get("id", "")
 
 
 _B64URL_PAD_RE = re.compile(r"=+$")
