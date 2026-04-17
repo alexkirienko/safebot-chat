@@ -290,6 +290,12 @@ function renderStatsPage(tokenForFetch) {
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
  body{font:14px/1.5 Geist,system-ui,sans-serif;background:#0B0D14;color:#F2F4FA;margin:0;padding:22px 28px}
+ .chart-row { margin: 20px 0 8px; display:flex; align-items:baseline; justify-content:space-between; gap:14px; flex-wrap:wrap; }
+ .chart-row h2 { font-size:15px; margin:0; }
+ .chart-tabs { display:inline-flex; gap:4px; background:#161A24; border:1px solid #262B39; border-radius:999px; padding:3px; }
+ .chart-tabs button { background:transparent; border:0; color:#AFB6CA; padding:5px 12px; border-radius:999px; font:500 12px Geist,sans-serif; cursor:pointer; letter-spacing:.02em; }
+ .chart-tabs button.active { background:#242A3C; color:#F2F4FA; }
+ #hourly-chart { height:280px; border:1px solid #262B39; border-radius:14px; background:#0E111B; overflow:hidden; }
  h1{font-size:22px;margin:0 0 8px;letter-spacing:-0.01em}
  .muted{color:#7B8299;font-size:12.5px}
  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:20px}
@@ -310,6 +316,18 @@ function renderStatsPage(tokenForFetch) {
 <h1>SafeBot.Chat — ops dashboard <span class="pill"><span class="d"></span>live</span></h1>
 <div class="muted">Auto-refreshes every 10 s. All aggregates are content-free: no keys, no plaintext, no room ids. Sparklines cover the last 24 h in 60-s buckets.</div>
 
+<div class="chart-row">
+  <h2>Usage by hour (last 24 h)</h2>
+  <div class="chart-tabs" id="chart-tabs">
+    <button data-metric="messages" class="active">Messages</button>
+    <button data-metric="rooms">Rooms created</button>
+    <button data-metric="peak_rooms">Concurrent rooms</button>
+    <button data-metric="peak_subs">Concurrent subs</button>
+    <button data-metric="bugs">Bug reports</button>
+  </div>
+</div>
+<div id="hourly-chart"></div>
+
 <div id="cards" class="grid"></div>
 
 <div class="row-group"><h2 style="font-size:15px;margin:0">Counters since boot</h2><span class="muted" id="started">—</span></div>
@@ -318,6 +336,7 @@ function renderStatsPage(tokenForFetch) {
 <div class="row-group"><h2 style="font-size:15px;margin:0">Recent history (last 30 min)</h2></div>
 <table id="history"><thead><tr><th>Time</th><th class="num">Δ msgs</th><th class="num">Δ rooms</th><th class="num">Active rooms</th><th class="num">Active subs</th><th class="num">4xx</th><th class="num">5xx</th><th class="num">429</th></tr></thead><tbody></tbody></table>
 
+<script src="https://unpkg.com/klinecharts@9.8.10/dist/umd/klinecharts.min.js"></script>
 <script>
  const TOKEN = ${JSON.stringify(tokenForFetch)};
  async function fetchMetrics() {
@@ -401,6 +420,85 @@ function renderStatsPage(tokenForFetch) {
  }
  tick();
  setInterval(tick, 10_000);
+
+ // --- Hourly usage chart (KLineCharts, area style) ---------------------
+ let hourlyChart = null;
+ let hourlyData = [];
+ let hourlyMetric = 'messages';
+
+ function ensureChart() {
+   if (hourlyChart) return hourlyChart;
+   hourlyChart = klinecharts.init('hourly-chart', {
+     styles: {
+       grid: { horizontal: { color: '#1E2432' }, vertical: { color: '#1E2432' } },
+       candle: {
+         type: 'area',
+         area: {
+           lineSize: 1.6, lineColor: '#6D7CFF',
+           backgroundColor: [
+             { offset: 0,   color: 'rgba(109,124,255,0.30)' },
+             { offset: 1,   color: 'rgba(109,124,255,0.02)' },
+           ],
+         },
+         priceMark: {
+           last: { show: true, line: { show: true, color: '#6D7CFF' },
+                   text: { show: true, color: '#F2F4FA', backgroundColor: '#6D7CFF', borderColor: '#6D7CFF' } },
+           high: { show: false }, low: { show: false },
+         },
+         tooltip: { showRule: 'always', showType: 'standard' },
+       },
+       xAxis: {
+         axisLine: { color: '#262B39' },
+         tickLine: { color: '#262B39' },
+         tickText: { color: '#7B8299', size: 11 },
+       },
+       yAxis: {
+         axisLine: { color: '#262B39' },
+         tickLine: { color: '#262B39' },
+         tickText: { color: '#7B8299', size: 11 },
+       },
+       crosshair: {
+         horizontal: { line: { color: '#6D7CFF', dashedValue: [3, 3] }, text: { backgroundColor: '#6D7CFF', borderColor: '#6D7CFF' } },
+         vertical:   { line: { color: '#6D7CFF', dashedValue: [3, 3] }, text: { backgroundColor: '#6D7CFF', borderColor: '#6D7CFF' } },
+       },
+       separator: { size: 1, color: '#262B39' },
+     },
+   });
+   return hourlyChart;
+ }
+
+ function rebuildSeries() {
+   ensureChart();
+   const data = hourlyData.map((h) => {
+     const v = Number(h[hourlyMetric] || 0);
+     return { timestamp: h.t, open: v, high: v, low: v, close: v, volume: v };
+   });
+   hourlyChart.applyNewData(data);
+ }
+
+ async function loadHourly() {
+   try {
+     const r = await fetch('/api/metrics/hourly?token=' + encodeURIComponent(TOKEN), { cache: 'no-store' });
+     if (!r.ok) return;
+     const d = await r.json();
+     hourlyData = d.hours || [];
+     rebuildSeries();
+   } catch (_) { /* retry next interval */ }
+ }
+
+ document.querySelectorAll('#chart-tabs button').forEach((b) => {
+   b.addEventListener('click', () => {
+     document.querySelectorAll('#chart-tabs button').forEach((x) => x.classList.remove('active'));
+     b.classList.add('active');
+     hourlyMetric = b.getAttribute('data-metric');
+     rebuildSeries();
+   });
+ });
+
+ loadHourly();
+ setInterval(loadHourly, 60_000);
+
+ window.addEventListener('resize', () => { if (hourlyChart) hourlyChart.resize(); });
 </script>
 </body></html>`;
 }
@@ -710,6 +808,30 @@ app.get('/admin/stats', (req, res) => {
   if (!requireAdmin(req, res)) return;
   res.setHeader('Cache-Control', 'no-store');
   res.type('html').send(renderStatsPage(String(req.query.token || '')));
+});
+
+// Hourly aggregation of the 1-min METRICS_HISTORY ring buffer. Gives the
+// dashboard chart a 24h-by-hour view with deltas-per-hour + peak concurrency.
+app.get('/api/metrics/hourly', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  const byHour = new Map();
+  for (const s of METRICS_HISTORY) {
+    const hourStart = Math.floor(s.t / 3_600_000) * 3_600_000;
+    let b = byHour.get(hourStart);
+    if (!b) {
+      b = { t: hourStart, messages: 0, rooms: 0, bugs: 0, peak_rooms: 0, peak_subs: 0, samples: 0 };
+      byHour.set(hourStart, b);
+    }
+    b.messages += s.d_messages || 0;
+    b.rooms += s.d_rooms || 0;
+    b.bugs += s.d_bugs || 0;
+    b.peak_rooms = Math.max(b.peak_rooms, s.active_rooms || 0);
+    b.peak_subs  = Math.max(b.peak_subs,  s.active_subs  || 0);
+    b.samples += 1;
+  }
+  const hours = Array.from(byHour.values()).sort((a, b) => a.t - b.t);
+  res.json({ hours });
 });
 
 // Serve the Python SDK so the copy-paste snippets in the UI and docs Just Work.
