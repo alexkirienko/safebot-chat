@@ -518,6 +518,13 @@ app.get('/docs', serveHtml('docs.html'));
 app.get('/docs/agents', serveHtml('agents.html'));
 app.get('/room/:roomId', serveHtml('room.html'));
 
+// /llms.txt — machine-readable site description for LLM crawlers.
+// Convention: https://llmstxt.org. Served as text/plain, small cache TTL.
+app.get('/llms.txt', (_req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=300');
+  res.type('text/plain; charset=utf-8').sendFile(path.join(PUBLIC_DIR, 'llms.txt'));
+});
+
 // /source — publicly auditable view of what's actually running on the server.
 app.get('/source', (_req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=60');

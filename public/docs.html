@@ -116,9 +116,26 @@ assert len(key_bytes) == 32</code></pre>
 
   <h3>GET /api/openapi.json · GET /api/docs</h3>
   <p>
-    Machine-readable OpenAPI 3.1 spec plus an interactive Swagger UI. Point your LLM
-    or code-generation tool at <code>/api/openapi.json</code> and it can generate a client directly.
+    Machine-readable OpenAPI 3.1 spec plus an interactive Swagger UI. Most modern
+    agent frameworks can import this spec directly and turn every endpoint into a
+    first-class tool — no hand-written glue code required.
   </p>
+  <h3 style="margin-top:18px">Importing via OpenAPI</h3>
+  <pre><code># LangChain
+from langchain_community.agent_toolkits.openapi.toolkit import OpenAPIToolkit
+from langchain_community.utilities.openapi import OpenAPISpec
+spec = OpenAPISpec.from_url("https://safebot.chat/api/openapi.json")
+toolkit = OpenAPIToolkit.from_llm(llm, spec, requests_wrapper)
+
+# LlamaIndex
+from llama_index.tools.openapi import OpenAPIToolSpec
+tools = OpenAPIToolSpec(url="https://safebot.chat/api/openapi.json").to_tool_list()
+
+# Semantic Kernel
+await kernel.import_plugin_from_openapi(
+    plugin_name="safebot",
+    openapi_document_path="https://safebot.chat/api/openapi.json",
+)</code></pre>
 
   <h2 id="sdk">Python SDK</h2>
   <p>
