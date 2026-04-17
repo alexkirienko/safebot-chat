@@ -48,8 +48,214 @@ for (const label of ['server/index.js', 'sdk/safebot.py', 'public/js/crypto.js',
 }
 const STARTED_AT = new Date().toISOString();
 
+// --- Metrics (admin-only, aggregate, no message content ever) -------------
+const METRICS = {
+  started_at: STARTED_AT,
+  started_ms: Date.now(),
+  // cumulative counters
+  rooms_created_total: 0,
+  rooms_evicted_total: 0,
+  messages_relayed_total: 0,
+  bytes_relayed_total: 0,
+  http_posts_total: 0,
+  http_2xx: 0, http_4xx: 0, http_5xx: 0, http_429: 0,
+  ws_connects_total: 0, ws_disconnects_total: 0,
+  sse_connects_total: 0, sse_disconnects_total: 0,
+  longpoll_waits_total: 0, longpoll_wakes_total: 0, longpoll_timeouts_total: 0,
+  bug_reports_total: 0,
+  transport_browser_total: 0, transport_agent_total: 0,
+  // peaks
+  peak_concurrent_rooms: 0,
+  peak_concurrent_subs: 0,
+};
+// Ring buffer: one snapshot every 60s for 24h = 1440 entries.
+const METRICS_HISTORY = [];
+const METRICS_HISTORY_MAX = 1440;
+let prevSnapshot = null;
+
+function metricsSnapshot() {
+  let totalSubs = 0;
+  for (const r of rooms.values()) totalSubs += r.subs.size;
+  if (rooms.size > METRICS.peak_concurrent_rooms) METRICS.peak_concurrent_rooms = rooms.size;
+  if (totalSubs > METRICS.peak_concurrent_subs) METRICS.peak_concurrent_subs = totalSubs;
+  return {
+    t: Date.now(),
+    active_rooms: rooms.size,
+    active_subs: totalSubs,
+    rooms_created: METRICS.rooms_created_total,
+    rooms_evicted: METRICS.rooms_evicted_total,
+    messages: METRICS.messages_relayed_total,
+    bytes: METRICS.bytes_relayed_total,
+    http_posts: METRICS.http_posts_total,
+    h4xx: METRICS.http_4xx, h5xx: METRICS.http_5xx, h429: METRICS.http_429,
+    ws: METRICS.ws_connects_total,
+    sse: METRICS.sse_connects_total,
+    lp_wakes: METRICS.longpoll_wakes_total,
+    lp_timeouts: METRICS.longpoll_timeouts_total,
+    bugs: METRICS.bug_reports_total,
+  };
+}
+
+setInterval(() => {
+  const snap = metricsSnapshot();
+  // Store deltas vs prev snapshot so /admin/stats can render rates cleanly.
+  if (prevSnapshot) {
+    snap.d_messages = snap.messages - prevSnapshot.messages;
+    snap.d_rooms = snap.rooms_created - prevSnapshot.rooms_created;
+    snap.d_bytes = snap.bytes - prevSnapshot.bytes;
+    snap.d_bugs = snap.bugs - prevSnapshot.bugs;
+  }
+  METRICS_HISTORY.push(snap);
+  while (METRICS_HISTORY.length > METRICS_HISTORY_MAX) METRICS_HISTORY.shift();
+  prevSnapshot = snap;
+}, 60_000).unref?.();
+
+function classifyUA(ua) {
+  const s = String(ua || '').toLowerCase();
+  if (/mozilla|chrome|safari|firefox|edge/.test(s) && !/python|curl|requests|wget|bot/.test(s)) {
+    return 'browser';
+  }
+  return 'agent';
+}
+
+function requireAdmin(req, res) {
+  const want = process.env.METRICS_TOKEN;
+  if (!want) { res.status(503).json({ error: 'metrics disabled (no METRICS_TOKEN configured)' }); return false; }
+  const auth = String(req.headers.authorization || '');
+  const qtok = String(req.query.token || '');
+  const presented = auth.startsWith('Bearer ') ? auth.slice(7) : qtok;
+  if (!presented || presented !== want) { res.status(401).json({ error: 'unauthorised' }); return false; }
+  return true;
+}
+
 function escHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function renderStatsPage(tokenForFetch) {
+  // Self-refreshing dashboard. Fetches /api/metrics?token=... every 10s,
+  // re-renders SVG sparklines client-side. No external deps.
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SafeBot.Chat — ops</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+ body{font:14px/1.5 Geist,system-ui,sans-serif;background:#0B0D14;color:#F2F4FA;margin:0;padding:22px 28px}
+ h1{font-size:22px;margin:0 0 8px;letter-spacing:-0.01em}
+ .muted{color:#7B8299;font-size:12.5px}
+ .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-top:20px}
+ .card{background:#161A24;border:1px solid #262B39;border-radius:14px;padding:14px 16px}
+ .card .lbl{font-size:11.5px;color:#7B8299;text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-bottom:6px}
+ .card .val{font:600 22px/1 Geist,sans-serif;font-variant-numeric:tabular-nums;letter-spacing:-0.015em}
+ .card .sub{color:#AFB6CA;font-size:11.5px;margin-top:4px}
+ .spark{margin-top:8px;width:100%;height:28px}
+ table{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:12.5px;margin-top:22px}
+ th,td{text-align:left;padding:7px 10px;border-bottom:1px solid #262B39}
+ th{color:#7B8299;font-weight:500;text-transform:uppercase;letter-spacing:.06em;font-size:11px}
+ td.num{text-align:right;font-variant-numeric:tabular-nums}
+ .row-group{display:flex;justify-content:space-between;align-items:baseline;margin-top:28px}
+ .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:rgba(34,197,94,.12);color:#66E08E;border:1px solid rgba(34,197,94,.25);font-size:11.5px;font-weight:600}
+ .pill .d{width:6px;height:6px;border-radius:999px;background:currentColor}
+ a{color:#8FA4FF}
+</style></head><body>
+<h1>SafeBot.Chat — ops dashboard <span class="pill"><span class="d"></span>live</span></h1>
+<div class="muted">Auto-refreshes every 10 s. All aggregates are content-free: no keys, no plaintext, no room ids. Sparklines cover the last 24 h in 60-s buckets.</div>
+
+<div id="cards" class="grid"></div>
+
+<div class="row-group"><h2 style="font-size:15px;margin:0">Counters since boot</h2><span class="muted" id="started">—</span></div>
+<table id="raw"></table>
+
+<div class="row-group"><h2 style="font-size:15px;margin:0">Recent history (last 30 min)</h2></div>
+<table id="history"><thead><tr><th>Time</th><th class="num">Δ msgs</th><th class="num">Δ rooms</th><th class="num">Active rooms</th><th class="num">Active subs</th><th class="num">4xx</th><th class="num">5xx</th><th class="num">429</th></tr></thead><tbody></tbody></table>
+
+<script>
+ const TOKEN = ${JSON.stringify(tokenForFetch)};
+ async function fetchMetrics() {
+   const r = await fetch('/api/metrics?token=' + encodeURIComponent(TOKEN), { cache: 'no-store' });
+   if (!r.ok) { document.body.innerHTML = '<h1>401</h1>'; return null; }
+   return r.json();
+ }
+ function human(n) { n = Number(n) || 0; if (n >= 1e9) return (n/1e9).toFixed(2)+'B'; if (n >= 1e6) return (n/1e6).toFixed(2)+'M'; if (n >= 1e3) return (n/1e3).toFixed(1)+'k'; return String(n); }
+ function bytes(n) { n = Number(n) || 0; if (n >= 1073741824) return (n/1073741824).toFixed(2)+' GiB'; if (n >= 1048576) return (n/1048576).toFixed(1)+' MiB'; if (n >= 1024) return (n/1024).toFixed(1)+' KiB'; return n+' B'; }
+ function uptime(s) { const d = Math.floor(s/86400); s%=86400; const h = Math.floor(s/3600); s%=3600; const m = Math.floor(s/60); return (d?d+'d ':'') + String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); }
+
+ function sparkline(values, color) {
+   if (!values.length) return '';
+   const W = 220, H = 28, pad = 2;
+   const max = Math.max(1, ...values), min = Math.min(0, ...values);
+   const step = values.length > 1 ? (W - pad*2) / (values.length - 1) : 0;
+   const pts = values.map((v, i) => {
+     const x = pad + i * step;
+     const y = H - pad - ((v - min) / Math.max(1, max - min)) * (H - pad*2);
+     return x.toFixed(1) + ',' + y.toFixed(1);
+   }).join(' ');
+   return '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none"><polyline fill="none" stroke="' + color + '" stroke-width="1.8" points="' + pts + '"/></svg>';
+ }
+
+ function renderCards(m) {
+   const cards = [
+     { lbl: 'Active rooms', val: m.active_rooms, sub: 'peak ' + m.peak_concurrent_rooms, key: 'active_rooms', color: '#6D7CFF' },
+     { lbl: 'Active subscribers', val: m.active_subs, sub: 'peak ' + m.peak_concurrent_subs, key: 'active_subs', color: '#22D3EE' },
+     { lbl: 'Messages relayed', val: human(m.messages_relayed_total), sub: bytes(m.bytes_relayed_total) + ' ciphertext', key: 'messages', delta: true, color: '#10B981' },
+     { lbl: 'Rooms created', val: human(m.rooms_created_total), sub: m.rooms_evicted_total + ' evicted', key: 'rooms_created', delta: true, color: '#8B5CF6' },
+     { lbl: 'HTTP 5xx', val: m.http_5xx, sub: m.http_4xx + ' · 4xx', key: 'h5xx', color: '#EF4444' },
+     { lbl: 'Rate-limit 429', val: m.http_429, sub: '', key: 'h429', color: '#F59E0B' },
+     { lbl: 'WS connects', val: human(m.ws_connects_total), sub: m.ws_disconnects_total + ' closes', key: 'ws', color: '#EC4899' },
+     { lbl: 'SSE connects', val: human(m.sse_connects_total), sub: '', key: 'sse', color: '#3B82F6' },
+     { lbl: 'Long-poll wakes', val: human(m.longpoll_wakes_total), sub: m.longpoll_timeouts_total + ' timeouts', key: 'lp_wakes', color: '#14B8A6' },
+     { lbl: 'Bug reports', val: m.bug_reports_total, sub: '→ Telegram', key: 'bugs', delta: true, color: '#F472B6' },
+     { lbl: 'Browser / Agent POSTs', val: m.transport_browser_total + ' / ' + m.transport_agent_total, sub: '', color: '#A78BFA' },
+     { lbl: 'Uptime', val: uptime(m.uptime_seconds), sub: m.started_at.slice(0,19)+'Z', color: '#6D7CFF' },
+   ];
+   const hist = m.history || [];
+   const el = document.getElementById('cards');
+   el.innerHTML = cards.map((c) => {
+     const series = c.key ? hist.map((s) => c.delta ? (s['d_' + c.key.replace('rooms_created','rooms').replace('messages','messages').replace('bugs','bugs')] ?? 0) : (s[c.key] ?? 0)) : [];
+     const spark = series.length > 1 ? sparkline(series.slice(-60), c.color) : '';
+     return '<div class="card"><div class="lbl">' + c.lbl + '</div><div class="val">' + c.val + '</div><div class="sub">' + (c.sub||'') + '</div>' + spark + '</div>';
+   }).join('');
+   document.getElementById('started').textContent = 'Started ' + m.started_at + ' · node ' + (m.node_version||'');
+ }
+
+ function renderRaw(m) {
+   const rows = [
+     ['rooms_created_total', m.rooms_created_total], ['rooms_evicted_total', m.rooms_evicted_total],
+     ['messages_relayed_total', m.messages_relayed_total], ['bytes_relayed_total', m.bytes_relayed_total],
+     ['http_posts_total', m.http_posts_total], ['http_2xx', m.http_2xx], ['http_4xx', m.http_4xx], ['http_5xx', m.http_5xx], ['http_429', m.http_429],
+     ['ws_connects_total', m.ws_connects_total], ['ws_disconnects_total', m.ws_disconnects_total],
+     ['sse_connects_total', m.sse_connects_total], ['sse_disconnects_total', m.sse_disconnects_total],
+     ['longpoll_waits_total', m.longpoll_waits_total], ['longpoll_wakes_total', m.longpoll_wakes_total], ['longpoll_timeouts_total', m.longpoll_timeouts_total],
+     ['bug_reports_total', m.bug_reports_total],
+     ['transport_browser_total', m.transport_browser_total], ['transport_agent_total', m.transport_agent_total],
+     ['peak_concurrent_rooms', m.peak_concurrent_rooms], ['peak_concurrent_subs', m.peak_concurrent_subs],
+   ];
+   document.getElementById('raw').innerHTML = '<thead><tr><th>Counter</th><th class="num">Value</th></tr></thead><tbody>'
+     + rows.map((r) => '<tr><td>' + r[0] + '</td><td class="num">' + r[1] + '</td></tr>').join('') + '</tbody>';
+ }
+
+ function renderHistory(m) {
+   const h = (m.history || []).slice(-30).reverse();
+   const tb = document.querySelector('#history tbody');
+   tb.innerHTML = h.map((s) => {
+     const t = new Date(s.t).toISOString().slice(11, 19);
+     return '<tr><td>' + t + '</td><td class="num">' + (s.d_messages||0) + '</td><td class="num">' + (s.d_rooms||0) + '</td><td class="num">' + s.active_rooms + '</td><td class="num">' + s.active_subs + '</td><td class="num">' + s.h4xx + '</td><td class="num">' + s.h5xx + '</td><td class="num">' + s.h429 + '</td></tr>';
+   }).join('');
+ }
+
+ async function tick() {
+   const m = await fetchMetrics();
+   if (!m) return;
+   renderCards(m);
+   renderRaw(m);
+   renderHistory(m);
+ }
+ tick();
+ setInterval(tick, 10_000);
+</script>
+</body></html>`;
 }
 function renderSourcePage() {
   const rows = Object.entries(SOURCE_HASHES).map(([k, v]) =>
@@ -162,6 +368,7 @@ function getOrCreateRoom(roomId) {
       lastActive: now, createdAt: now, nextSeq: now,
     };
     rooms.set(roomId, room);
+    METRICS.rooms_created_total += 1;
   }
   return room;
 }
@@ -238,13 +445,21 @@ app.use((_req, res, next) => {
 });
 
 // Tiny, non-chatty access logger — only routes, no bodies, no query strings,
-// and no room IDs (both /room/:id and /api/rooms/:id/* are collapsed).
-app.use((req, _res, next) => {
+// and no room IDs (both /room/:id and /api/rooms/:id/* are collapsed). Also
+// tallies HTTP status classes for /admin/stats.
+app.use((req, res, next) => {
   let stripped = req.path;
   if (stripped.startsWith('/api/rooms/')) stripped = '/api/rooms/:id/*';
   else if (stripped.startsWith('/room/')) stripped = '/room/:id';
   // eslint-disable-next-line no-console
   console.log(`[${new Date().toISOString()}] ${req.method} ${stripped}`);
+  res.on('finish', () => {
+    const s = res.statusCode;
+    if (s >= 500) METRICS.http_5xx += 1;
+    else if (s === 429) METRICS.http_429 += 1;
+    else if (s >= 400) METRICS.http_4xx += 1;
+    else METRICS.http_2xx += 1;
+  });
   next();
 });
 
@@ -307,6 +522,28 @@ app.get('/room/:roomId', serveHtml('room.html'));
 app.get('/source', (_req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=60');
   res.type('html').send(renderSourcePage());
+});
+
+// --- Admin metrics endpoints (Bearer token via METRICS_TOKEN env) ---------
+app.get('/api/metrics', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  let subs = 0;
+  for (const r of rooms.values()) subs += r.subs.size;
+  res.json({
+    ...METRICS,
+    active_rooms: rooms.size,
+    active_subs: subs,
+    uptime_seconds: Math.floor(process.uptime()),
+    ts: Date.now(),
+    history: METRICS_HISTORY,
+  });
+});
+
+app.get('/admin/stats', (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  res.type('html').send(renderStatsPage(String(req.query.token || '')));
 });
 
 // Serve the Python SDK so the copy-paste snippets in the UI and docs Just Work.
@@ -385,6 +622,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
   room.subs.add(sub);
   room.lastActive = Date.now();
   broadcast(room, { type: 'presence', size: room.subs.size });
+  METRICS.sse_connects_total += 1;
 
   const keepalive = setInterval(() => {
     // If the underlying socket is gone, mark the sub dead and clean it up
@@ -508,6 +746,7 @@ app.post('/api/report', async (req, res) => {
   catch (e) { console.error('[bugs] log write failed:', e.message); }
   // Fire alert async — caller doesn't wait.
   fireBugAlert(entry).catch(() => {});
+  METRICS.bug_reports_total += 1;
   res.json({ ok: true, id: entry.id });
 });
 
@@ -531,6 +770,11 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
   pruneRecent(room);
   room.lastActive = Date.now();
   broadcast(room, { type: 'message', ...msg });
+  METRICS.messages_relayed_total += 1;
+  METRICS.bytes_relayed_total += (msg.ciphertext ? msg.ciphertext.length : 0);
+  METRICS.http_posts_total += 1;
+  if (classifyUA(req.headers['user-agent']) === 'browser') METRICS.transport_browser_total += 1;
+  else METRICS.transport_agent_total += 1;
   res.json({ ok: true, id: msg.id, seq: msg.seq });
 });
 
@@ -588,12 +832,15 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
   }
 
   // Otherwise, park the connection until a new message arrives or we time out.
+  METRICS.longpoll_waits_total += 1;
   let finished = false;
   const waiter = {
     resolve(msgs) {
       if (finished) return;
       finished = true;
       room.waiters.delete(waiter);
+      if (msgs && msgs.length) METRICS.longpoll_wakes_total += 1;
+      else METRICS.longpoll_timeouts_total += 1;
       res.json({ messages: msgs || [], last_seq: room.nextSeq - 1 });
     },
     timer: setTimeout(() => waiter.resolve([]), timeout * 1000),
@@ -804,6 +1051,7 @@ function handleWs(ws, roomId) {
   room.subs.add(sub);
   room.lastActive = Date.now();
   broadcast(room, { type: 'presence', size: room.subs.size });
+  METRICS.ws_connects_total += 1;
 
   ws.on('message', (data) => {
     let msg;
@@ -820,12 +1068,16 @@ function handleWs(ws, roomId) {
     pruneRecent(room);
     room.lastActive = Date.now();
     broadcast(room, { type: 'message', ...out });
+    METRICS.messages_relayed_total += 1;
+    METRICS.bytes_relayed_total += (out.ciphertext ? out.ciphertext.length : 0);
+    METRICS.transport_browser_total += 1;
   });
 
   ws.on('close', () => {
     room.subs.delete(sub);
     room.lastActive = Date.now();
     broadcast(room, { type: 'presence', size: room.subs.size });
+    METRICS.ws_disconnects_total += 1;
   });
   ws.on('error', () => { try { ws.close(); } catch (_) {} });
 }
@@ -837,6 +1089,7 @@ setInterval(() => {
   for (const [id, room] of rooms) {
     if (room.subs.size === 0 && now - room.lastActive > ROOM_GRACE_MS) {
       rooms.delete(id);
+      METRICS.rooms_evicted_total += 1;
     } else {
       pruneRecent(room);
     }
