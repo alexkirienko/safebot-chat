@@ -617,4 +617,150 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
+
+  // --- Save chat (client-side transcript export) -----------------------
+  const saveBtn = document.getElementById('save-chat');
+  const saveMenu = document.getElementById('save-menu');
+  if (saveBtn && saveMenu) {
+    function openSaveMenu() {
+      const r = saveBtn.getBoundingClientRect();
+      saveMenu.classList.add('is-open');
+      // Align right edge with button's right edge; keep 8px inside viewport.
+      const width = Math.min(300, Math.floor(window.innerWidth * 0.92));
+      const right = Math.max(8, window.innerWidth - r.right);
+      saveMenu.style.right = right + 'px';
+      saveMenu.style.left = 'auto';
+      saveMenu.style.top = (window.scrollY + r.bottom + 6) + 'px';
+      saveMenu.style.width = width + 'px';
+      saveBtn.setAttribute('aria-expanded', 'true');
+    }
+    function closeSaveMenu() {
+      saveMenu.classList.remove('is-open');
+      saveBtn.setAttribute('aria-expanded', 'false');
+    }
+    saveBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (saveMenu.classList.contains('is-open')) closeSaveMenu(); else openSaveMenu();
+    });
+    document.addEventListener('click', (ev) => {
+      if (!saveMenu.classList.contains('is-open')) return;
+      if (saveMenu.contains(ev.target) || saveBtn.contains(ev.target)) return;
+      closeSaveMenu();
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && saveMenu.classList.contains('is-open')) closeSaveMenu();
+    });
+    saveMenu.querySelectorAll('.save-menu__btn').forEach((b) => {
+      b.addEventListener('click', async () => {
+        const fmt = b.getAttribute('data-format');
+        closeSaveMenu();
+        saveBtn.disabled = true;
+        try { await exportTranscript(fmt); } finally { saveBtn.disabled = false; }
+      });
+    });
+  }
+
+  async function collectTranscript() {
+    const r = await fetch(`/api/rooms/${roomId}/transcript?after=0&limit=500`, { cache: 'no-store' });
+    if (!r.ok) throw new Error('transcript fetch failed: ' + r.status);
+    const data = await r.json();
+    const envs = data.messages || [];
+    const seen = new Set();
+    const out = [];
+    for (const m of envs) {
+      if (!m.id || seen.has(m.id)) continue;
+      const text = C.decrypt(key, m.ciphertext, m.nonce);
+      if (text === null) continue; // skip wrong-key envelopes silently
+      seen.add(m.id);
+      out.push({
+        id: m.id,
+        seq: Number(m.seq || 0),
+        sender: m.sender || 'agent',
+        ts: Number(m.ts || 0),
+        text,
+        isSelf: m.sender === me,
+      });
+    }
+    out.sort((a, b) => a.seq - b.seq);
+    return out;
+  }
+
+  function fmtHM(ts) {
+    const d = new Date(ts || Date.now());
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  function fmtISO(ts) { return new Date(ts || Date.now()).toISOString(); }
+  function fmtStamp() {
+    const d = new Date();
+    const z = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}T${z(d.getHours())}-${z(d.getMinutes())}`;
+  }
+
+  function formatAsTxt(msgs, meta) {
+    const header = [
+      `# SafeBot.Chat transcript`,
+      `# room:        ${meta.url}`,
+      `# fingerprint: ${meta.fingerprint}`,
+      `# exported:    ${meta.exportedAt}`,
+      `# messages:    ${msgs.length} (limited to the last 200 / 60 min server buffer)`,
+      ``,
+    ].join('\n');
+    const body = msgs.map((m) => `[${fmtHM(m.ts)}] ${m.sender}: ${m.text}`).join('\n');
+    return header + body + (body ? '\n' : '');
+  }
+  function formatAsMd(msgs, meta) {
+    const header = [
+      `---`,
+      `room: ${meta.url}`,
+      `fingerprint: ${meta.fingerprint}`,
+      `exported: ${meta.exportedAt}`,
+      `messages: ${msgs.length}`,
+      `note: limited to the last 200 messages / 60 min server buffer`,
+      `---`,
+      ``,
+      `# SafeBot.Chat transcript`,
+      ``,
+    ].join('\n');
+    const body = msgs.map((m) =>
+      `**${m.sender}** · ${fmtHM(m.ts)}\n\n${m.text}\n\n---\n`
+    ).join('\n');
+    return header + body;
+  }
+  function formatAsJson(msgs, meta) {
+    return JSON.stringify({
+      roomId,
+      roomUrl: meta.url,
+      fingerprint: meta.fingerprint,
+      exportedAt: meta.exportedAt,
+      messageCount: msgs.length,
+      note: 'limited to the last 200 messages / 60 min server buffer',
+      messages: msgs.map((m) => ({
+        id: m.id, seq: m.seq, sender: m.sender, ts: fmtISO(m.ts), text: m.text, isSelf: m.isSelf,
+      })),
+    }, null, 2);
+  }
+
+  async function exportTranscript(format) {
+    let msgs;
+    try { msgs = await collectTranscript(); }
+    catch (e) { showToast('Could not load transcript', false); return; }
+    if (!msgs.length) { showToast('Nothing to save — transcript empty', false); return; }
+
+    const fp = (await C.fingerprint(key)).match(/.{1,4}/g).join(' ');
+    const meta = { url: location.href, fingerprint: fp, exportedAt: new Date().toISOString() };
+    let body, mime;
+    if (format === 'md')        { body = formatAsMd(msgs, meta);   mime = 'text/markdown;charset=utf-8'; }
+    else if (format === 'json') { body = formatAsJson(msgs, meta); mime = 'application/json;charset=utf-8'; }
+    else                        { body = formatAsTxt(msgs, meta);  mime = 'text/plain;charset=utf-8'; format = 'txt'; }
+
+    const blob = new Blob([body], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `safebot-chat-${roomId}-${fmtStamp()}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
+    showToast(`Chat saved · ${msgs.length} message${msgs.length === 1 ? '' : 's'}`, true);
+  }
 })();

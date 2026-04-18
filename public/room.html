@@ -22,6 +22,16 @@
  .mention-pop .row.is-inactive { color:#7B8299; }
  .mention-pop .row .dot { width:6px; height:6px; border-radius:999px; background:#66E08E; }
  .mention-pop .row.is-inactive .dot { background:#4A5164; }
+ .save-menu { position:absolute; z-index:60; width:min(300px, 92vw); background:#161A24; border:1px solid #262B39;
+   border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,.5); padding:8px; font:500 13px Geist,sans-serif;
+   display:none; }
+ .save-menu.is-open { display:block; }
+ .save-menu__head { color:#AFB6CA; font-size:11px; letter-spacing:.04em; text-transform:uppercase; padding:4px 8px 6px; }
+ .save-menu__btn { display:flex; width:100%; align-items:center; gap:10px; padding:9px 10px; border-radius:8px;
+   background:transparent; border:0; color:#F2F4FA; text-align:left; cursor:pointer; font:500 13px Geist,sans-serif; }
+ .save-menu__btn:hover, .save-menu__btn:focus-visible { background:#242A3C; outline:none; }
+ .save-menu__btn .ext { color:#7B8299; font:600 11px JetBrains\ Mono,monospace; margin-left:auto; }
+ .save-menu__hint { color:#7B8299; font-size:11px; padding:8px 8px 2px; border-top:1px solid #262B39; margin-top:6px; line-height:1.45; }
 </style>
 </head>
 <body class="room-body">
@@ -38,6 +48,7 @@
     <symbol id="ic-close" viewBox="0 0 24 24"><path d="M6 6 18 18M18 6 6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
     <symbol id="ic-code" viewBox="0 0 24 24"><path d="m8 8-5 4 5 4m8-8 5 4-5 4M14 4l-4 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="ic-check" viewBox="0 0 24 24"><path d="m5 12 4 4 10-10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="ic-download" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   </defs>
 </svg>
 
@@ -72,6 +83,10 @@
       <svg width="14" height="14"><use href="#ic-link"/></svg>
       <span class="label-desktop">Copy invite</span>
     </button>
+    <button class="ghost-btn" id="save-chat" title="Save chat transcript locally" aria-haspopup="menu" aria-expanded="false">
+      <svg width="14" height="14"><use href="#ic-download"/></svg>
+      <span class="label-desktop">Save</span>
+    </button>
     <button class="ghost-btn topbar-people-btn" id="topbar-people" title="Participants" aria-label="Toggle participants">
       <svg width="14" height="14"><use href="#ic-people"/></svg>
     </button>
@@ -81,6 +96,15 @@
     </a>
   </div>
 </header>
+
+<!-- Save-chat popover (absolutely-positioned under #save-chat) -->
+<div class="save-menu" id="save-menu" role="menu" aria-labelledby="save-chat">
+  <div class="save-menu__head">Export transcript</div>
+  <button class="save-menu__btn" data-format="txt" role="menuitem">Plain text<span class="ext">.txt</span></button>
+  <button class="save-menu__btn" data-format="md" role="menuitem">Markdown<span class="ext">.md</span></button>
+  <button class="save-menu__btn" data-format="json" role="menuitem">JSON<span class="ext">.json</span></button>
+  <div class="save-menu__hint">File contains decrypted plaintext. Server never sees it. Limited to the last 200 messages / 60 min still in server memory.</div>
+</div>
 
 <!-- Main -->
 <main class="room-main" id="room-main">
