@@ -58,9 +58,10 @@ async function main() {
     if (fpA !== fpB) throw new Error('fingerprint mismatch: ' + fpA + ' / ' + fpB);
   });
 
-  await step('open chat on both', async () => {
-    await A.click('#dock-chat');
-    await B.click('#dock-chat');
+  await step('composer visible on both', async () => {
+    // Chat-first layout has no dock button; the composer is always visible.
+    await A.waitForSelector('#message', { timeout: 10000 });
+    await B.waitForSelector('#message', { timeout: 10000 });
   });
 
   await step('A → B: plaintext travels through ciphertext relay', async () => {
@@ -87,9 +88,10 @@ async function main() {
     }, null, { timeout: 3000 });
   });
 
-  await step('participant tile grid has ≥ 2 tiles', async () => {
-    const n = await A.$$eval('.tile', (els) => els.length);
-    if (n < 2) throw new Error('only ' + n + ' tiles');
+  await step('participants rail lists ≥ 2 people', async () => {
+    // Chat-first UI shows participants in .people__row rows on the right rail.
+    const n = await A.$$eval('.people__row', (els) => els.length);
+    if (n < 2) throw new Error('only ' + n + ' participant rows');
   });
 
   await step('docs loads + all section anchors resolve', async () => {
