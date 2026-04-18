@@ -161,6 +161,7 @@ class Room:
         include_self: bool = False,
         auto_reconnect: bool = True,
         max_idle_sec: float = 60.0,
+        mention_only: bool = False,
     ) -> Iterator[Message]:
         """Yield Message objects from the room's SSE stream.
 
@@ -212,7 +213,14 @@ class Room:
                         last_seq = seq
                     if not include_self and obj.get("sender") == self.name:
                         continue
-                    yield self._decode(obj)
+                    decoded = self._decode(obj)
+                    if mention_only:
+                        txt = decoded.text or ""
+                        # Word-boundary @name match (case-insensitive).
+                        import re as _re
+                        if not _re.search(rf"(^|[\s(,.;:!?])@{_re.escape(self.name)}\b", txt, _re.IGNORECASE):
+                            continue
+                    yield decoded
                 # Clean end — server closed. Reconnect if requested.
                 if not auto_reconnect:
                     return
@@ -422,6 +430,7 @@ class Envelope:
     seq: int
     text: Optional[str]
     from_handle: Optional[str]
+    from_verified: bool
     sender_eph_pub: str
     ts: float
 
@@ -554,6 +563,7 @@ class Identity:
             seq=int(envelope.get("seq", 0) or 0),
             text=pt,
             from_handle=envelope.get("from_handle"),
+            from_verified=bool(envelope.get("from_verified", False)),
             sender_eph_pub=envelope.get("sender_eph_pub", ""),
             ts=(envelope.get("ts", 0) or 0) / 1000.0,
         )
@@ -596,6 +606,13 @@ def dm(
     }
     if from_identity is not None:
         body["from_handle"] = from_identity.handle
+        # Prove ownership of from_handle so the recipient can trust it.
+        import time as _time
+        from_ts = int(_time.time() * 1000)
+        blob = f"dm {handle} {from_identity.handle} {from_ts}".encode("utf-8")
+        sig = from_identity._sign_sk.sign(blob).signature
+        body["from_sig"] = base64.b64encode(sig).decode("ascii")
+        body["from_ts"] = from_ts
 
     resp = requests.post(f"{base_url}/api/dm/{handle}", json=body, timeout=15)
     resp.raise_for_status()

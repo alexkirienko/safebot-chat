@@ -98,10 +98,20 @@ function loadPersistedMetrics() {
 }
 
 const METRICS = loadPersistedMetrics();
-// Ring buffer: one snapshot every 60s for 24h = 1440 entries.
-const METRICS_HISTORY = [];
+// Ring buffer: one snapshot every 60s for 24h = 1440 entries. Persisted to
+// disk so the hourly chart survives deploys.
+const METRICS_HISTORY_PATH = process.env.METRICS_HISTORY_PATH || '/var/lib/safebot/metrics_history.json';
 const METRICS_HISTORY_MAX = 1440;
-let prevSnapshot = null;
+function loadPersistedHistory() {
+  try {
+    const arr = JSON.parse(fs.readFileSync(METRICS_HISTORY_PATH, 'utf8'));
+    if (!Array.isArray(arr)) return [];
+    const cutoff = Date.now() - 24 * 3_600_000;
+    return arr.filter((s) => s && typeof s.t === 'number' && s.t >= cutoff);
+  } catch (_) { return []; }
+}
+const METRICS_HISTORY = loadPersistedHistory();
+let prevSnapshot = METRICS_HISTORY.length ? METRICS_HISTORY[METRICS_HISTORY.length - 1] : null;
 
 function persistMetrics() {
   try {
@@ -110,6 +120,9 @@ function persistMetrics() {
     const tmp = METRICS_STATE_PATH + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(METRICS));
     fs.renameSync(tmp, METRICS_STATE_PATH);
+    const htmp = METRICS_HISTORY_PATH + '.tmp';
+    fs.writeFileSync(htmp, JSON.stringify(METRICS_HISTORY));
+    fs.renameSync(htmp, METRICS_HISTORY_PATH);
   } catch (e) {
     console.error('[metrics] persist failed:', e.message);
   }
@@ -144,6 +157,21 @@ function metricsSnapshot() {
   };
 }
 
+function takeSample() {
+  const snap = metricsSnapshot();
+  if (prevSnapshot) {
+    snap.d_messages = snap.messages - prevSnapshot.messages;
+    snap.d_rooms = snap.rooms_created - prevSnapshot.rooms_created;
+    snap.d_bytes = snap.bytes - prevSnapshot.bytes;
+    snap.d_bugs = snap.bugs - prevSnapshot.bugs;
+  }
+  METRICS_HISTORY.push(snap);
+  while (METRICS_HISTORY.length > METRICS_HISTORY_MAX) METRICS_HISTORY.shift();
+  prevSnapshot = snap;
+}
+// Take one sample 5s after boot so the chart has a real point without
+// waiting a full minute.
+setTimeout(takeSample, 5_000).unref?.();
 setInterval(() => {
   const snap = metricsSnapshot();
   // Store deltas vs prev snapshot so /admin/stats can render rates cleanly.
@@ -210,6 +238,14 @@ function persistIdentities() {
 }
 loadIdentities();
 setInterval(persistIdentities, 60_000).unref?.();
+// Debounced persist: any mutation (identity.inbox_seq bump, register) schedules
+// a flush within 2s so a restart doesn't roll back DM inbox seq.
+let _persistTimer = null;
+function schedulePersistIdentities() {
+  if (_persistTimer) return;
+  _persistTimer = setTimeout(() => { _persistTimer = null; persistIdentities(); }, 2_000);
+  _persistTimer.unref?.();
+}
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => { try { persistIdentities(); } catch (_) {} });
 }
@@ -231,10 +267,13 @@ function wakeDmWaiters(handle, msgs) {
   const set = dmWaiters.get(handle);
   if (!set || set.size === 0) return;
   for (const w of set) {
+    const after = w.after || 0;
+    const filtered = after > 0 ? msgs.filter((m) => m.seq > after) : msgs;
+    if (filtered.length === 0) continue;
     clearTimeout(w.timer);
-    try { w.resolve(msgs); } catch (_) {}
+    try { w.resolve(filtered); } catch (_) {}
+    set.delete(w);
   }
-  set.clear();
 }
 
 function verifyInboxSig(req, handle) {
@@ -242,7 +281,11 @@ function verifyInboxSig(req, handle) {
   // Signed blob: `<method> <path> <ts>`
   const auth = String(req.headers.authorization || '');
   if (!auth.startsWith('SafeBot ')) return false;
-  const parts = Object.fromEntries(auth.slice(8).split(',').map((kv) => kv.trim().split('=')));
+  const parts = Object.fromEntries(auth.slice(8).split(',').map((kv) => {
+    kv = kv.trim();
+    const i = kv.indexOf('=');
+    return i < 0 ? [kv, ''] : [kv.slice(0, i), kv.slice(i + 1)];
+  }));
   const ts = parseInt(parts.ts || '0', 10);
   const sig = parts.sig || '';
   if (!ts || !sig) return false;
@@ -313,7 +356,7 @@ function renderStatsPage(tokenForFetch) {
  .pill .d{width:6px;height:6px;border-radius:999px;background:currentColor}
  a{color:#8FA4FF}
 </style></head><body>
-<h1>SafeBot.Chat — ops dashboard <span class="pill"><span class="d"></span>live</span></h1>
+<h1>SafeBot.Chat — ops dashboard <span class="pill"><span class="d"></span>live</span> <span id="updated" class="muted" style="font-size:12px;font-weight:400">—</span></h1>
 <div class="muted">Auto-refreshes every 10 s. All aggregates are content-free: no keys, no plaintext, no room ids. Sparklines cover the last 24 h in 60-s buckets.</div>
 
 <div class="chart-row">
@@ -336,7 +379,7 @@ function renderStatsPage(tokenForFetch) {
 <div class="row-group"><h2 style="font-size:15px;margin:0">Recent history (last 30 min)</h2></div>
 <table id="history"><thead><tr><th>Time</th><th class="num">Δ msgs</th><th class="num">Δ rooms</th><th class="num">Active rooms</th><th class="num">Active subs</th><th class="num">4xx</th><th class="num">5xx</th><th class="num">429</th></tr></thead><tbody></tbody></table>
 
-<script src="https://unpkg.com/klinecharts@9.8.10/dist/umd/klinecharts.min.js"></script>
+<script src="/vendor/klinecharts.min.js"></script>
 <script>
  const TOKEN = ${JSON.stringify(tokenForFetch)};
  async function fetchMetrics() {
@@ -411,15 +454,23 @@ function renderStatsPage(tokenForFetch) {
    }).join('');
  }
 
+ let lastTickAt = 0;
  async function tick() {
    const m = await fetchMetrics();
    if (!m) return;
    renderCards(m);
    renderRaw(m);
    renderHistory(m);
+   lastTickAt = Date.now();
+ }
+ function renderUpdated() {
+   const el = document.getElementById('updated'); if (!el || !lastTickAt) return;
+   const s = Math.floor((Date.now() - lastTickAt) / 1000);
+   el.textContent = '· updated ' + s + 's ago';
  }
  tick();
  setInterval(tick, 10_000);
+ setInterval(renderUpdated, 1_000);
 
  // --- Hourly usage chart (KLineCharts, area style) ---------------------
  let hourlyChart = null;
@@ -830,6 +881,16 @@ app.get('/api/metrics/hourly', (req, res) => {
     b.peak_subs  = Math.max(b.peak_subs,  s.active_subs  || 0);
     b.samples += 1;
   }
+  // Backfill the last 24 hours with zero-buckets so the chart always has a
+  // visible span, even right after a restart. Single-point area charts in
+  // KLineCharts render as nothing.
+  const nowHour = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+  for (let i = 23; i >= 0; i--) {
+    const t = nowHour - i * 3_600_000;
+    if (!byHour.has(t)) {
+      byHour.set(t, { t, messages: 0, rooms: 0, bugs: 0, peak_rooms: 0, peak_subs: 0, samples: 0 });
+    }
+  }
   const hours = Array.from(byHour.values()).sort((a, b) => a.t - b.t);
   res.json({ hours });
 });
@@ -959,19 +1020,25 @@ function sanitise(v, max) {
   return typeof v === 'string' ? v.slice(0, max) : '';
 }
 
+// Escape Markdown special characters so user-controlled fields can't break
+// out of our template (e.g. smuggle a phony `[link](…)` or unterminated
+// code fence into the operator's chat).
+function escMd(s) {
+  return String(s || '').replace(/[_*`\[\]()~>#+\-=|{}.!\\]/g, (c) => '\\' + c);
+}
 async function fireBugAlert(entry) {
   const tasks = [];
   if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
     const text =
       `🐛 SafeBot.Chat bug report\n` +
-      `\n*What:* ${entry.what.slice(0, 900)}` +
-      (entry.where   ? `\n*Where:* ${entry.where.slice(0, 200)}` : '') +
-      (entry.repro   ? `\n*Repro:* ${entry.repro.slice(0, 800)}` : '') +
-      (entry.context ? `\n*Context:* ${entry.context.slice(0, 400)}` : '') +
-      `\n*Severity:* ${entry.severity}` +
-      `\n*Contact:* ${entry.contact || '(anonymous)'}` +
+      `\n*What:* ${escMd(entry.what.slice(0, 900))}` +
+      (entry.where   ? `\n*Where:* ${escMd(entry.where.slice(0, 200))}` : '') +
+      (entry.repro   ? `\n*Repro:* ${escMd(entry.repro.slice(0, 800))}` : '') +
+      (entry.context ? `\n*Context:* ${escMd(entry.context.slice(0, 400))}` : '') +
+      `\n*Severity:* ${escMd(entry.severity)}` +
+      `\n*Contact:* ${escMd(entry.contact || '(anonymous)')}` +
       `\n*ID:* \`${entry.id}\`` +
-      `\n*UA:* ${entry.ua}`;
+      `\n*UA:* ${escMd(entry.ua)}`;
     tasks.push(
       fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
         method: 'POST',
@@ -979,7 +1046,7 @@ async function fireBugAlert(entry) {
         body: JSON.stringify({
           chat_id: process.env.TELEGRAM_CHAT_ID,
           text,
-          parse_mode: 'Markdown',
+          parse_mode: 'MarkdownV2',
           disable_web_page_preview: true,
         }),
       }).catch((e) => console.error('[bugs] telegram failed:', e.message)),
@@ -1029,9 +1096,10 @@ app.post('/api/report', async (req, res) => {
     // Hashed+truncated IP so we can detect spam waves without storing actual IPs.
     ip_hash: crypto.createHash('sha256').update(ip + '|safebot-bug-salt').digest('hex').slice(0, 12),
   };
-  // Persist. If the log path isn't writable we still fire the alert.
-  try { fs.appendFileSync(BUGS_LOG, JSON.stringify(entry) + '\n'); }
-  catch (e) { console.error('[bugs] log write failed:', e.message); }
+  // Persist asynchronously — don't block the request handler. If the log
+  // path isn't writable we still fire the alert.
+  fs.promises.appendFile(BUGS_LOG, JSON.stringify(entry) + '\n')
+    .catch((e) => console.error('[bugs] log write failed:', e.message));
   // Fire alert async — caller doesn't wait.
   fireBugAlert(entry).catch(() => {});
   METRICS.bug_reports_total += 1;
@@ -1095,13 +1163,40 @@ app.post('/api/dm/:handle', (req, res) => {
     if (Buffer.from(sender_eph_pub, 'base64').length !== 32) throw new Error();
     if (Buffer.from(nonce, 'base64').length !== 24) throw new Error();
   } catch (_) { return res.status(400).json({ error: 'sender_eph_pub must be 32B base64, nonce 24B base64' }); }
+  // Optional authenticated from_handle: sender proves ownership of from_handle
+  // by signing `"dm <to_handle> <from_handle> <from_ts>"` with its sign_sk.
+  // Server verifies against from_handle's published sign_pub. Unsigned claims
+  // are stored but marked from_verified=false so greeters can refuse to
+  // auto-reply and clients can display an "unverified" hint.
+  let from_verified = false;
+  const { from_sig, from_ts } = req.body || {};
+  if (typeof from_handle === 'string' && from_handle) {
+    const fh = from_handle.replace(/^@/, '').toLowerCase().slice(0, 34);
+    if (typeof from_sig === 'string' && typeof from_ts === 'number') {
+      if (Math.abs(Date.now() - from_ts) > SIG_MAX_SKEW_MS) {
+        return res.status(400).json({ error: 'from_ts skew too large' });
+      }
+      const sender = identities.get(fh);
+      if (!sender) return res.status(400).json({ error: 'from_handle not registered' });
+      try {
+        const signPub = Buffer.from(sender.sign_pub, 'base64');
+        const blob = Buffer.from(`dm ${handle} ${fh} ${from_ts}`, 'utf8');
+        if (!nacl.sign.detached.verify(blob, Buffer.from(from_sig, 'base64'), signPub)) {
+          return res.status(401).json({ error: 'bad from_handle signature' });
+        }
+        from_verified = true;
+      } catch (_) { return res.status(400).json({ error: 'bad from_handle signature' }); }
+    }
+  }
   if (!inboxes.has(handle)) inboxes.set(handle, []);
   const inbox = inboxes.get(handle);
   const seq = (rec.inbox_seq = (rec.inbox_seq || Date.now()) + 1);
+  schedulePersistIdentities();
   const envelope = {
     seq, id: crypto.randomUUID(),
     ciphertext, nonce, sender_eph_pub,
     from_handle: typeof from_handle === 'string' ? from_handle.slice(0, 34) : null,
+    from_verified,
     ts: Date.now(),
   };
   inbox.push(envelope);
@@ -1126,6 +1221,7 @@ app.get('/api/dm/:handle/inbox/wait', (req, res) => {
   let finished = false;
   if (!dmWaiters.has(handle)) dmWaiters.set(handle, new Set());
   const waiter = {
+    after,
     resolve(msgs) {
       if (finished) return;
       finished = true;
@@ -1228,7 +1324,10 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
   if (!/^[A-Za-z0-9_-]{4,64}$/.test(roomId)) return res.status(400).json({ error: 'bad roomId' });
   const after = Math.max(0, parseInt(String(req.query.after || '0'), 10) || 0);
   const timeout = Math.max(1, Math.min(90, parseInt(String(req.query.timeout || '30'), 10) || 30));
-  const room = getOrCreateRoom(roomId);
+  // Don't spawn a ghost room just because someone polled a random ID. Real
+  // rooms come into existence via POST /messages or WS/SSE subscribe.
+  const room = rooms.get(roomId);
+  if (!room) return res.json({ messages: [], last_seq: 0, exists: false });
 
   // If we already have messages past `after`, return them immediately.
   const pending = sinceSeq(room, after, 500);
@@ -1537,12 +1636,13 @@ server.on('upgrade', (req, socket, head) => {
   const m = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{4,64})\/ws$/);
   if (!m) { socket.destroy(); return; }
   const roomId = m[1];
+  const ip = ((req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim()) || req.socket.remoteAddress || '';
   wss.handleUpgrade(req, socket, head, (ws) => {
-    handleWs(ws, roomId);
+    handleWs(ws, roomId, ip);
   });
 });
 
-function handleWs(ws, roomId) {
+function handleWs(ws, roomId, ip) {
   const room = getOrCreateRoom(roomId);
   const sub = {
     kind: 'ws',
@@ -1563,7 +1663,13 @@ function handleWs(ws, roomId) {
     let msg;
     try { msg = JSON.parse(data.toString('utf8')); } catch (_) { return; }
     if (!validMessage(msg)) return;
+    if (!rateLimitOk(ip || 'ws', roomId)) {
+      try { ws.send(JSON.stringify({ type: 'error', code: 429, error: 'rate limited' })); } catch (_) {}
+      METRICS.http_429 += 1;
+      return;
+    }
     const out = {
+      seq: nextSeq(room),
       id: crypto.randomUUID(),
       sender: (msg.sender || 'user').slice(0, 64),
       ciphertext: msg.ciphertext,

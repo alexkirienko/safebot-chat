@@ -349,8 +349,25 @@ key  share #k=… separately (URL fragment never reaches the server)`;
 
     const body = document.createElement('div');
     body.className = 'bubble__body';
-    body.textContent = plaintext;
+    let mentionedMe = false;
+    // Tokenise so @handles become styled spans. Handles match [A-Za-z0-9_-]{1,48}.
+    const re = /(^|[\s(,.;:!?])@([A-Za-z0-9_-]{1,48})/g;
+    let idx = 0, m2;
+    while ((m2 = re.exec(plaintext)) !== null) {
+      const before = plaintext.slice(idx, m2.index + m2[1].length);
+      if (before) body.appendChild(document.createTextNode(before));
+      const span = document.createElement('span');
+      const tagged = m2[2];
+      const isMe = tagged.toLowerCase() === me.toLowerCase();
+      span.className = 'mention' + (isMe ? ' is-me' : '');
+      span.textContent = '@' + tagged;
+      body.appendChild(span);
+      if (isMe && !isSelf) mentionedMe = true;
+      idx = m2.index + m2[0].length;
+    }
+    if (idx < plaintext.length) body.appendChild(document.createTextNode(plaintext.slice(idx)));
     bubble.appendChild(body);
+    if (mentionedMe) notifyMention(m.sender, plaintext);
 
     chatListEl.appendChild(bubble);
     // Scroll to bottom only if the user was already near the bottom.
@@ -461,6 +478,141 @@ key  share #k=… separately (URL fragment never reaches the server)`;
 
   // Autofocus composer after a beat so the invite card can animate in first.
   setTimeout(() => messageEl.focus(), 400);
+
+  // --- Mention notification (tab flash + beep + browser notif) ----------
+  const origTitle = document.title;
+  let flashTimer = null, flashOn = false, unreadMentions = 0;
+  function startFlashTitle() {
+    if (flashTimer) return;
+    flashTimer = setInterval(() => {
+      flashOn = !flashOn;
+      document.title = flashOn ? `(@) ${unreadMentions} mention${unreadMentions === 1 ? '' : 's'} · ${origTitle}` : origTitle;
+    }, 1000);
+  }
+  function stopFlashTitle() {
+    if (flashTimer) { clearInterval(flashTimer); flashTimer = null; }
+    document.title = origTitle; unreadMentions = 0;
+  }
+  window.addEventListener('focus', stopFlashTitle);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) stopFlashTitle(); });
+
+  let audioCtx = null;
+  function beep() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = 'sine'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.12, audioCtx.currentTime + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + 0.26);
+    } catch (_) {}
+  }
+  let notifPermAsked = false;
+  function notifyMention(sender, text) {
+    unreadMentions += 1;
+    if (document.hidden || !document.hasFocus()) startFlashTitle();
+    beep();
+    if ('Notification' in window) {
+      if (Notification.permission === 'granted') {
+        try { new Notification(`@${me} mentioned by ${sender}`, { body: text.slice(0, 140), silent: true }); } catch (_) {}
+      } else if (!notifPermAsked && Notification.permission === 'default') {
+        notifPermAsked = true;
+        Notification.requestPermission().catch(() => {});
+      }
+    }
+  }
+
+  // --- @mention autocomplete --------------------------------------------
+  const mentionPop = document.createElement('div');
+  mentionPop.className = 'mention-pop';
+  document.body.appendChild(mentionPop);
+  let mentionState = null; // { start, prefix, items, active }
+
+  function closeMentionPop() {
+    mentionPop.style.display = 'none';
+    mentionState = null;
+  }
+  function openMentionPopAt(start, prefix) {
+    const STALE_ACTIVE = 2 * 60 * 1000;
+    const now = Date.now();
+    const all = [];
+    for (const [name, ts] of seenNames) {
+      if (name === me) continue;
+      all.push({ name, ts, active: now - ts <= STALE_ACTIVE });
+    }
+    const p = prefix.toLowerCase();
+    const filtered = all
+      .filter((x) => !p || x.name.toLowerCase().startsWith(p))
+      .sort((a, b) => (b.active - a.active) || (b.ts - a.ts))
+      .slice(0, 8);
+    if (filtered.length === 0) { closeMentionPop(); return; }
+    mentionPop.innerHTML = '';
+    filtered.forEach((it, i) => {
+      const row = document.createElement('div');
+      row.className = 'row' + (it.active ? '' : ' is-inactive') + (i === 0 ? ' is-active' : '');
+      row.innerHTML = '<span class="dot"></span><span>' + escapeHtml(it.name) + '</span>';
+      row.addEventListener('mousedown', (ev) => { ev.preventDefault(); pickMention(it.name); });
+      mentionPop.appendChild(row);
+    });
+    // Position near the textarea caret — approximate via textarea bottom-left.
+    const r = messageEl.getBoundingClientRect();
+    mentionPop.style.left = (window.scrollX + r.left + 8) + 'px';
+    mentionPop.style.top  = (window.scrollY + r.top - mentionPop.offsetHeight - 6) + 'px';
+    mentionPop.style.display = 'block';
+    // Recompute top now that height is known.
+    mentionPop.style.top = (window.scrollY + r.top - mentionPop.offsetHeight - 6) + 'px';
+    mentionState = { start, prefix, items: filtered, active: 0 };
+  }
+  function pickMention(name) {
+    if (!mentionState) return;
+    const v = messageEl.value;
+    const before = v.slice(0, mentionState.start);
+    const after = v.slice(messageEl.selectionStart);
+    const ins = '@' + name + ' ';
+    messageEl.value = before + ins + after;
+    const pos = before.length + ins.length;
+    messageEl.setSelectionRange(pos, pos);
+    closeMentionPop();
+    messageEl.focus();
+  }
+  function updateMentionFromInput() {
+    const v = messageEl.value;
+    const caret = messageEl.selectionStart;
+    // Find an @ before caret with no whitespace between it and caret.
+    let i = caret - 1;
+    while (i >= 0 && /[A-Za-z0-9_-]/.test(v[i])) i--;
+    if (i < 0 || v[i] !== '@') { closeMentionPop(); return; }
+    // The @ must start the message or follow whitespace/punctuation.
+    if (i > 0 && !/[\s(,.;:!?]/.test(v[i - 1])) { closeMentionPop(); return; }
+    const prefix = v.slice(i + 1, caret);
+    openMentionPopAt(i, prefix);
+  }
+  messageEl.addEventListener('input', updateMentionFromInput);
+  messageEl.addEventListener('keyup', (e) => {
+    if (['ArrowUp','ArrowDown','Enter','Tab','Escape'].includes(e.key)) return;
+    updateMentionFromInput();
+  });
+  messageEl.addEventListener('keydown', (e) => {
+    if (!mentionState) return;
+    const rows = mentionPop.querySelectorAll('.row');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      mentionState.active = (mentionState.active + 1) % rows.length;
+      rows.forEach((r, i) => r.classList.toggle('is-active', i === mentionState.active));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      mentionState.active = (mentionState.active - 1 + rows.length) % rows.length;
+      rows.forEach((r, i) => r.classList.toggle('is-active', i === mentionState.active));
+    } else if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+      e.preventDefault(); e.stopPropagation();
+      pickMention(mentionState.items[mentionState.active].name);
+    } else if (e.key === 'Escape') {
+      e.preventDefault(); closeMentionPop();
+    }
+  }, true);
+  messageEl.addEventListener('blur', () => setTimeout(closeMentionPop, 100));
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

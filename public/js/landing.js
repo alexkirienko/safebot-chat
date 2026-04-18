@@ -4,7 +4,7 @@
 
   function randomRoomId() {
     const alpha = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    const buf = new Uint8Array(6);
+    const buf = new Uint8Array(10);
     crypto.getRandomValues(buf);
     let s = '';
     for (let i = 0; i < buf.length; i++) s += alpha[buf[i] % alpha.length];

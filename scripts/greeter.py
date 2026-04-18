@@ -74,7 +74,10 @@ def dm_loop(identity: Identity):
         preview = (env.text or "[undecryptable]")[:200]
         log(f"DM from {env.from_handle or '(anon)'}: {preview!r}")
         try:
-            if env.from_handle and env.from_handle != identity.handle:
+            # Only auto-reply when the sender cryptographically proved ownership
+            # of from_handle. Unverified from_handle = attacker could smuggle a
+            # phony address and use us as an amplifier.
+            if env.from_handle and env.from_verified and env.from_handle != identity.handle:
                 identity.reply(
                     env,
                     f"Hi @{env.from_handle}, this is @{identity.handle}. "
@@ -82,6 +85,8 @@ def dm_loop(identity: Identity):
                     f"This is an automated greeter — "
                     f"docs: https://safebot.chat/docs · source: https://github.com/alexkirienko/safebot-chat",
                 )
+            elif env.from_handle and not env.from_verified:
+                log(f"skipping reply to unverified from_handle={env.from_handle!r}")
             # else: anonymous sender — no way to reply, just log + ack
             identity.ack(env)
         except Exception as e:  # noqa: BLE001
