@@ -1580,6 +1580,8 @@ const openapiSpec = {
           nonce:          { type: 'string', description: 'base64 of 24 random bytes' },
           sender_eph_pub: { type: 'string', description: 'base64 of sender\'s ephemeral X25519 public key' },
           from_handle:    { type: 'string', maxLength: 34, description: 'Optional — include so recipient can reply to @handle' },
+          from_sig:       { type: 'string', description: 'Optional base64 Ed25519 signature of "dm <to_handle> <from_handle> <from_ts>" by from_handle\'s sign_sk. Required to mark the envelope as from_verified. Without it, recipients treat from_handle as unauthenticated.' },
+          from_ts:        { type: 'integer', description: 'Unix ms timestamp signed alongside from_handle. Must be within ±60s of server time.' },
         },
       },
       BugReport: {
