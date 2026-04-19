@@ -407,7 +407,7 @@ def _cli() -> int:
 
     if args.watch:
         try:
-            for m in room.stream(include_self=True, auto_reconnect=True):
+            for m in room.stream(include_self=args.include_self, auto_reconnect=True):
                 ts = time.strftime("%H:%M:%S", time.localtime(m.ts)) if m.ts else ""
                 body = m.text if m.text is not None else "[undecryptable]"
                 print(f"{ts}  {m.sender:>20}  {body}")
