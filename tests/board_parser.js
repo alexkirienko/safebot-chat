@@ -180,20 +180,22 @@ test('sawSections records case-normalized first word of each ## header', () => {
 
 // ---------- 3. live BOARD.md fixture: expected shape ----------
 
-test('live docs/BOARD.md parses to the expected column counts', () => {
+test('live docs/BOARD.md parses to structurally valid shape', () => {
+  // Structural assertions only — specific cards move between columns as
+  // work ships, so the test shouldn't pin on any one item's location.
+  // DOING may be empty when the team is between items, but INCOMING and
+  // DONE must both be non-empty for the board to be meaningful.
   const md = fs.readFileSync(path.join(__dirname, '..', 'docs', 'BOARD.md'), 'utf8');
   const b = parse(md);
-  if (b.doing.length === 0)     throw new Error('DOING column is empty');
-  if (b.incoming.length === 0)  throw new Error('INCOMING column is empty');
-  if (b.done.length === 0)      throw new Error('DONE column is empty');
+  if (b.incoming.length === 0) throw new Error('INCOMING column is empty');
+  if (b.done.length === 0)     throw new Error('DONE column is empty');
+  if (!b.sawSections.has('DOING') || !b.sawSections.has('INCOMING') || !b.sawSections.has('DONE'))
+    throw new Error(`one of the three expected ## headers is missing from the source: ${[...b.sawSections]}`);
   // Every INCOMING card should have a P0..P3 priority chip.
   for (const c of b.incoming) {
     if (!/^P[0-3]$/.test(c.pri || ''))
       throw new Error(`INCOMING card without priority: ${JSON.stringify(c)}`);
   }
-  // At least the CI item must be present (the first thing we plan to ship next).
-  if (!b.incoming.some((c) => /CI on push/i.test(c.body)))
-    throw new Error('CI card missing from INCOMING');
 });
 
 console.log(`\n${passed}/${passed + failed} passed`);
