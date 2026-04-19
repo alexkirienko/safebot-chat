@@ -182,16 +182,51 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       row.className = 'people__row';
       if (name !== me && now - ts > STALE_MS * 0.6) row.classList.add('is-stale');
       const [a, b] = paletteFor(name);
+      // Verified (server-stamped @handle) vs unsigned label. Unsigned
+      // participants with a known box_pub get a "Promote" affordance
+      // that opens the adopt flow. Signed @handle participants show a
+      // shield instead — already trusted, no adopt needed.
+      const isSigned = name.startsWith('@');
+      const canAdopt = !isSigned && name !== me && peerBoxPubs.has(name);
       row.innerHTML =
         `<span class="people__ava" style="background:linear-gradient(135deg,${a},${b})">${initialsFor(name)}</span>` +
         `<span class="people__name">${escapeHtml(name)}</span>` +
-        (name === me ? '<span class="people__tag">you</span>' : '');
+        (isSigned ? '<span class="people__tag people__tag--verified" title="Signed sender">✓</span>' : '') +
+        (name === me ? '<span class="people__tag">you</span>' : '') +
+        (canAdopt ? `<button class="people__promote" data-promote-target="${escapeHtml(name)}" title="Provision a signed @handle for this participant">Promote</button>` : '');
       peopleList.appendChild(row);
     }
     const n = seenNames.size;
     peopleCountEl.textContent = `${n} in room`;
     metaCountEl.textContent = `${n} participant${n === 1 ? '' : 's'}`;
   }
+  // Promote button click — opens the adopt flow targeting the clicked
+  // participant. Requires an operator Identity (Sign in) so the toast
+  // error is actionable rather than silent.
+  peopleList.addEventListener('click', async (ev) => {
+    const btn = ev.target.closest('[data-promote-target]');
+    if (!btn) return;
+    ev.stopPropagation();
+    const target = btn.getAttribute('data-promote-target');
+    if (!target) return;
+    if (!identity) {
+      alert('Sign in with your own @handle first — you can\'t provision identities for others while anonymous.');
+      return;
+    }
+    const suggested = 'bot-' + target.replace(/[^a-z0-9-]/gi, '').slice(0, 12).toLowerCase();
+    const handle = (prompt(`Provision a signed @handle for "${target}"?\n\nThis mints a fresh keypair, registers it on the server, and sends the identity to "${target}" encrypted with their box_pub. Only they can accept it.`, suggested) || '').trim();
+    if (!handle) return;
+    btn.disabled = true;
+    try {
+      await initiateAdopt(target, handle);
+      showToast('Adopt offer sent to ' + target, true);
+    } catch (e) {
+      alert('Adopt failed: ' + (e.message || e));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
   function touchParticipant(name) {
     if (!name) return;
     const had = seenNames.has(name);
@@ -773,10 +808,19 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       }
       else if (obj.type === 'ready' || obj.type === 'presence') {
         if (Array.isArray(obj.participants)) {
+          // Populate peerBoxPubs FIRST, then touchParticipant. Otherwise
+          // touchParticipant's inline renderPeople runs with a stale
+          // peerBoxPubs and the Promote button is missing until the
+          // next re-render. Order-dependent bug; easy to miss.
           for (const p of obj.participants) {
-            if (p && p.name) touchParticipant(p.name);
             if (p && p.name && p.box_pub) peerBoxPubs.set(p.name, p.box_pub);
           }
+          for (const p of obj.participants) {
+            if (p && p.name) touchParticipant(p.name);
+          }
+          // Explicit re-render in case nothing was "new" per touchParticipant
+          // but peerBoxPubs got fresher pubs for existing rows.
+          renderPeople();
         } else if (Array.isArray(obj.names)) {
           for (const n of obj.names) touchParticipant(n);
         }

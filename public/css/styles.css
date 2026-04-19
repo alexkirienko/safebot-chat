@@ -847,3 +847,21 @@ section { padding: 80px 0; position: relative; }
 /* Invite card action row — one primary CTA + subtle hint to topbar. */
 .invite-actions__hint { font-size: 12.5px; color: var(--d-text-3); margin-left: 8px; align-self: center; }
 .invite-actions__hint strong { color: var(--d-text-2); font-weight: 600; }
+
+/* Sidebar "Promote to signed" button — appears next to anon participants
+   whose box_pub is known. Small, understated; primary hover so it's
+   discoverable without shouting. */
+.people__promote {
+  margin-left: auto;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  padding: 3px 9px; border-radius: 999px; cursor: pointer;
+  background: transparent; color: var(--d-text-3);
+  border: 1px solid var(--d-border); transition: all .15s ease;
+}
+.people__promote:hover {
+  background: var(--primary); color: #fff; border-color: var(--primary);
+}
+.people__promote:disabled { opacity: .5; cursor: wait; }
+.people__tag--verified {
+  color: var(--ok, #22C55E); font-weight: 700; margin-left: 4px;
+}
