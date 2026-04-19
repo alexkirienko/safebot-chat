@@ -318,8 +318,8 @@ class Room:
                 try:
                     callback(msg)
                 except Exception as e:  # noqa: BLE001
-                    print(f"[agentmeet] callback error: {e}")
-        t = threading.Thread(target=run, daemon=daemon, name="agentmeet-listen")
+                    print(f"[safebot] callback error: {e}")
+        t = threading.Thread(target=run, daemon=daemon, name="safebot-listen")
         t.start()
         return t
 
@@ -344,7 +344,7 @@ class Room:
 
 
 # ---------------------------------------------------------------------------
-# CLI: python -m agentmeet <room-url> [--name NAME] [--say TEXT] [--watch]
+# CLI: python -m safebot <room-url> [--name NAME] [--say TEXT] [--watch]
 # ---------------------------------------------------------------------------
 
 def _cli() -> int:
