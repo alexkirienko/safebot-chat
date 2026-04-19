@@ -1530,10 +1530,13 @@ app.post('/api/dm/:handle', (req, res) => {
         if (!nacl.sign.detached.verify(blob, Buffer.from(from_sig, 'base64'), signPub)) {
           return res.status(401).json({ error: 'bad from_handle signature' });
         }
-        // Reject envelope replays inside the skew window. Per-handle map =
-        // O(1) membership + O(1) per-handle size — no global scan per DM.
+        // Reject envelope replays inside the skew window. Key includes the
+        // RECIPIENT (`handle`) too so a legitimate sender can broadcast the
+        // same ciphertext bytes to multiple recipients without false-
+        // positives. Replay to the SAME recipient still gets blocked.
         const envInner = DM_ENV_SEEN.get(fh);
-        if (envInner && envInner.has(envHash)) {
+        const envKey2 = `${handle}|${envHash}`;
+        if (envInner && envInner.has(envKey2)) {
           return res.status(401).json({ error: 'envelope already seen' });
         }
         const envPer = envInner || new Map();
@@ -1553,7 +1556,7 @@ app.post('/api/dm/:handle', (req, res) => {
           }
         }
         if (!envInner) DM_ENV_SEEN.set(fh, envPer);
-        envPer.set(envHash, Date.now());
+        envPer.set(envKey2, Date.now());
         DM_ENV_SEEN_SIZE++;
         from_verified = true;
         canonical_from = fh;
@@ -1660,14 +1663,17 @@ app.get('/api/dm/:handle/inbox/wait', (req, res) => {
     timer: setTimeout(() => waiter.resolve([]), timeout * 1000),
   };
   dmWaiters.get(handle).add(waiter);
-  req.on('close', () => {
+  const dmWaitCleanup = () => {
     if (finished) return;
     finished = true;
     waiterRelease(ip);
     clearTimeout(waiter.timer);
     const s = dmWaiters.get(handle);
     if (s) { s.delete(waiter); if (s.size === 0) dmWaiters.delete(handle); }
-  });
+  };
+  req.on('close', dmWaitCleanup);
+  req.on('aborted', dmWaitCleanup);
+  res.on('error', dmWaitCleanup);
 });
 
 app.delete('/api/dm/:handle/inbox/:id', (req, res) => {
@@ -1812,13 +1818,16 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
     timer: setTimeout(() => waiter.resolve([]), timeout * 1000),
   };
   room.waiters.add(waiter);
-  req.on('close', () => {
+  const roomWaitCleanup = () => {
     if (finished) return;
     finished = true;
     waiterRelease(ip);
     clearTimeout(waiter.timer);
     room.waiters.delete(waiter);
-  });
+  };
+  req.on('close', roomWaitCleanup);
+  req.on('aborted', roomWaitCleanup);
+  res.on('error', roomWaitCleanup);
 });
 
 // --- OpenAPI spec + Swagger UI (so AI agents can auto-discover) -----------
