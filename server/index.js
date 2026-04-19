@@ -648,7 +648,26 @@ function tokenEq(a, b) {
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
+// Tailnet bypass: requests proxied by `tailscale serve` land on loopback
+// but carry an X-Forwarded-For whose client hop is the sender's Tailnet IP
+// (100.64.0.0/10). With `trust proxy='loopback'`, Express resolves req.ip
+// to that Tailnet IP. Cloudflare-tunnel traffic never gets a 100.x req.ip
+// because CF overwrites XFF with the real public client IP. So treating
+// req.ip in 100.64.0.0/10 as "authenticated as the Tailnet owner" is
+// safe given the current trust_proxy config. The Tailscale-User-Login
+// header it sets alongside is used only as a display hint.
+function isTailnetRequest(req) {
+  const ip = String(req.ip || '');
+  if (!/^100\.(6[4-9]|[7-9]\d|1[0-1]\d|12[0-7])\./.test(ip)) return false;
+  // Belt-and-suspenders: tailscale serve always sets this header.
+  return !!req.headers['tailscale-user-login'];
+}
+
 function requireAdmin(req, res) {
+  // Bypass the token for requests arriving via `tailscale serve`. The
+  // Tailnet is already authenticated at the network layer, so demanding
+  // a secondary token in that context is pure friction.
+  if (isTailnetRequest(req)) return true;
   const want = process.env.METRICS_TOKEN;
   if (!want) { res.status(503).json({ error: 'metrics disabled (no METRICS_TOKEN configured)' }); return false; }
   const auth = String(req.headers.authorization || '');
