@@ -2,8 +2,8 @@
 One-shot provisioner for the greeter service.
 
   1. Generates the @safebot Identity (box + sign keypairs) and registers it on
-     the live server using the operator METRICS_TOKEN to bypass the reserved
-     handle list.
+     the live server using the operator IDENTITY_ADMIN_TOKEN to bypass the
+     reserved handle list.
   2. Mints a persistent demo room URL (client-generated 256-bit key) and saves
      it alongside the identity.
 
@@ -12,10 +12,11 @@ Writes:
   /etc/safebot/greeter/demo_room.url  (600, owner alex)
 
 Environment:
-  SAFEBOT_BASE          defaults to https://safebot.chat
-  METRICS_TOKEN         read from /etc/safebot/env if present
-  SAFEBOT_GREETER_DIR   defaults to /etc/safebot/greeter
-  SAFEBOT_HANDLE        defaults to 'safebot'
+  SAFEBOT_BASE            defaults to https://safebot.chat
+  IDENTITY_ADMIN_TOKEN    read from /etc/safebot/env if present (preferred)
+  METRICS_TOKEN           fallback for older deploys; will warn
+  SAFEBOT_GREETER_DIR     defaults to /etc/safebot/greeter
+  SAFEBOT_HANDLE          defaults to 'safebot'
 """
 from __future__ import annotations
 
@@ -36,17 +37,28 @@ HANDLE = os.environ.get("SAFEBOT_HANDLE", "safebot")
 ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
-def load_metrics_token() -> str:
-    tok = os.environ.get("METRICS_TOKEN")
+def _env_or_envfile(name: str) -> str:
+    tok = os.environ.get(name)
     if tok: return tok
     try:
         with open("/etc/safebot/env") as f:
             for line in f:
-                if line.startswith("METRICS_TOKEN="):
+                if line.startswith(f"{name}="):
                     return line.split("=", 1)[1].strip()
     except Exception:  # noqa: BLE001
         pass
-    raise RuntimeError("METRICS_TOKEN required to claim reserved handle")
+    return ""
+
+
+def load_admin_token() -> str:
+    tok = _env_or_envfile("IDENTITY_ADMIN_TOKEN")
+    if tok: return tok
+    tok = _env_or_envfile("METRICS_TOKEN")
+    if tok:
+        print("[provision] WARNING: IDENTITY_ADMIN_TOKEN not set, falling back to METRICS_TOKEN. "
+              "Set IDENTITY_ADMIN_TOKEN in /etc/safebot/env to silence this.", file=sys.stderr)
+        return tok
+    raise RuntimeError("IDENTITY_ADMIN_TOKEN (or METRICS_TOKEN fallback) required to claim a reserved handle")
 
 
 def main():
@@ -68,7 +80,7 @@ def main():
 
     # Always attempt registration (idempotent: 409 means already taken by us).
     import time as _time
-    token = load_metrics_token()
+    token = load_admin_token()
     ts = int(_time.time() * 1000)
     blob = f"register {ident.handle} {ts} {ident.box_pub_b64} {ident.sign_pub_b64}".encode("utf-8")
     sig = ident._sign_sk.sign(blob).signature

@@ -383,8 +383,13 @@ setInterval(() => {
 // a captured Authorization header cannot be sent a second time while the
 // original ts is still in the acceptable window. Size-capped so a signing-key
 // owner spamming unique nonces can't OOM the process.
-const INBOX_SIG_SEEN = new Map();
+// Replay cache keyed per-handle so membership checks and size accounting
+// are O(1). Inner map is nonce → ts. Flat `INBOX_SIG_SEEN_SIZE` is the
+// total count across all handles (cheap global cap).
+const INBOX_SIG_SEEN = new Map(); // handle → Map<nonce, ts>
+let INBOX_SIG_SEEN_SIZE = 0;
 const INBOX_SIG_SEEN_MAX = Number(process.env.INBOX_SIG_SEEN_MAX || 10_000);
+const INBOX_SIG_SEEN_PER_HANDLE_MAX = Math.max(64, Math.floor(INBOX_SIG_SEEN_MAX / 32));
 // Global cap on total queued DM ciphertext bytes across all inboxes —
 // 256 handles × 128 KiB × 1 k handles would otherwise be ~32 GiB.
 const INBOX_GLOBAL_MAX_BYTES = Number(process.env.INBOX_GLOBAL_MAX_BYTES || 512 * 1024 * 1024); // 512 MiB
@@ -402,11 +407,16 @@ setInterval(() => {
 // Replay-cache for verified DM envelopes (key = envHash). A captured
 // from_sig+envelope could otherwise be re-POSTed verbatim within the 60s
 // skew and bulk-fill the recipient's ring buffer, evicting unread msgs.
-const DM_ENV_SEEN = new Map();
+const DM_ENV_SEEN = new Map(); // handle → Map<envHash, ts>
+let DM_ENV_SEEN_SIZE = 0;
 const DM_ENV_SEEN_MAX = Number(process.env.DM_ENV_SEEN_MAX || 20_000);
+const DM_ENV_SEEN_PER_HANDLE_MAX = Math.max(128, Math.floor(DM_ENV_SEEN_MAX / 32));
 setInterval(() => {
   const cutoff = Date.now() - SIG_MAX_SKEW_MS;
-  for (const [k, v] of DM_ENV_SEEN) if (v < cutoff) DM_ENV_SEEN.delete(k);
+  for (const [h, inner] of DM_ENV_SEEN) {
+    for (const [n, v] of inner) if (v < cutoff) { inner.delete(n); DM_ENV_SEEN_SIZE--; }
+    if (inner.size === 0) DM_ENV_SEEN.delete(h);
+  }
 }, 5 * 60 * 1000).unref?.();
 // Same pattern for room recent-buffer ciphertext. ROOM_MAX*200*128 KiB could
 // otherwise park 125 GiB of ciphertext in RAM before the 30s janitor runs.
@@ -414,7 +424,10 @@ const ROOM_GLOBAL_MAX_BYTES = Number(process.env.ROOM_GLOBAL_MAX_BYTES || 512 * 
 let ROOM_GLOBAL_BYTES = 0;
 setInterval(() => {
   const cutoff = Date.now() - SIG_MAX_SKEW_MS;
-  for (const [k, v] of INBOX_SIG_SEEN) if (v < cutoff) INBOX_SIG_SEEN.delete(k);
+  for (const [h, inner] of INBOX_SIG_SEEN) {
+    for (const [n, v] of inner) if (v < cutoff) { inner.delete(n); INBOX_SIG_SEEN_SIZE--; }
+    if (inner.size === 0) INBOX_SIG_SEEN.delete(h);
+  }
 }, 5 * 60 * 1000).unref?.();
 
 function verifyInboxSig(req, handle) {
@@ -439,41 +452,36 @@ function verifyInboxSig(req, handle) {
   if (Math.abs(Date.now() - ts) > SIG_MAX_SKEW_MS) return false;
   const rec = identities.get(handle);
   if (!rec) return false;
-  const seenKey = `${handle}|${nonce}`;
-  if (INBOX_SIG_SEEN.has(seenKey)) return false;
+  const inner = INBOX_SIG_SEEN.get(handle);
+  if (inner && inner.has(nonce)) return false;
   try {
     const signPub = Buffer.from(rec.sign_pub, 'base64');
     if (signPub.length !== 32) return false;
     const urlPart = req.originalUrl || req.url || req.path;
     const blob = Buffer.from(`${req.method} ${urlPart} ${ts} ${nonce}`, 'utf8');
     if (!nacl.sign.detached.verify(blob, Buffer.from(sig, 'base64'), signPub)) return false;
-    // Cap the seen-set. Previously fail-closed when full of fresh entries
-    // — an attacker with any valid signing key could flood unique nonces
-    // and globally 401 every other user until the skew window expired.
-    // Now the cache is keyed AND capped per-handle, so abuse of one
-    // handle's cache doesn't affect anyone else's.
-    const maxPerHandle = Math.max(64, Math.floor(INBOX_SIG_SEEN_MAX / 32));
-    let perHandle = 0;
-    for (const k of INBOX_SIG_SEEN.keys()) if (k.startsWith(handle + '|')) perHandle++;
-    if (perHandle >= maxPerHandle) {
-      // evict this handle's expired entries first
+    // Per-handle cap: one pathological handle can't DoS auth for anyone
+    // else. Checks and writes are O(1) against the inner Map.
+    const perInner = inner || new Map();
+    if (perInner.size >= INBOX_SIG_SEEN_PER_HANDLE_MAX) {
+      // Drop this handle's expired entries; if still full, fail closed.
       const cutoff = Date.now() - SIG_MAX_SKEW_MS;
-      for (const [k, v] of INBOX_SIG_SEEN) {
-        if (k.startsWith(handle + '|') && v < cutoff) INBOX_SIG_SEEN.delete(k);
+      for (const [n, v] of perInner) if (v < cutoff) { perInner.delete(n); INBOX_SIG_SEEN_SIZE--; }
+      if (perInner.size >= INBOX_SIG_SEEN_PER_HANDLE_MAX) return false;
+    }
+    if (INBOX_SIG_SEEN_SIZE >= INBOX_SIG_SEEN_MAX) {
+      // Global memory fuse — drop 200 oldest entries from the first inner map.
+      for (const [h, im] of INBOX_SIG_SEEN) {
+        const evict = Math.min(200, im.size);
+        const it = im.keys();
+        for (let i = 0; i < evict; i++) { const k = it.next().value; if (k === undefined) break; im.delete(k); INBOX_SIG_SEEN_SIZE--; }
+        if (im.size === 0) INBOX_SIG_SEEN.delete(h);
+        break;
       }
-      // count again — if still full-of-fresh this handle is pathological
-      perHandle = 0;
-      for (const k of INBOX_SIG_SEEN.keys()) if (k.startsWith(handle + '|')) perHandle++;
-      if (perHandle >= maxPerHandle) return false;
     }
-    // Global soft-eviction: if total size blows up, drop oldest regardless
-    // of freshness. The per-handle cap above is the real replay defence —
-    // the global cap is only a memory fuse.
-    if (INBOX_SIG_SEEN.size >= INBOX_SIG_SEEN_MAX) {
-      const it = INBOX_SIG_SEEN.keys();
-      for (let i = 0; i < 200; i++) { const k = it.next().value; if (k === undefined) break; INBOX_SIG_SEEN.delete(k); }
-    }
-    INBOX_SIG_SEEN.set(seenKey, Date.now());
+    if (!inner) INBOX_SIG_SEEN.set(handle, perInner);
+    perInner.set(nonce, Date.now());
+    INBOX_SIG_SEEN_SIZE++;
     return true;
   } catch (_) { return false; }
 }
@@ -1513,28 +1521,31 @@ app.post('/api/dm/:handle', (req, res) => {
         if (!nacl.sign.detached.verify(blob, Buffer.from(from_sig, 'base64'), signPub)) {
           return res.status(401).json({ error: 'bad from_handle signature' });
         }
-        // Reject envelope replays inside the skew window. Per-handle cap so
-        // one dummy identity can't DoS verified-DM delivery globally by
-        // filling the cache with fresh entries.
-        const envKey = `${fh}|${envHash}`;
-        if (DM_ENV_SEEN.has(envKey)) {
+        // Reject envelope replays inside the skew window. Per-handle map =
+        // O(1) membership + O(1) per-handle size — no global scan per DM.
+        const envInner = DM_ENV_SEEN.get(fh);
+        if (envInner && envInner.has(envHash)) {
           return res.status(401).json({ error: 'envelope already seen' });
         }
-        const maxEnvPerHandle = Math.max(128, Math.floor(DM_ENV_SEEN_MAX / 32));
-        let perHandleEnv = 0;
-        for (const k of DM_ENV_SEEN.keys()) if (k.startsWith(fh + '|')) perHandleEnv++;
-        if (perHandleEnv >= maxEnvPerHandle) {
+        const envPer = envInner || new Map();
+        if (envPer.size >= DM_ENV_SEEN_PER_HANDLE_MAX) {
           const cutoff = Date.now() - SIG_MAX_SKEW_MS;
-          for (const [k, v] of DM_ENV_SEEN) if (k.startsWith(fh + '|') && v < cutoff) DM_ENV_SEEN.delete(k);
-          perHandleEnv = 0;
-          for (const k of DM_ENV_SEEN.keys()) if (k.startsWith(fh + '|')) perHandleEnv++;
-          if (perHandleEnv >= maxEnvPerHandle) return res.status(429).json({ error: 'replay-cache full for this handle' });
+          for (const [n, v] of envPer) if (v < cutoff) { envPer.delete(n); DM_ENV_SEEN_SIZE--; }
+          if (envPer.size >= DM_ENV_SEEN_PER_HANDLE_MAX) {
+            return res.status(429).json({ error: 'replay-cache full for this handle' });
+          }
         }
-        if (DM_ENV_SEEN.size >= DM_ENV_SEEN_MAX) {
-          const it = DM_ENV_SEEN.keys();
-          for (let i = 0; i < 200; i++) { const k = it.next().value; if (k === undefined) break; DM_ENV_SEEN.delete(k); }
+        if (DM_ENV_SEEN_SIZE >= DM_ENV_SEEN_MAX) {
+          for (const [h, im] of DM_ENV_SEEN) {
+            const evict = Math.min(200, im.size); const it = im.keys();
+            for (let i = 0; i < evict; i++) { const k = it.next().value; if (k === undefined) break; im.delete(k); DM_ENV_SEEN_SIZE--; }
+            if (im.size === 0) DM_ENV_SEEN.delete(h);
+            break;
+          }
         }
-        DM_ENV_SEEN.set(envKey, Date.now());
+        if (!envInner) DM_ENV_SEEN.set(fh, envPer);
+        envPer.set(envHash, Date.now());
+        DM_ENV_SEEN_SIZE++;
         from_verified = true;
         canonical_from = fh;
       } catch (_) { return res.status(400).json({ error: 'bad from_handle signature' }); }
