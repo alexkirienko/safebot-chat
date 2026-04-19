@@ -1,12 +1,18 @@
 // SafeBot.Chat server — E2E-encrypted, zero-chat-log relay for multi-agent chat rooms.
 //
 // Design invariants (DO NOT VIOLATE):
-//   1. The server never logs, writes, or persists message bodies. It handles
-//      opaque ciphertext only. Room keys live in the URL fragment and are
-//      never transmitted to the server.
+//   1. The server never decrypts, logs, writes, or persists message bodies
+//      (room ciphertext, DM ciphertext, room keys). Plaintext and keys never
+//      reach this process.
 //   2. All room state is in-memory. When the last subscriber leaves a room,
 //      the room and its recent-message buffer are cleared after a short grace.
-//   3. No filesystem or database writes of any message data anywhere.
+//   3. Disk writes are narrowly scoped to operator state only:
+//        - /var/lib/safebot/metrics.json, metrics_history.json — aggregate counters
+//        - /var/lib/safebot/identities.json — public keys + inbox_seq counter
+//        - /var/log/safebot-bugs.jsonl — bug-report bodies submitted by users
+//          (5 MiB cap, single rotation). Bug reports are user-submitted text
+//          and are explicitly NOT covered by invariant #1; submitters are
+//          told so via the /api/report endpoint contract.
 
 const express = require('express');
 const http = require('http');
@@ -250,9 +256,13 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => { try { persistIdentities(); } catch (_) {} });
 }
 
+// Return the decoded byte length of a base64 string — the thing the crypto
+// layer actually cares about — rather than the string length (which was a
+// misleading name: a 128 KiB cap on the *string* accepts ~96 KiB of raw
+// ciphertext, but future callers might reuse this helper expecting bytes.)
 function b64BytesLen(s) {
   if (typeof s !== 'string') return -1;
-  return s.length; // We limit on the base64 length — 4/3 of raw bytes, fine for bounds.
+  try { return Buffer.from(s, 'base64').length; } catch (_) { return -1; }
 }
 
 function pruneInbox(handle) {
@@ -444,9 +454,24 @@ function renderStatsPage(tokenForFetch) {
 
 <script src="/vendor/klinecharts.min.js"></script>
 <script>
- const TOKEN = ${JSON.stringify(tokenForFetch)};
+ // Token came in via ?token=... in the URL, which is awkward from a secret
+ // hygiene standpoint (browser history, shoulder-surfing, possible third-party
+ // logs). Move it to sessionStorage immediately and scrub the URL, then use
+ // Authorization: Bearer … for every subsequent fetch so the token no longer
+ // travels in plain URLs after the initial page load.
+ const _initialToken = ${JSON.stringify(tokenForFetch)};
+ if (_initialToken) {
+   try { sessionStorage.setItem('safebot:admintoken', _initialToken); } catch (_) {}
+   if (location.search) history.replaceState(null, '', location.pathname);
+ }
+ const TOKEN = (function() {
+   try { return sessionStorage.getItem('safebot:admintoken') || ''; } catch (_) { return _initialToken || ''; }
+ })();
+ function _adminFetch(path) {
+   return fetch(path, { cache: 'no-store', headers: { 'Authorization': 'Bearer ' + TOKEN } });
+ }
  async function fetchMetrics() {
-   const r = await fetch('/api/metrics?token=' + encodeURIComponent(TOKEN), { cache: 'no-store' });
+   const r = await _adminFetch('/api/metrics');
    if (!r.ok) { document.body.innerHTML = '<h1>401</h1>'; return null; }
    return r.json();
  }
@@ -592,7 +617,7 @@ function renderStatsPage(tokenForFetch) {
 
  async function loadHourly() {
    try {
-     const r = await fetch('/api/metrics/hourly?token=' + encodeURIComponent(TOKEN), { cache: 'no-store' });
+     const r = await _adminFetch('/api/metrics/hourly');
      if (!r.ok) return;
      const d = await r.json();
      hourlyData = d.hours || [];
@@ -786,6 +811,12 @@ function validMessage(msg) {
   if (!msg || typeof msg !== 'object') return false;
   if (typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return false;
   if (msg.ciphertext.length > MAX_MSG_BYTES || msg.nonce.length > 64) return false;
+  // Decode-check: a malformed base64 string (or an over-large one after
+  // decoding) is rejected before it reaches the broadcast/recent buffer.
+  try {
+    if (Buffer.from(msg.ciphertext, 'base64').length > MAX_MSG_BYTES) return false;
+    if (Buffer.from(msg.nonce, 'base64').length !== 24) return false;
+  } catch (_) { return false; }
   if (msg.sender != null && (typeof msg.sender !== 'string' || msg.sender.length > 64)) return false;
   return true;
 }
