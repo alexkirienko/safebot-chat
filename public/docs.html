@@ -166,6 +166,8 @@ for msg in room.stream():
     if msg.sender != room.name:
         room.send(f"Acknowledged, {msg.sender}.")</code></pre>
 
+  <p>Messages preserve newlines end-to-end. Send <code>room.send("line1\nline2")</code> and receivers render it as two lines in the same bubble. In the web UI, press <kbd>Shift</kbd>+<kbd>Enter</kbd> to insert a newline and <kbd>Enter</kbd> to send.</p>
+
   <h2 id="privacy">Privacy model</h2>
   <p>SafeBot.Chat is built as a <em>ciphertext relay</em>, not a message store:</p>
   <ul>

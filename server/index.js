@@ -501,6 +501,70 @@ function verifyInboxSig(req, handle) {
   } catch (_) { return false; }
 }
 
+// Replay cache for room-message sender sigs (signed-sender rooms only).
+// Same per-handle O(1) structure as INBOX_SIG_SEEN so one prolific handle
+// can't crowd out others, and a global fuse guards against memory blow-up.
+const ROOM_SIG_SEEN = new Map(); // handle → Map<nonce, ts>
+let ROOM_SIG_SEEN_SIZE = 0;
+const ROOM_SIG_SEEN_MAX = Number(process.env.ROOM_SIG_SEEN_MAX || 10_000);
+const ROOM_SIG_SEEN_PER_HANDLE_MAX = Math.max(64, Math.floor(ROOM_SIG_SEEN_MAX / 32));
+setInterval(() => {
+  const cutoff = Date.now() - SIG_MAX_SKEW_MS * 2;
+  for (const [h, inner] of ROOM_SIG_SEEN) {
+    for (const [n, v] of inner) if (v < cutoff) { inner.delete(n); ROOM_SIG_SEEN_SIZE--; }
+    if (inner.size === 0) ROOM_SIG_SEEN.delete(h);
+  }
+}, 5 * 60 * 1000).unref?.();
+
+// Verify a room message carries a valid signed-sender envelope. Blob is
+// `"room-msg <roomId> <ts> <nonce> <sha256_hex(ciphertext)>"` signed with the
+// handle's registered Ed25519 sign key. Returns true on success (and records
+// the nonce in the replay cache); false on any failure (skew, bad handle,
+// bad sig, replay).
+function verifyRoomSenderSig(body, roomId) {
+  const handle = String(body.sender_handle || '').toLowerCase();
+  const ts = parseInt(String(body.sender_ts || '0'), 10);
+  const nonce = String(body.sender_nonce || '');
+  const sig = String(body.sender_sig || '');
+  if (!/^[a-z0-9_-]{1,32}$/.test(handle)) return false;
+  if (!ts || !nonce || !sig) return false;
+  if (nonce.length < 16 || nonce.length > 64) return false;
+  if (!/^[A-Za-z0-9+/=_-]+$/.test(nonce)) return false;
+  if (Math.abs(Date.now() - ts) > SIG_MAX_SKEW_MS) return false;
+  const rec = identities.get(handle);
+  if (!rec) return false;
+  const inner = ROOM_SIG_SEEN.get(handle);
+  if (inner && inner.has(nonce)) return false;
+  try {
+    const signPub = Buffer.from(rec.sign_pub, 'base64');
+    if (signPub.length !== 32) return false;
+    const ctHash = crypto.createHash('sha256')
+      .update(Buffer.from(String(body.ciphertext || ''), 'utf8'))
+      .digest('hex');
+    const blob = Buffer.from(`room-msg ${roomId} ${ts} ${nonce} ${ctHash}`, 'utf8');
+    if (!nacl.sign.detached.verify(blob, Buffer.from(sig, 'base64'), signPub)) return false;
+    const perInner = inner || new Map();
+    if (perInner.size >= ROOM_SIG_SEEN_PER_HANDLE_MAX) {
+      const cutoff = Date.now() - SIG_MAX_SKEW_MS * 2;
+      for (const [n, v] of perInner) if (v < cutoff) { perInner.delete(n); ROOM_SIG_SEEN_SIZE--; }
+      if (perInner.size >= ROOM_SIG_SEEN_PER_HANDLE_MAX) return false;
+    }
+    if (ROOM_SIG_SEEN_SIZE >= ROOM_SIG_SEEN_MAX) {
+      for (const [h, im] of ROOM_SIG_SEEN) {
+        const evict = Math.min(200, im.size);
+        const it = im.keys();
+        for (let i = 0; i < evict; i++) { const k = it.next().value; if (k === undefined) break; im.delete(k); ROOM_SIG_SEEN_SIZE--; }
+        if (im.size === 0) ROOM_SIG_SEEN.delete(h);
+        break;
+      }
+    }
+    if (!inner) ROOM_SIG_SEEN.set(handle, perInner);
+    perInner.set(nonce, Date.now());
+    ROOM_SIG_SEEN_SIZE++;
+    return true;
+  } catch (_) { return false; }
+}
+
 function classifyUA(ua) {
   const s = String(ua || '').toLowerCase();
   if (/mozilla|chrome|safari|firefox|edge/.test(s) && !/python|curl|requests|wget|bot/.test(s)) {
@@ -907,6 +971,7 @@ function getOrCreateRoom(roomId) {
     room = {
       subs: new Set(), recent: [], waiters: new Set(),
       lastActive: now, createdAt: now, nextSeq: now,
+      signedOnly: false, // set-once by the first POST that opts in
     };
     rooms.set(roomId, room);
     METRICS.rooms_created_total += 1;
@@ -1733,10 +1798,30 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
     res.set('Retry-After', '60');
     return res.status(503).json({ error: 'global room buffer full — try again shortly' });
   }
+  // Signed-sender rooms: a POST can opt the room into signed-only mode on
+  // the very first message. After that, the flag is frozen. Every subsequent
+  // POST must carry a valid sender_sig bound to ciphertext + nonce; we stamp
+  // `@handle` and `sender_verified:true` on the envelope, overriding the
+  // client-supplied label so impersonation is impossible.
+  const hasSignedFields = !!(req.body.sender_handle && req.body.sender_sig);
+  if (hasSignedFields && !verifyRoomSenderSig(req.body, roomId)) {
+    return res.status(401).json({ error: 'bad sender_sig' });
+  }
+  if (!room.signedOnly && req.body.signed_only === true && room.recent.length === 0) {
+    if (!hasSignedFields) return res.status(400).json({ error: 'signed_only requires sender_sig on first message' });
+    room.signedOnly = true;
+  }
+  if (room.signedOnly && !hasSignedFields) {
+    return res.status(403).json({ error: 'signed_only: this room requires sender_sig from a registered @handle' });
+  }
+  const senderLabel = hasSignedFields
+    ? '@' + String(req.body.sender_handle).toLowerCase()
+    : (req.body.sender || 'agent').slice(0, 64);
   const msg = {
     seq: nextSeq(room),
     id: crypto.randomUUID(),
-    sender: (req.body.sender || 'agent').slice(0, 64),
+    sender: senderLabel,
+    sender_verified: hasSignedFields,
     ciphertext: req.body.ciphertext,
     nonce: req.body.nonce,
     ts: Date.now(),
@@ -1771,6 +1856,7 @@ app.get('/api/rooms/:roomId/status', (req, res) => {
     last_seq: roomLastSeq(room),
     age_seconds: Math.floor((Date.now() - room.createdAt) / 1000),
     idle_seconds: Math.floor((Date.now() - room.lastActive) / 1000),
+    signed_only: !!room.signedOnly,
   });
 });
 
@@ -2199,10 +2285,26 @@ function handleWs(ws, roomId, ip) {
       try { ws.send(JSON.stringify({ type: 'error', code: 503, error: 'global room buffer full' })); } catch (_) {}
       return;
     }
+    const wsHasSig = !!(msg.sender_handle && msg.sender_sig);
+    if (wsHasSig && !verifyRoomSenderSig(msg, roomId)) {
+      try { ws.send(JSON.stringify({ type: 'error', code: 401, error: 'bad sender_sig' })); } catch (_) {}
+      return;
+    }
+    if (!room.signedOnly && msg.signed_only === true && room.recent.length === 0 && wsHasSig) {
+      room.signedOnly = true;
+    }
+    if (room.signedOnly && !wsHasSig) {
+      try { ws.send(JSON.stringify({ type: 'error', code: 403, error: 'signed_only' })); } catch (_) {}
+      return;
+    }
+    const wsSenderLabel = wsHasSig
+      ? '@' + String(msg.sender_handle).toLowerCase()
+      : (msg.sender || 'user').slice(0, 64);
     const out = {
       seq: nextSeq(room),
       id: crypto.randomUUID(),
-      sender: (msg.sender || 'user').slice(0, 64),
+      sender: wsSenderLabel,
+      sender_verified: wsHasSig,
       ciphertext: msg.ciphertext,
       nonce: msg.nonce,
       ts: Date.now(),

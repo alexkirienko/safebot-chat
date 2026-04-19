@@ -79,7 +79,8 @@ class Message:
 class Room:
     """A connection to a single SafeBot.Chat room."""
 
-    def __init__(self, url: str, name: Optional[str] = None, timeout: float = 30.0):
+    def __init__(self, url: str, name: Optional[str] = None, timeout: float = 30.0,
+                 identity: "Optional[Identity]" = None, signed_only: bool = False):
         # If no name is given, generate a stable random one so that two agents
         # in the same room (each constructed with default args) don't collide
         # on the same sender label — sharing a name causes the include_self=False
@@ -114,6 +115,18 @@ class Room:
         self._session = requests.Session()
         self._timeout = timeout
         self.name = name
+        # Signed-sender rooms: if an Identity is supplied, every send() attaches
+        # sender_handle + sender_sig so the server can stamp a verified `@handle`
+        # label on the envelope. `signed_only` opts the room into the mode on
+        # its first message; honoured only when room.recent is empty server-side.
+        self.identity = identity
+        self._signed_only_opt_in = bool(signed_only)
+        if signed_only and not identity:
+            raise ValueError("signed_only=True requires an Identity — no way to sign otherwise")
+        # Room URL fragment can carry `signed=1` as a convention so URL recipients
+        # know they need an Identity. If present without identity, raise early.
+        if params.get("signed") == "1" and not identity:
+            raise ValueError("room URL has signed=1 but no Identity was provided")
 
     # --- I/O ---------------------------------------------------------------
 
@@ -129,11 +142,27 @@ class Room:
         nonce = nacl_random(SecretBox.NONCE_SIZE)
         encrypted = self._box.encrypt(text.encode("utf-8"), nonce)
         ct = encrypted.ciphertext
+        ct_b64 = base64.b64encode(ct).decode("ascii")
         body = {
             "sender": self.name,
-            "ciphertext": base64.b64encode(ct).decode("ascii"),
+            "ciphertext": ct_b64,
             "nonce": base64.b64encode(nonce).decode("ascii"),
         }
+        if self.identity is not None:
+            import hashlib, secrets as _sec, time as _t
+            ts_ms = int(_t.time() * 1000)
+            sig_nonce = _sec.token_urlsafe(18)
+            ct_hash = hashlib.sha256(ct_b64.encode("ascii")).hexdigest()
+            blob = f"room-msg {self.room_id} {ts_ms} {sig_nonce} {ct_hash}".encode("utf-8")
+            sig = self.identity._sign_sk.sign(blob).signature
+            body["sender_handle"] = self.identity.handle
+            body["sender_ts"] = ts_ms
+            body["sender_nonce"] = sig_nonce
+            body["sender_sig"] = base64.b64encode(sig).decode("ascii")
+            # Opt the room into signed-only mode on first post. Server ignores
+            # the flag on subsequent posts — at-most-once semantics there.
+            if self._signed_only_opt_in:
+                body["signed_only"] = True
         last_err: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
@@ -186,7 +215,7 @@ class Room:
                     url,
                     stream=True,
                     headers={"Accept": "text/event-stream"},
-                    timeout=None,
+                    timeout=(10.0, max_idle_sec),
                 )
                 resp.raise_for_status()
                 attempt = 0  # successful open resets backoff
@@ -369,6 +398,12 @@ def _cli() -> int:
         action="store_true",
         help="include own messages in --tail / --watch output",
     )
+    ap.add_argument(
+        "--max-idle",
+        type=float,
+        default=60.0,
+        help="force SSE reconnect if no event arrives within N seconds (default 60; server sends keepalive every 15s)",
+    )
     args = ap.parse_args()
     room = Room(args.url, name=args.name)
     if args.say:
@@ -385,7 +420,7 @@ def _cli() -> int:
             fh = open(args.out, "a", buffering=1, encoding="utf-8")
             close_fh = True
         try:
-            for m in room.stream(include_self=args.include_self, auto_reconnect=True):
+            for m in room.stream(include_self=args.include_self, auto_reconnect=True, max_idle_sec=args.max_idle):
                 line = json.dumps(
                     {
                         "seq": m.seq,
@@ -407,7 +442,7 @@ def _cli() -> int:
 
     if args.watch:
         try:
-            for m in room.stream(include_self=args.include_self, auto_reconnect=True):
+            for m in room.stream(include_self=args.include_self, auto_reconnect=True, max_idle_sec=args.max_idle):
                 ts = time.strftime("%H:%M:%S", time.localtime(m.ts)) if m.ts else ""
                 body = m.text if m.text is not None else "[undecryptable]"
                 print(f"{ts}  {m.sender:>20}  {body}")
