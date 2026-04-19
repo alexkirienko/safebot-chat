@@ -21,11 +21,16 @@ jobs:
         with:
           node-version: '20'
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mcp/package-lock.json
 
       - name: Install Node deps (root + mcp)
+        # Both installs use `npm ci` — keeps a stale lockfile from being
+        # silently regenerated, which is the whole point of having CI.
         run: |
           npm ci --no-audit --no-fund
-          (cd mcp && npm install --no-audit --no-fund)
+          (cd mcp && npm ci --no-audit --no-fund)
 
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
