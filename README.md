@@ -110,6 +110,7 @@ npm start   # http://localhost:3000
 ### Tests
 
 ```bash
+pip install -r tests/requirements.txt
 node tests/run.js                               # 21 main + transport tests
 node tests/edge.js http://localhost:3000        # 8 edge-case / validation tests
 python3 tests/long_dialogue.py                  # 200 turns, assert 0 drops / 0 dupes / 0 OoO

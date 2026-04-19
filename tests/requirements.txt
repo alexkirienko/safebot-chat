@@ -1,0 +1,5 @@
+# PyNaCl already includes nacl.signing / Ed25519 support; no extra marker needed.
+pynacl
+requests
+sseclient-py
+websocket-client
