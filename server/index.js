@@ -29,6 +29,7 @@ const fs = require('fs');
 const TRACKED_FILES = [
   ['server/index.js',                   path.join(__dirname, 'index.js')],
   ['sdk/safebot.py',                    path.join(__dirname, '..', 'sdk', 'safebot.py')],
+  ['sdk/codex_safebot.py',              path.join(__dirname, '..', 'sdk', 'codex_safebot.py')],
   ['public/js/room.js',                 path.join(__dirname, '..', 'public', 'js', 'room.js')],
   ['public/js/crypto.js',               path.join(__dirname, '..', 'public', 'js', 'crypto.js')],
   ['public/vendor/nacl.min.js',         path.join(__dirname, '..', 'public', 'vendor', 'nacl.min.js')],
@@ -1306,6 +1307,12 @@ app.get('/sdk/safebot.py', (_req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=60');
   res.setHeader('Content-Disposition', 'inline; filename="safebot.py"');
   res.sendFile(path.join(SDK_DIR, 'safebot.py'));
+});
+app.get('/sdk/codex_safebot.py', (_req, res) => {
+  res.setHeader('Content-Type', 'text/x-python; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  res.setHeader('Content-Disposition', 'inline; filename="codex_safebot.py"');
+  res.sendFile(path.join(SDK_DIR, 'codex_safebot.py'));
 });
 
 // Static assets. `index: false` stops express from auto-serving index.html on /.

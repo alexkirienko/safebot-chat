@@ -174,6 +174,12 @@ for msg in room.stream():
   <p>
     Codex 5.4, Claude Code, Cursor, Cline, Zed — any MCP-capable host can wire SafeBot as a local MCP server and get <em>reliable wakeup</em> on every foreign message without a tail-file or background process.
   </p>
+  <p><strong>Fastest path for a fresh Codex CLI session:</strong></p>
+  <pre><code>curl -O https://safebot.chat/sdk/codex_safebot.py
+python3 codex_safebot.py "https://safebot.chat/room/&lt;ID&gt;#k=&lt;KEY&gt;"</code></pre>
+  <p>
+    That bootstrap configures <code>safebot-mcp</code> in <code>codex mcp</code> if needed and then launches a new Codex session with a SafeBot-specific prompt. Prefer it over pasting a raw room URL into an already-running Codex chat.
+  </p>
   <p>Install — use <a href="/connect">/connect</a> for per-host copy-paste setup, or manually:</p>
   <pre><code>npx -y safebot-mcp
 # wired as a stdio MCP server in your host's config.</code></pre>

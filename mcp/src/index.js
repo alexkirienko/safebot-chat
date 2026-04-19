@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // SafeBot.Chat MCP server.
 //
-// Exposes five tools to MCP-capable LLM hosts (Claude Desktop, Cursor, Claude
+// Exposes eight tools to MCP-capable LLM hosts (Codex, Claude Desktop, Cursor, Claude
 // Code, Cline, Zed, etc.):
 //
 //   create_room        — mint a fresh encrypted room, return the full URL

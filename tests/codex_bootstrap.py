@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Smoke tests for sdk/codex_safebot.py without touching real Codex config."""
+
+from __future__ import annotations
+
+import json
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "sdk" / "codex_safebot.py"
+
+
+FAKE_CODEX = r"""#!/usr/bin/env python3
+import json, os, sys
+
+log = os.environ["TEST_LOG"]
+with open(log, "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+
+args = sys.argv[1:]
+if args[:3] == ["mcp", "get", "safebot"]:
+    raise SystemExit(0 if os.environ.get("TEST_HAS_MCP") == "1" else 1)
+if args[:3] == ["mcp", "remove", "safebot"]:
+    raise SystemExit(0)
+if args[:3] == ["mcp", "add", "safebot"]:
+    raise SystemExit(0)
+raise SystemExit(0)
+"""
+
+
+FAKE_NPX = r"""#!/usr/bin/env python3
+import sys
+raise SystemExit(0)
+"""
+
+
+def make_exec(path: Path, body: str) -> None:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def run_case(argv: list[str], *, has_mcp: bool) -> list[list[str]]:
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        log = tmp / "log.jsonl"
+        make_exec(bindir / "codex", FAKE_CODEX)
+        make_exec(bindir / "npx", FAKE_NPX)
+        env = os.environ.copy()
+        env["PATH"] = f"{bindir}:{env.get('PATH', '')}"
+        env["TEST_LOG"] = str(log)
+        env["TEST_HAS_MCP"] = "1" if has_mcp else "0"
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT)] + argv,
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        if proc.returncode != 0:
+            print(proc.stdout)
+            print(proc.stderr, file=sys.stderr)
+            raise SystemExit(proc.returncode)
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def ok(msg: str) -> None:
+    print("ok -", msg)
+
+
+def main() -> int:
+    calls = run_case(["--install-only"], has_mcp=False)
+    if calls != [["mcp", "get", "safebot"], ["mcp", "add", "safebot", "--", "npx", "-y", "safebot-mcp"]]:
+        raise SystemExit(f"unexpected install calls: {calls!r}")
+    ok("install-only configures safebot MCP when missing")
+
+    calls = run_case(["--install-only"], has_mcp=True)
+    if calls != [["mcp", "get", "safebot"]]:
+        raise SystemExit(f"unexpected existing-config calls: {calls!r}")
+    ok("install-only leaves existing safebot MCP entry in place")
+
+    calls = run_case(["https://safebot.chat/room/TEST#k=abc", "--", "-m", "gpt-5.4"], has_mcp=False)
+    if calls[:2] != [["mcp", "get", "safebot"], ["mcp", "add", "safebot", "--", "npx", "-y", "safebot-mcp"]]:
+        raise SystemExit(f"unexpected launch prelude: {calls!r}")
+    launch = calls[2]
+    if launch[:2] != ["-m", "gpt-5.4"]:
+        raise SystemExit(f"codex args were not forwarded: {launch!r}")
+    if "https://safebot.chat/room/TEST#k=abc" not in launch[-1] or "claim_task" not in launch[-1]:
+        raise SystemExit(f"launch prompt missing room URL / claim_task guidance: {launch[-1]!r}")
+    ok("launch path forwards Codex args and injects the SafeBot prompt")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

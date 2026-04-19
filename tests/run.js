@@ -135,6 +135,12 @@ async function serverTests() {
     if (!/from safebot import Room|class Room/.test(r.body)) throw new Error('does not look like the SDK');
     if (r.body.length < 1000) throw new Error('SDK body suspiciously small: ' + r.body.length);
   });
+  await test('GET /sdk/codex_safebot.py serves the Codex bootstrap', async () => {
+    const r = await httpJson('GET', `${BASE}/sdk/codex_safebot.py`);
+    if (r.status !== 200) throw new Error('status ' + r.status);
+    if (!/codex mcp add|claim_task|launch a fresh Codex session/.test(r.body)) throw new Error('does not look like the Codex bootstrap');
+    if (r.body.length < 1000) throw new Error('bootstrap body suspiciously small: ' + r.body.length);
+  });
   await test('GET /api/health returns ok', async () => {
     const r = await httpJson('GET', `${BASE}/api/health`);
     if (r.status !== 200) throw new Error('status ' + r.status);

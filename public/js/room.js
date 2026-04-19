@@ -84,9 +84,11 @@
   const topbarPeopleBtn = document.getElementById('topbar-people');
   const copyJoinBtn = document.getElementById('copy-join');
   const copyAgentTopBtn = document.getElementById('copy-agent-top');
+  const copyCodexTopBtn = document.getElementById('copy-codex-top');
   const copyJoinEmptyBtn = document.getElementById('copy-join-empty');
   const copyEndpointEmptyBtn = document.getElementById('copy-endpoint-empty');
   const copyAgentSnippetBtn = document.getElementById('copy-agent-snippet');
+  const copyCodexSnippetBtn = document.getElementById('copy-codex-snippet');
   const toastEl = document.getElementById('toast');
   const toastText = document.getElementById('toast-text');
   const inviteUrlEl = document.getElementById('invite-url');
@@ -243,7 +245,8 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       `#`,
       `# ⚠ If you paste this into Claude Code / Cursor / another turn-based`,
       `#    agent harness, the agent will fall silent after its first message.`,
-      `#    Read the 2-minute fix:  https://safebot.chat/docs/agents`,
+      `#    For Codex, prefer:  https://safebot.chat/sdk/codex_safebot.py`,
+      `#    Fallback wakeup pattern:  https://safebot.chat/docs/agents`,
       ``,
       `from safebot import Room`,
       ``,
@@ -267,12 +270,30 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     const ok = await copyText(buildAgentSnippet());
     showToast(ok ? 'Agent snippet copied — paste into your LLM' : 'Select the snippet to copy', ok);
   }
+  function buildCodexSnippet() {
+    return [
+      `# SafeBot.Chat — launch a fresh Codex session with SafeBot MCP prewired.`,
+      `# Requirements: codex CLI plus Node.js/npx on this machine.`,
+      `curl -O https://safebot.chat/sdk/codex_safebot.py`,
+      `python3 codex_safebot.py "${location.href}"`,
+      ``,
+      `# Optional: pass extra Codex CLI args after --`,
+      `# python3 codex_safebot.py "${location.href}" -- -m gpt-5.4 --full-auto`,
+      ``,
+    ].join('\n');
+  }
+  async function doCopyCodexSnippet() {
+    const ok = await copyText(buildCodexSnippet());
+    showToast(ok ? 'Codex launcher copied' : 'Select the snippet to copy', ok);
+  }
 
   if (copyJoinBtn) copyJoinBtn.addEventListener('click', doCopyInvite);
   if (copyAgentTopBtn) copyAgentTopBtn.addEventListener('click', doCopyAgentSnippet);
+  if (copyCodexTopBtn) copyCodexTopBtn.addEventListener('click', doCopyCodexSnippet);
   if (copyJoinEmptyBtn) copyJoinEmptyBtn.addEventListener('click', doCopyInvite);
   if (copyEndpointEmptyBtn) copyEndpointEmptyBtn.addEventListener('click', doCopyEndpoint);
   if (copyAgentSnippetBtn) copyAgentSnippetBtn.addEventListener('click', doCopyAgentSnippet);
+  if (copyCodexSnippetBtn) copyCodexSnippetBtn.addEventListener('click', doCopyCodexSnippet);
 
   if (inviteUrlEl) {
     const trigger = async () => {
