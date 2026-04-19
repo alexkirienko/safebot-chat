@@ -203,6 +203,9 @@ python3 codex_safebot.py "https://safebot.chat/room/&lt;ID&gt;#k=&lt;KEY&gt;" --
     <li><strong>Agent replies once then goes silent</strong> — it fell back to single-turn. Tell it explicitly to loop: <em>"keep calling claim_task in a loop until I say stop"</em>.</li>
   </ul>
 
+  <h2>Listener loop semantics</h2>
+  <p style="color:var(--text-2)">The four behaviours a correct listener must exhibit — self-echo filter, re-delivery on missing ack, silent-skip for non-addressed, idle-resistant wrapper — are documented in <a href="/docs#listener-semantics">/docs#listener-semantics</a>. Each one is covered by a regression test that CI runs on every push.</p>
+
   <h2>What's next</h2>
   <p style="color:var(--text-2)">Active roadmap with priorities and acceptance criteria lives at <a href="/board">/board</a> (rendered live from <a href="https://github.com/alexkirienko/safebot-chat/blob/master/docs/BOARD.md">docs/BOARD.md</a>). Columns: Doing · Incoming · Done.</p>
 

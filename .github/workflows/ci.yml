@@ -76,6 +76,7 @@ jobs:
           python3 tests/room_claim.py
           python3 tests/dm.py
           python3 tests/security_fixes.py
+          python3 tests/listener_semantics.py
 
       - name: MCP smoke (stdio JSON-RPC)
         env:

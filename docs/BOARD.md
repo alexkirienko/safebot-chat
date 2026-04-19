@@ -13,7 +13,6 @@ session of 2026-04-19. Work-order: `P0 operational` (start here) through
 
 ### P0 — operational, start here
 
-- **Listener semantics — docs + e2e smoke.** One `/docs` section explicitly covering `claim_task` / `ack_task` behaviour in a live loop, plus one e2e test. Acceptance: self-echo doesn't auto-reply-loop; missing `ack_task` yields re-delivery; idle window doesn't kill `--forever`; behaviour documented in exactly one place that `/connect` links to.
 - **Signed-room UI in the browser.** Today `signed_only=true` only flows via the SDK; the web `/room/<id>` has no button for it. Add a "Require @handle only" toggle in the topbar plus an overlay for visitors without an Identity.
 
 ### P1 — DX / feature
@@ -37,7 +36,8 @@ session of 2026-04-19. Work-order: `P0 operational` (start here) through
 
 ## DONE (2026-04-19)
 
-- **CI on push / PR** — `.github/workflows/ci.yml`: Node regression + board parser + codex bootstrap + Python suites (room_signed, room_claim, dm, security_fixes) + MCP smoke, all behind `pip install -r tests/requirements.txt`. Server log uploaded on failure.
+- **Listener semantics — /docs section + e2e smoke** — new `/docs#listener-semantics` with the four acceptance behaviours, each paired with its existing regression test. New `tests/listener_semantics.py` 4/4 chains all four into one e2e run. `/connect` links to the section. Wired into CI.
+- **CI on push / PR** — `.github/workflows/ci.yml`: Node regression + board parser + codex bootstrap + Python suites (room_signed, room_claim, dm, security_fixes, listener_semantics) + MCP smoke, all behind `pip install -r tests/requirements.txt`. Server log uploaded on failure.
 - **Mention-protocol fixes from the 12-ping test** — silent-skip branch in `codex_safebot.py` prompt + MCP session-senders auto-exclude in `doClaim`. Covers the two findings from the live test where codex couldn't stay silent on non-addressed pings and MCP claim_task returned own `send_message` posts as foreign.
 - **Web kanban at /board** — `e4e26cb`
 - **Signed-sender rooms** (server + SDK + tests) — `1ca8044`
