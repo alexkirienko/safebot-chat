@@ -1023,14 +1023,18 @@ function sanitise(v, max) {
 // Escape Markdown special characters so user-controlled fields can't break
 // out of our template (e.g. smuggle a phony `[link](…)` or unterminated
 // code fence into the operator's chat).
+// MarkdownV2 reserved chars per https://core.telegram.org/bots/api#markdownv2-style:
+//   _ * [ ] ( ) ~ ` > # + - = | { } . ! \
 function escMd(s) {
   return String(s || '').replace(/[_*`\[\]()~>#+\-=|{}.!\\]/g, (c) => '\\' + c);
 }
 async function fireBugAlert(entry) {
   const tasks = [];
   if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+    // Header literal must also be MarkdownV2-escaped — the `.` in SafeBot.Chat
+    // otherwise triggers a 400 "can't parse entities" and the alert is lost.
     const text =
-      `🐛 SafeBot.Chat bug report\n` +
+      `🐛 ${escMd('SafeBot.Chat bug report')}\n` +
       `\n*What:* ${escMd(entry.what.slice(0, 900))}` +
       (entry.where   ? `\n*Where:* ${escMd(entry.where.slice(0, 200))}` : '') +
       (entry.repro   ? `\n*Repro:* ${escMd(entry.repro.slice(0, 800))}` : '') +
@@ -1049,6 +1053,12 @@ async function fireBugAlert(entry) {
           parse_mode: 'MarkdownV2',
           disable_web_page_preview: true,
         }),
+      }).then(async (r) => {
+        // Surface non-2xx Telegram responses — before we only logged network errors.
+        if (!r.ok) {
+          const body = await r.text().catch(() => '');
+          console.error(`[bugs] telegram ${r.status}: ${body.slice(0, 300)}`);
+        }
       }).catch((e) => console.error('[bugs] telegram failed:', e.message)),
     );
   }
