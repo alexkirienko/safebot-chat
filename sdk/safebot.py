@@ -80,7 +80,9 @@ class Room:
     """A connection to a single SafeBot.Chat room."""
 
     def __init__(self, url: str, name: Optional[str] = None, timeout: float = 30.0,
-                 identity: "Optional[Identity]" = None, signed_only: bool = False):
+                 identity: "Optional[Identity]" = None, signed_only: bool = False,
+                 accept_adoptions: bool = False,
+                 adopt_save_path: Optional[str] = None):
         # If no name is given, generate a stable random one so that two agents
         # in the same room (each constructed with default args) don't collide
         # on the same sender label — sharing a name causes the include_self=False
@@ -127,6 +129,20 @@ class Room:
         # know they need an Identity. If present without identity, raise early.
         if params.get("signed") == "1" and not identity:
             raise ValueError("room URL has signed=1 but no Identity was provided")
+        # --- Adopt protocol (per-Room ephemeral X25519 keypair) ----------
+        # The operator-initiated "cross-process identity adopt" flow
+        # encrypts a fresh Identity to this agent's box_pub. We generate
+        # an ephemeral X25519 keypair per Room and advertise it via the
+        # SSE query param (see stream()), so other participants see
+        # `box_pub` in presence events. Lazy-import nacl.public because
+        # it's defined further down in the module as a private alias.
+        from nacl.public import PrivateKey as _BoxSkCls  # noqa: N806
+        self._box_sk = _BoxSkCls.generate()
+        _raw_pub = bytes(self._box_sk.public_key)
+        self.box_pub_b64u = base64.urlsafe_b64encode(_raw_pub).rstrip(b"=").decode("ascii")
+        self.accept_adoptions = bool(accept_adoptions)
+        self._adopt_save_path = adopt_save_path  # or None → don't persist
+        self._adopt_seen = set()  # adopt_ids we've processed (in-memory dedup)
 
     # --- I/O ---------------------------------------------------------------
 
@@ -208,9 +224,16 @@ class Room:
         attempt = 0
         while True:
             try:
-                url = f"{self._base}/events"
+                # Declare our name + box_pub via query params so the
+                # server treats us as a presence participant — needed for
+                # the adopt flow which encrypts handoffs against this
+                # pubkey. SSE has no upstream frames, so query params are
+                # the parallel to the browser's WS hello.
+                from urllib.parse import quote as _q
+                qs_parts = [f"name={_q(self.name)}", f"box_pub={_q(self.box_pub_b64u)}"]
                 if last_seq > 0:
-                    url = f"{url}?after={last_seq}"
+                    qs_parts.append(f"after={last_seq}")
+                url = f"{self._base}/events?" + "&".join(qs_parts)
                 resp = self._session.get(
                     url,
                     stream=True,
@@ -243,6 +266,13 @@ class Room:
                     if not include_self and obj.get("sender") == self.name:
                         continue
                     decoded = self._decode(obj)
+                    # Adopt-envelope intercept: if plaintext is a
+                    # safebot_adopt_v1 envelope targeted at us, process
+                    # silently (do not yield to caller). Runs BEFORE any
+                    # caller-visible side effect — a correctly-targeted
+                    # adopt never surfaces as a chat message.
+                    if decoded.text and self._try_apply_adopt(decoded.text, decoded.sender):
+                        continue
                     if mention_only:
                         txt = decoded.text or ""
                         # Word-boundary @name match (case-insensitive).
@@ -409,6 +439,91 @@ class Room:
             return None
         self.ack_claim(identity, c["claim_id"], c["message"].seq)
         return c["message"]
+
+    def _try_apply_adopt(self, plaintext: str, sender: str) -> bool:
+        """If plaintext is a safebot_adopt_v1 envelope aimed at us, adopt
+        the contained Identity and return True. Otherwise return False.
+
+        Returns True also for envelopes that look like adopts but are
+        either for a different target, malformed, or replayed — so the
+        caller never yields them as chat. This keeps keypair material
+        out of user-facing text and out of any downstream transcript
+        cache on the consumer side.
+        """
+        if not plaintext.startswith("{"):
+            return False
+        try:
+            env = json.loads(plaintext)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(env, dict) or env.get("safebot_adopt_v1") is not True:
+            return False
+        # From here on, treat the envelope as consumed.
+        if env.get("target_name") != self.name:
+            return True
+        adopt_id = env.get("adopt_id")
+        if not adopt_id or adopt_id in self._adopt_seen:
+            return True
+        self._adopt_seen.add(adopt_id)
+        if not self.accept_adoptions:
+            sys.stderr.write(
+                f"[safebot] adopt offer received from {sender!r} but accept_adoptions=False — ignoring\n"
+            )
+            return True
+        sender_pub_b64u = env.get("sender_box_pub") or ""
+        nonce_b64u = env.get("nonce") or ""
+        ct_b64u = env.get("ciphertext") or ""
+        if not (sender_pub_b64u and nonce_b64u and ct_b64u):
+            return True
+        from nacl.public import PublicKey as _BoxPkCls, Box as _BoxCls  # noqa: N806
+        try:
+            pad = lambda s: s + "=" * (-len(s) % 4)  # noqa: E731
+            sender_pub = _BoxPkCls(base64.urlsafe_b64decode(pad(sender_pub_b64u)))
+            nonce = base64.urlsafe_b64decode(pad(nonce_b64u))
+            ct = base64.urlsafe_b64decode(pad(ct_b64u))
+            opened = _BoxCls(self._box_sk, sender_pub).decrypt(ct, nonce)
+            inner = json.loads(opened.decode("utf-8"))
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[safebot] adopt decrypt failed: {e}\n")
+            return True
+        handle = inner.get("handle")
+        sk_b64u = inner.get("box_sk_b64u")
+        seed_b64u = inner.get("sign_seed_b64u")
+        if not (handle and sk_b64u and seed_b64u):
+            return True
+        # Build a new Identity from the provisioned keys. Sits on top of
+        # the existing Identity class so the rest of the SDK treats us
+        # as signed uniformly.
+        try:
+            pad = lambda s: s + "=" * (-len(s) % 4)  # noqa: E731
+            box_sk_bytes = base64.urlsafe_b64decode(pad(sk_b64u))
+            sign_seed_bytes = base64.urlsafe_b64decode(pad(seed_b64u))
+            self.identity = Identity(
+                handle,
+                box_sk=box_sk_bytes,
+                sign_sk=sign_seed_bytes,
+                base_url=self._base.rsplit("/api/", 1)[0],
+            )
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"[safebot] adopt identity build failed: {e}\n")
+            return True
+        # Persist if configured. Uses the canonical 96-byte blob format
+        # so the file can be loaded later with Identity.from_bytes or by
+        # the CLI --identity-file path.
+        if self._adopt_save_path:
+            try:
+                import os as _os
+                _os.makedirs(_os.path.dirname(self._adopt_save_path) or ".", mode=0o700, exist_ok=True)
+                fd = _os.open(self._adopt_save_path, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+                try:
+                    _os.write(fd, self.identity.to_bytes())
+                finally:
+                    _os.close(fd)
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"[safebot] adopt save failed: {e}\n")
+        self.name = self.identity.handle
+        sys.stderr.write(f"[safebot] adopted @{self.identity.handle}\n")
+        return True
 
     def status(self) -> dict:
         """Return a lightweight snapshot of the room (no join required)."""
