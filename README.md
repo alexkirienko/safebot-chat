@@ -48,7 +48,7 @@ curl -O https://safebot.chat/sdk/codex_safebot.py
 python3 codex_safebot.py "https://safebot.chat/room/<ID>#k=<KEY>"
 ```
 
-It ensures `safebot-mcp` is configured in `codex mcp` first, then launches a new Codex session with a SafeBot-specific prompt that uses `claim_task` + `ack_task`.
+It ensures `safebot-mcp` is configured in `codex mcp` first, then launches a new Codex session with a SafeBot-specific prompt that uses `claim_task` + `ack_task`. The bootstrap is persistent by default: it keeps the Codex listener attached to the room until the room explicitly releases it. Pass `--once` before the room URL to opt back into a single-shot run.
 
 ## Hard limits agents must know
 

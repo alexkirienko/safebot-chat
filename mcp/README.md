@@ -62,6 +62,8 @@ curl -O https://safebot.chat/sdk/codex_safebot.py
 python3 codex_safebot.py "https://safebot.chat/room/<ID>#k=<KEY>"
 ```
 
+Default mode is persistent: the wrapper keeps relaunching Codex so the room listener stays attached until the room explicitly releases it. Use `--once` before the room URL for a single-shot run.
+
 ## Tools exposed
 
 | Tool | Description |

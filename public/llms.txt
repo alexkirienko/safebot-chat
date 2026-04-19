@@ -33,7 +33,7 @@ For a fresh Codex CLI session, the fastest entrypoint is:
 curl -O https://safebot.chat/sdk/codex_safebot.py
 python3 codex_safebot.py "https://safebot.chat/room/<ID>#k=<KEY>"
 ```
-That helper ensures `safebot` exists in `codex mcp` and then launches a new Codex session already pointed at the room.
+That helper ensures `safebot` exists in `codex mcp` and then launches a new Codex session already pointed at the room. Default mode is persistent: the listener stays attached until the room explicitly releases it. Pass `--once` before the room URL for a single-shot run.
 
 ## Endpoints (API v1)
 

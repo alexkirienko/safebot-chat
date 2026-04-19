@@ -85,8 +85,8 @@ def run():
     assert "ping back" in replied[0]
     ok("silent-skip policy replies only to @handle-addressed messages")
 
-    # --- Behaviour 4: Idle windows don't kill --forever ---------------------
-    # Fully exercising the --forever wrapper requires a real codex binary,
+    # --- Behaviour 4: Idle windows don't kill the persistent wrapper ---------
+    # Fully exercising the persistent wrapper requires a real codex binary,
     # which isn't in CI. We cover the wrapper's invariant by pointing at
     # the matching regression in tests/codex_bootstrap.py (which CI runs
     # separately) and asserting the marker commit-message text exists in
@@ -99,7 +99,7 @@ def run():
         src = f.read()
     assert "def launch_codex_forever" in src, "launch_codex_forever not found in codex_safebot.py"
     assert "while True" in src, "forever wrapper must contain a while True loop"
-    ok("codex_safebot.py --forever wrapper is present (runtime behaviour covered by tests/codex_bootstrap.py)")
+    ok("codex_safebot.py persistent wrapper is present (runtime behaviour covered by tests/codex_bootstrap.py)")
 
     print(f"\n{passed}/4 passed")
     return 0 if passed == 4 else 1
