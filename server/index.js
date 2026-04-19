@@ -298,12 +298,22 @@ function waiterRelease(ip) {
   if (n <= 0) waitersByIp.delete(ip); else waitersByIp.set(ip, n);
 }
 
+// Recently-seen inbox-sig nonces. Stored `${handle}|${nonce}` → ts. Pruned
+// opportunistically on access plus every 5 minutes. Bounds skew-window replay:
+// a captured Authorization header cannot be sent a second time while the
+// original ts is still in the acceptable window.
+const INBOX_SIG_SEEN = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - SIG_MAX_SKEW_MS;
+  for (const [k, v] of INBOX_SIG_SEEN) if (v < cutoff) INBOX_SIG_SEEN.delete(k);
+}, 5 * 60 * 1000).unref?.();
+
 function verifyInboxSig(req, handle) {
-  // Header: Authorization: SafeBot ts=<ms>,sig=<base64>
-  // Signed blob: `<method> <originalUrl> <ts>`. Using originalUrl (includes
-  // the query string) binds the signature to `?after=` / `?timeout=` so a
-  // captured header can't be replayed against the same endpoint with
-  // different parameters within the skew window.
+  // Header:  Authorization: SafeBot ts=<ms>,n=<nonce>,sig=<base64>
+  // Signed blob: `<method> <originalUrl> <ts> <nonce>`.
+  //   - originalUrl binds the sig to query params (can't swap ?after=).
+  //   - nonce makes the signed payload per-request-unique so a captured
+  //     header cannot be replayed verbatim during the 60 s skew window.
   const auth = String(req.headers.authorization || '');
   if (!auth.startsWith('SafeBot ')) return false;
   const parts = Object.fromEntries(auth.slice(8).split(',').map((kv) => {
@@ -313,16 +323,23 @@ function verifyInboxSig(req, handle) {
   }));
   const ts = parseInt(parts.ts || '0', 10);
   const sig = parts.sig || '';
-  if (!ts || !sig) return false;
+  const nonce = parts.n || '';
+  if (!ts || !sig || !nonce) return false;
+  if (nonce.length < 16 || nonce.length > 64) return false;
+  if (!/^[A-Za-z0-9+/=_-]+$/.test(nonce)) return false;
   if (Math.abs(Date.now() - ts) > SIG_MAX_SKEW_MS) return false;
   const rec = identities.get(handle);
   if (!rec) return false;
+  const seenKey = `${handle}|${nonce}`;
+  if (INBOX_SIG_SEEN.has(seenKey)) return false;
   try {
     const signPub = Buffer.from(rec.sign_pub, 'base64');
     if (signPub.length !== 32) return false;
     const urlPart = req.originalUrl || req.url || req.path;
-    const blob = Buffer.from(`${req.method} ${urlPart} ${ts}`, 'utf8');
-    return nacl.sign.detached.verify(blob, Buffer.from(sig, 'base64'), signPub);
+    const blob = Buffer.from(`${req.method} ${urlPart} ${ts} ${nonce}`, 'utf8');
+    if (!nacl.sign.detached.verify(blob, Buffer.from(sig, 'base64'), signPub)) return false;
+    INBOX_SIG_SEEN.set(seenKey, Date.now());
+    return true;
   } catch (_) { return false; }
 }
 

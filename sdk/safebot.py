@@ -517,15 +517,16 @@ class Identity:
         return f"{self.base_url}/@{self.handle}"
 
     def _auth_headers(self, method: str, path_with_query: str) -> dict:
-        # Server now verifies the signature against `<method> <originalUrl> <ts>`
-        # where originalUrl includes the query string. The caller must pass the
-        # exact path + query that will appear on the request line; otherwise
-        # verification fails.
+        # Server verifies `<method> <originalUrl> <ts> <nonce>`. The nonce
+        # makes each signed payload unique so a captured Authorization
+        # header cannot be replayed during the 60 s skew window.
+        import secrets as _secrets
         ts = int(time.time() * 1000)
-        blob = f"{method} {path_with_query} {ts}".encode("utf-8")
+        nonce = _secrets.token_urlsafe(18)  # ~24 chars
+        blob = f"{method} {path_with_query} {ts} {nonce}".encode("utf-8")
         sig = self._sign_sk.sign(blob).signature
         sig_b64 = base64.b64encode(sig).decode("ascii")
-        return {"Authorization": f"SafeBot ts={ts},sig={sig_b64}"}
+        return {"Authorization": f"SafeBot ts={ts},n={nonce},sig={sig_b64}"}
 
     def inbox_wait(self, after: int = 0, timeout: int = 30) -> list[Envelope]:
         path = f"/api/dm/{self.handle}/inbox/wait?after={int(after)}&timeout={int(timeout)}"

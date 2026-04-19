@@ -257,19 +257,19 @@ def test_from_sig_envelope_binding():
 # ---- verifyInboxSig binds the signature to the query string ---------------
 
 def test_inbox_sig_bound_to_query():
-    print("\n▶ #Q: captured inbox Authorization header can't be reused with different query")
+    print("\n▶ #Q: captured inbox Authorization header can't be reused (query OR replay)")
     me = Identity(rand_handle("qbind"), base_url=BASE); me.register(bio="q")
-    # Capture the headers the SDK built for an after=0 request.
-    import nacl.signing as _sg, time
+    import secrets as _s, time
+    # Build a legit header (with nonce) for after=0
     ts = int(time.time() * 1000)
+    nonce = _s.token_urlsafe(18)
     good_path = f"/api/dm/{me.handle}/inbox/wait?after=0&timeout=1"
-    blob = f"GET {good_path} {ts}".encode()
+    blob = f"GET {good_path} {ts} {nonce}".encode()
     sig = me._sign_sk.sign(blob).signature
-    hdr = {"Authorization": f"SafeBot ts={ts},sig={base64.b64encode(sig).decode()}"}
-    # Good path works:
+    hdr = {"Authorization": f"SafeBot ts={ts},n={nonce},sig={base64.b64encode(sig).decode()}"}
     r = urllib.request.urlopen(urllib.request.Request(BASE + good_path, headers=hdr), timeout=5)
     assert r.status == 200
-    # Replay same header against a different query — must 401:
+    # Replay same header against a different query — must 401 (query binding):
     bad_path = f"/api/dm/{me.handle}/inbox/wait?after=999999&timeout=1"
     try:
         urllib.request.urlopen(urllib.request.Request(BASE + bad_path, headers=hdr), timeout=5)
@@ -277,6 +277,13 @@ def test_inbox_sig_bound_to_query():
     except urllib.error.HTTPError as e:
         if e.code == 401: ok("#Q: header reuse with altered query correctly 401")
         else: fail(f"#Q: expected 401 on replayed header, got {e.code}")
+    # Replay same header against the SAME path — must 401 (nonce replay-protection):
+    try:
+        urllib.request.urlopen(urllib.request.Request(BASE + good_path, headers=hdr), timeout=5)
+        fail("#Q: nonce replay on same path was NOT rejected")
+    except urllib.error.HTTPError as e:
+        if e.code == 401: ok("#Q: nonce replay correctly 401")
+        else: fail(f"#Q: expected 401 on nonce replay, got {e.code}")
 
 
 # ---- register requires proof-of-sign_sk ----------------------------------
