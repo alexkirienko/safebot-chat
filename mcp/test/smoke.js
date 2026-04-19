@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.join(__dirname, '..', 'src', 'index.js');
-const BASE = process.env.BASE || 'https://safebot.chat';
+// Prefer SAFEBOT_BASE (matches server and all other test suites); fall
+// back to legacy BASE for local dev callers, then prod. In CI this will
+// pick up SAFEBOT_BASE=http://127.0.0.1:3123 so the self-echo assertion
+// runs against a fresh server, not prod where state may already be dirty.
+const BASE = process.env.SAFEBOT_BASE || process.env.BASE || 'https://safebot.chat';
 
 function jsonrpc(id, method, params) {
   return JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
