@@ -286,12 +286,27 @@ function schedulePersistIdentities() {
 // identities. Leaving this block empty to preserve file line anchors.)
 
 // Return the decoded byte length of a base64 string — the thing the crypto
-// layer actually cares about — rather than the string length (which was a
-// misleading name: a 128 KiB cap on the *string* accepts ~96 KiB of raw
-// ciphertext, but future callers might reuse this helper expecting bytes.)
+// layer actually cares about — rather than the string length.
 function b64BytesLen(s) {
   if (typeof s !== 'string') return -1;
   try { return Buffer.from(s, 'base64').length; } catch (_) { return -1; }
+}
+// Strict canonical-base64 check. Node's Buffer.from(..., 'base64') silently
+// discards non-alphabet characters, so `!!!!` decodes to 0 bytes and passes
+// naive length checks. Every crypto-bearing string on the wire must round-
+// trip through decode + re-encode and compare byte-for-byte; otherwise the
+// server would relay/store values that browser `atob` + cross-lang SDKs
+// reject, breaking interop. Accepts both standard and URL-safe alphabet.
+function isCanonicalBase64(s, expectedBytes) {
+  if (typeof s !== 'string' || s.length === 0) return false;
+  if (!/^[A-Za-z0-9+/_-]*={0,2}$/.test(s)) return false;
+  let decoded;
+  try { decoded = Buffer.from(s, 'base64'); } catch (_) { return false; }
+  if (expectedBytes !== undefined && decoded.length !== expectedBytes) return false;
+  // Round-trip back to standard base64. Accept URL-safe input by normalizing.
+  const normalized = s.replace(/-/g, '+').replace(/_/g, '/');
+  const reencoded = decoded.toString('base64');
+  return reencoded === normalized;
 }
 
 function releaseBytes(msg) { if (msg && msg._bytes) INBOX_GLOBAL_BYTES = Math.max(0, INBOX_GLOBAL_BYTES - msg._bytes); }
@@ -951,12 +966,12 @@ function validMessage(msg) {
   if (!msg || typeof msg !== 'object') return false;
   if (typeof msg.ciphertext !== 'string' || typeof msg.nonce !== 'string') return false;
   if (msg.ciphertext.length > MAX_MSG_BYTES || msg.nonce.length > 64) return false;
-  // Decode-check: a malformed base64 string (or an over-large one after
-  // decoding) is rejected before it reaches the broadcast/recent buffer.
-  try {
-    if (Buffer.from(msg.ciphertext, 'base64').length > MAX_MSG_BYTES) return false;
-    if (Buffer.from(msg.nonce, 'base64').length !== 24) return false;
-  } catch (_) { return false; }
+  // Strict canonical base64 (no silent acceptance of `!!!!` that Node's
+  // Buffer tolerates but atob + other SDKs reject — we'd be relaying
+  // values half the ecosystem can't decode).
+  if (!isCanonicalBase64(msg.ciphertext)) return false;
+  if (!isCanonicalBase64(msg.nonce, 24)) return false;
+  try { if (Buffer.from(msg.ciphertext, 'base64').length > MAX_MSG_BYTES) return false; } catch (_) { return false; }
   if (msg.sender != null && (typeof msg.sender !== 'string' || msg.sender.length > 64)) return false;
   return true;
 }
@@ -1431,15 +1446,18 @@ app.post('/api/identity/register', (req, res) => {
   if (!HANDLE_REGEX.test(String(handle || ''))) return res.status(400).json({ error: 'invalid handle (regex: ^[a-z0-9][a-z0-9_-]{1,31}$)' });
   if (RESERVED_HANDLES.has(handle) && !isOperator) return res.status(409).json({ error: 'handle reserved' });
   if (typeof box_pub !== 'string' || typeof sign_pub !== 'string') return res.status(400).json({ error: 'box_pub and sign_pub required (base64 32-byte keys)' });
-  try {
-    if (Buffer.from(box_pub, 'base64').length !== 32 || Buffer.from(sign_pub, 'base64').length !== 32) throw new Error('bad key length');
-  } catch (_) { return res.status(400).json({ error: 'keys must be 32 bytes base64' }); }
+  if (!isCanonicalBase64(box_pub, 32) || !isCanonicalBase64(sign_pub, 32)) {
+    return res.status(400).json({ error: 'box_pub and sign_pub must be strict canonical base64 of 32 bytes' });
+  }
   if (identities.has(handle)) return res.status(409).json({ error: 'handle taken' });
   // Require proof that the registrant actually holds sign_sk matching sign_pub:
   // sign `"register <handle> <register_ts>"`. Without this, a third party
   // could race to register someone else's handle with arbitrary keys.
   if (typeof register_sig !== 'string' || typeof register_ts !== 'number') {
-    return res.status(400).json({ error: 'register_sig (base64 Ed25519) and register_ts (ms) required — sign "register <handle> <register_ts>" with sign_sk' });
+    return res.status(400).json({ error: 'register_sig (base64 Ed25519) and register_ts (ms) required — sign "register <handle> <register_ts> <box_pub> <sign_pub>" with sign_sk' });
+  }
+  if (!isCanonicalBase64(register_sig, 64)) {
+    return res.status(400).json({ error: 'register_sig must be strict canonical base64 of 64 bytes' });
   }
   if (Math.abs(Date.now() - register_ts) > SIG_MAX_SKEW_MS) {
     return res.status(400).json({ error: 'register_ts skew too large' });
@@ -1497,10 +1515,9 @@ app.post('/api/dm/:handle', (req, res) => {
     return res.status(400).json({ error: 'ciphertext, nonce, sender_eph_pub required (all base64)' });
   }
   if (b64BytesLen(ciphertext) > DM_MAX_BYTES) return res.status(400).json({ error: 'ciphertext too large' });
-  try {
-    if (Buffer.from(sender_eph_pub, 'base64').length !== 32) throw new Error();
-    if (Buffer.from(nonce, 'base64').length !== 24) throw new Error();
-  } catch (_) { return res.status(400).json({ error: 'sender_eph_pub must be 32B base64, nonce 24B base64' }); }
+  if (!isCanonicalBase64(ciphertext)) return res.status(400).json({ error: 'ciphertext must be strict canonical base64' });
+  if (!isCanonicalBase64(nonce, 24)) return res.status(400).json({ error: 'nonce must be strict canonical base64 of 24 bytes' });
+  if (!isCanonicalBase64(sender_eph_pub, 32)) return res.status(400).json({ error: 'sender_eph_pub must be strict canonical base64 of 32 bytes' });
   // Optional authenticated from_handle: sender proves ownership of from_handle
   // by signing the *envelope body* (not just handles+ts) with its sign_sk.
   // Signed blob:
@@ -1514,6 +1531,9 @@ app.post('/api/dm/:handle', (req, res) => {
   if (typeof from_handle === 'string' && from_handle) {
     const fh = from_handle.replace(/^@/, '').toLowerCase().slice(0, 34);
     if (typeof from_sig === 'string' && typeof from_ts === 'number') {
+      if (!isCanonicalBase64(from_sig, 64)) {
+        return res.status(400).json({ error: 'from_sig must be strict canonical base64 of 64 bytes' });
+      }
       if (Math.abs(Date.now() - from_ts) > SIG_MAX_SKEW_MS) {
         return res.status(400).json({ error: 'from_ts skew too large' });
       }
@@ -1992,7 +2012,7 @@ const openapiSpec = {
         required: ['ciphertext', 'nonce'],
         properties: {
           sender: { type: 'string', maxLength: 64, description: 'Display label chosen by the client. No authentication.' },
-          ciphertext: { type: 'string', description: 'base64(secretbox(plaintext, nonce, key))', maxLength: 65536 },
+          ciphertext: { type: 'string', description: 'base64(secretbox(plaintext, nonce, key))', maxLength: 131072 },
           nonce: { type: 'string', description: 'base64(24 random bytes)' },
         },
       },
@@ -2026,12 +2046,14 @@ const openapiSpec = {
       },
       IdentityRegister: {
         type: 'object',
-        required: ['handle', 'box_pub', 'sign_pub'],
+        required: ['handle', 'box_pub', 'sign_pub', 'register_ts', 'register_sig'],
         properties: {
-          handle:   { type: 'string', pattern: '^[a-z0-9][a-z0-9_-]{1,31}$' },
-          box_pub:  { type: 'string', description: 'base64 of 32-byte X25519 public key (nacl.box)' },
-          sign_pub: { type: 'string', description: 'base64 of 32-byte Ed25519 verify key (nacl.sign)' },
-          meta:     { type: 'object', properties: { bio: { type: 'string', maxLength: 280 } } },
+          handle:       { type: 'string', pattern: '^[a-z0-9][a-z0-9_-]{1,31}$' },
+          box_pub:      { type: 'string', description: 'base64 of 32-byte X25519 public key (nacl.box)' },
+          sign_pub:     { type: 'string', description: 'base64 of 32-byte Ed25519 verify key (nacl.sign)' },
+          register_ts:  { type: 'integer', description: 'Unix ms timestamp, must be within ±60s of server time.' },
+          register_sig: { type: 'string', description: 'base64 Ed25519 signature of "register <handle> <register_ts> <box_pub> <sign_pub>" by sign_sk. Prevents key-substitution and race-squatting.' },
+          meta:         { type: 'object', properties: { bio: { type: 'string', maxLength: 280 } } },
         },
       },
       Identity: {
@@ -2052,7 +2074,7 @@ const openapiSpec = {
           nonce:          { type: 'string', description: 'base64 of 24 random bytes' },
           sender_eph_pub: { type: 'string', description: 'base64 of sender\'s ephemeral X25519 public key' },
           from_handle:    { type: 'string', maxLength: 34, description: 'Optional — include so recipient can reply to @handle' },
-          from_sig:       { type: 'string', description: 'Optional base64 Ed25519 signature of "dm <to_handle> <from_handle> <from_ts>" by from_handle\'s sign_sk. Required to mark the envelope as from_verified. Without it, recipients treat from_handle as unauthenticated.' },
+          from_sig:       { type: 'string', description: 'Optional base64 Ed25519 signature of "dm <to_handle> <from_handle> <from_ts> <sha256_hex(ciphertext|nonce|sender_eph_pub)>" by from_handle\'s sign_sk. Required to mark the envelope as from_verified; without it, the server strips from_handle to null. The hash binding prevents replay with a different ciphertext inside the skew window.' },
           from_ts:        { type: 'integer', description: 'Unix ms timestamp signed alongside from_handle. Must be within ±60s of server time.' },
         },
       },

@@ -510,10 +510,12 @@ class Identity:
     def register(self, bio: str = "") -> dict:
         """Publish the handle + two pub keys.
 
-        The server requires a signature proving ownership of sign_sk:
-        sign `"register <handle> <ts>"` with sign_sk; the server verifies
-        against sign_pub. Without this anyone could race to register a
-        handle with keys they do not control.
+        The server requires a signature proving ownership of sign_sk AND
+        binding both published pubkeys: sign
+        ``"register <handle> <ts> <box_pub> <sign_pub>"`` with sign_sk;
+        the server verifies against sign_pub. Without this anyone could
+        race to register a handle with keys they do not control, or swap
+        the box_pub after seeing a valid registration on the wire.
         """
         ts = int(time.time() * 1000)
         blob = f"register {self.handle} {ts} {self.box_pub_b64} {self.sign_pub_b64}".encode("utf-8")
