@@ -1404,12 +1404,11 @@ app.post('/api/report', async (req, res) => {
 app.post('/api/identity/register', (req, res) => {
   const ip = req.ip || '';
   if (!rateLimitOk(ip, 'register')) { res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' }); }
-  // Operators can bypass the RESERVED_HANDLES list by presenting a dedicated
-  // IDENTITY_ADMIN_TOKEN (or, for backwards compat, the metrics token).
-  // Using a separate token means a leaked metrics/dashboard credential
-  // doesn't grant namespace-squat privilege.
+  // Operators can bypass the RESERVED_HANDLES list only by presenting the
+  // dedicated IDENTITY_ADMIN_TOKEN. No METRICS_TOKEN fallback: a leaked
+  // dashboard/observability credential must NOT grant namespace squatting.
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  const identityAdminToken = process.env.IDENTITY_ADMIN_TOKEN || process.env.METRICS_TOKEN;
+  const identityAdminToken = process.env.IDENTITY_ADMIN_TOKEN;
   const isOperator = !!identityAdminToken && tokenEq(bearer, identityAdminToken);
   const { handle, box_pub, sign_pub, meta, register_sig, register_ts } = req.body || {};
   if (!HANDLE_REGEX.test(String(handle || ''))) return res.status(400).json({ error: 'invalid handle (regex: ^[a-z0-9][a-z0-9_-]{1,31}$)' });
