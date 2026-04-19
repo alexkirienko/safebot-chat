@@ -516,6 +516,50 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref?.();
 
+// Per-(handle, roomId) cursors for the optional /claim + /ack pull-model.
+// Lets agents pull foreign messages at-least-once with server-tracked
+// progress instead of managing last_seq client-side. Relay stays neutral —
+// no idea what the ciphertext means, just what the receiver has acked.
+// Memory: at most ROOM_CURSORS_PER_HANDLE_MAX rooms × a tiny record per
+// handle. Handles that never claim anything never allocate.
+const ROOM_CURSORS = new Map(); // handle → Map<roomId, {cursor, inflight}>
+const ROOM_CURSORS_PER_HANDLE_MAX = Number(process.env.ROOM_CURSORS_PER_HANDLE_MAX || 64);
+const CLAIM_TTL_MS = Number(process.env.CLAIM_TTL_MS || 60_000);
+function getCursorRec(handle, roomId) {
+  let perHandle = ROOM_CURSORS.get(handle);
+  if (!perHandle) {
+    perHandle = new Map();
+    ROOM_CURSORS.set(handle, perHandle);
+  }
+  let rec = perHandle.get(roomId);
+  if (!rec) {
+    if (perHandle.size >= ROOM_CURSORS_PER_HANDLE_MAX) {
+      // Evict oldest-idle entry. cursors are cheap but per-handle map shouldn't
+      // grow unbounded if a handle is asked to claim from thousands of rooms.
+      const firstKey = perHandle.keys().next().value;
+      if (firstKey !== undefined) perHandle.delete(firstKey);
+    }
+    rec = { cursor: 0, inflight: null };
+    perHandle.set(roomId, rec);
+  }
+  return rec;
+}
+function claimExpired(inflight) {
+  return !inflight || (Date.now() - inflight.claimed_at) > CLAIM_TTL_MS;
+}
+function findNextForeign(room, cursor, handle) {
+  const tagged = '@' + handle;
+  for (const m of room.recent) {
+    if (m.seq <= cursor) continue;
+    if (m.sender === handle || m.sender === tagged) continue;
+    return m;
+  }
+  return null;
+}
+function buildClaimEnvelope(m) {
+  return { seq: m.seq, id: m.id, sender: m.sender, ciphertext: m.ciphertext, nonce: m.nonce, ts: m.ts, sender_verified: !!m.sender_verified };
+}
+
 // Verify a room message carries a valid signed-sender envelope. Blob is
 // `"room-msg <roomId> <ts> <nonce> <sha256_hex(ciphertext)>"` signed with the
 // handle's registered Ed25519 sign key. Returns true on success (and records
@@ -1935,6 +1979,134 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
   req.on('close', roomWaitCleanup);
   req.on('aborted', roomWaitCleanup);
   res.on('error', roomWaitCleanup);
+});
+
+// --- Pull-model claim/ack (per-handle room cursors) ----------------------
+//
+// Goal: make "give me the next foreign message I haven't processed" a
+// single server-tracked primitive so client harnesses don't have to own
+// cursor state. Semantics per codex-safebot-20260419 spec:
+//   /claim  — return the oldest seq > cursor whose sender != handle.
+//             If an unexpired inflight claim already exists, return the
+//             same envelope again (idempotent under retries). On empty,
+//             block up to timeout like /wait.
+//   /ack    — advance cursor to seq and clear inflight. Stale acks
+//             (seq <= cursor) are idempotent success; mismatched
+//             claim_id/seq is 409.
+// Both endpoints reuse the Authorization: SafeBot ts/n/sig header so the
+// signed blob binds method+originalUrl+ts+nonce (verifyInboxSig). Body
+// fields aren't in the blob because a captured sig can't be re-signed
+// under a fresh nonce without the private key.
+app.post('/api/rooms/:roomId/claim', (req, res) => {
+  const { roomId } = req.params;
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(roomId)) return res.status(400).json({ error: 'bad roomId' });
+  const handle = String(req.body && req.body.handle || '').toLowerCase();
+  if (!/^[a-z0-9_-]{1,32}$/.test(handle)) return res.status(400).json({ error: 'bad handle' });
+  if (!identities.has(handle)) return res.status(404).json({ error: 'no such handle' });
+  const ip = req.ip || '';
+  if (!rateLimitOk(ip, `auth:${handle}`) || !globalRateLimitOk(ip)) {
+    res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' });
+  }
+  if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
+  const timeout = Math.max(1, Math.min(90, parseInt(String(req.query.timeout || '30'), 10) || 30));
+  const room = rooms.get(roomId);
+  if (!room) return res.json({ ok: true, empty: true, last_seq: 0, cursor: 0, exists: false });
+  pruneRecent(room);
+  const rec = getCursorRec(handle, roomId);
+  // Clamp cursor to the oldest retained seq so that messages prunned out
+  // of the recent buffer don't force perpetual-empty responses. Client
+  // already got them or chose not to; we silently advance.
+  if (room.recent.length > 0 && rec.cursor < room.recent[0].seq - 1) {
+    rec.cursor = room.recent[0].seq - 1;
+  }
+  // Idempotent re-claim: same inflight, same envelope.
+  if (rec.inflight && !claimExpired(rec.inflight)) {
+    const m = room.recent.find((x) => x.seq === rec.inflight.seq);
+    if (m) return res.json({ ok: true, claim_id: rec.inflight.claim_id, message: buildClaimEnvelope(m), cursor: rec.cursor, last_seq: roomLastSeq(room) });
+    // Message was pruned under us — clear and fall through to a fresh pick.
+    rec.inflight = null;
+  }
+  // Expired inflight: let it be reclaimed (may be the same seq, new claim_id).
+  if (rec.inflight && claimExpired(rec.inflight)) rec.inflight = null;
+  const next = findNextForeign(room, rec.cursor, handle);
+  if (next) {
+    rec.inflight = { claim_id: crypto.randomUUID(), seq: next.seq, claimed_at: Date.now() };
+    return res.json({ ok: true, claim_id: rec.inflight.claim_id, message: buildClaimEnvelope(next), cursor: rec.cursor, last_seq: roomLastSeq(room) });
+  }
+  // Empty — park a claim-waiter on the room. Wake via broadcast when a
+  // new message lands; on wake, re-run the claim pick.
+  room.lastActive = Date.now();
+  if (room.waiters.size >= ROOM_WAITERS_MAX) {
+    res.set('Retry-After', '5'); return res.status(429).json({ error: 'too many concurrent waiters for this room' });
+  }
+  if (!waiterAcquire(ip)) {
+    res.set('Retry-After', '5'); return res.status(429).json({ error: 'too many concurrent waiters from this IP' });
+  }
+  let finished = false;
+  let timer = null;
+  const claimWaiter = { claimHandle: handle, resolve: null, timer: null };
+  claimWaiter.resolve = () => {
+    if (finished) return;
+    finished = true;
+    waiterRelease(ip);
+    room.waiters.delete(claimWaiter);
+    if (timer) clearTimeout(timer);
+    const r2 = rooms.get(roomId);
+    if (!r2) return res.json({ ok: true, empty: true, last_seq: 0, cursor: rec.cursor, exists: false });
+    pruneRecent(r2);
+    if (rec.inflight && !claimExpired(rec.inflight)) {
+      const m = r2.recent.find((x) => x.seq === rec.inflight.seq);
+      if (m) return res.json({ ok: true, claim_id: rec.inflight.claim_id, message: buildClaimEnvelope(m), cursor: rec.cursor, last_seq: roomLastSeq(r2) });
+      rec.inflight = null;
+    }
+    const nx = findNextForeign(r2, rec.cursor, handle);
+    if (nx) {
+      rec.inflight = { claim_id: crypto.randomUUID(), seq: nx.seq, claimed_at: Date.now() };
+      return res.json({ ok: true, claim_id: rec.inflight.claim_id, message: buildClaimEnvelope(nx), cursor: rec.cursor, last_seq: roomLastSeq(r2) });
+    }
+    res.json({ ok: true, empty: true, last_seq: roomLastSeq(r2), cursor: rec.cursor });
+  };
+  timer = setTimeout(claimWaiter.resolve, timeout * 1000);
+  claimWaiter.timer = timer;
+  room.waiters.add(claimWaiter);
+  const cleanup = () => {
+    if (finished) return;
+    finished = true;
+    waiterRelease(ip);
+    clearTimeout(claimWaiter.timer);
+    room.waiters.delete(claimWaiter);
+  };
+  // NOTE: use res.on('close') — `req.on('close')` fires when the REQUEST
+  // stream finishes (for POSTs, that's right after body-parse), which would
+  // immediately cancel the timer. res.on('close') fires only when the HTTP
+  // response connection itself terminates (client aborted / TCP closed).
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+});
+
+app.post('/api/rooms/:roomId/ack', (req, res) => {
+  const { roomId } = req.params;
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(roomId)) return res.status(400).json({ error: 'bad roomId' });
+  const handle = String(req.body && req.body.handle || '').toLowerCase();
+  const claimId = String(req.body && req.body.claim_id || '');
+  const seq = parseInt(String(req.body && req.body.seq || '0'), 10);
+  if (!/^[a-z0-9_-]{1,32}$/.test(handle)) return res.status(400).json({ error: 'bad handle' });
+  if (!identities.has(handle)) return res.status(404).json({ error: 'no such handle' });
+  const ip = req.ip || '';
+  if (!rateLimitOk(ip, `auth:${handle}`) || !globalRateLimitOk(ip)) {
+    res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' });
+  }
+  if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
+  const perHandle = ROOM_CURSORS.get(handle);
+  const rec = perHandle && perHandle.get(roomId);
+  if (!rec) return res.json({ ok: true, advanced: false, cursor: 0 });
+  if (seq && seq <= rec.cursor) return res.json({ ok: true, advanced: false, cursor: rec.cursor });
+  if (!rec.inflight || claimExpired(rec.inflight) || rec.inflight.claim_id !== claimId || rec.inflight.seq !== seq) {
+    return res.status(409).json({ error: 'stale or unknown claim', cursor: rec.cursor });
+  }
+  rec.cursor = seq;
+  rec.inflight = null;
+  res.json({ ok: true, advanced: true, cursor: rec.cursor });
 });
 
 // --- OpenAPI spec + Swagger UI (so AI agents can auto-discover) -----------

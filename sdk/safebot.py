@@ -330,6 +330,81 @@ class Room:
             msgs = [m for m in msgs if m.sender != self.name]
         return msgs
 
+    # --- Pull-model claim/ack -----------------------------------------------
+    #
+    # Server-side cursor per (identity.handle, room_id). `claim(identity)` asks
+    # the server for the next foreign message past the ACKed cursor and marks
+    # it in-flight; re-calls while that claim is alive return the same
+    # envelope (idempotent under retries/crashes). `ack_claim()` advances the
+    # cursor; only then will the next `claim()` see the following message.
+    # `next_task()` is the ack-before-return wrapper that makes
+    # at-least-once correctness automatic: it claims, decrypts, optionally
+    # lets the caller send a chat-level ack, then server-acks, then returns.
+
+    def _auth_post_signed(self, identity, path: str, body: dict, timeout_s: float):
+        import secrets as _sec, time as _t
+        ts_ms = int(_t.time() * 1000)
+        nonce = _sec.token_urlsafe(18)
+        # Build full URL the server will see (verifyInboxSig signs over `<method> <originalUrl> <ts> <nonce>`).
+        url_part = f"/api/rooms/{self.room_id}{path}"
+        blob = f"POST {url_part} {ts_ms} {nonce}".encode("utf-8")
+        sig = identity._sign_sk.sign(blob).signature
+        headers = {
+            "Authorization": f"SafeBot ts={ts_ms},n={nonce},sig={base64.b64encode(sig).decode('ascii')}",
+        }
+        return self._session.post(f"{self._base}{path}", json=body, headers=headers, timeout=timeout_s)
+
+    def claim(self, identity, timeout: int = 30) -> Optional[dict]:
+        """Pull the next foreign message via server-tracked cursor.
+
+        Returns `{"claim_id": str, "message": Message, "cursor": int}` when a
+        message is available, or `None` on empty/timeout. The returned message
+        is decrypted but the server still considers it in-flight until you
+        call `ack_claim(identity, claim_id, seq)`.
+
+        If you crash before ack'ing, the same message becomes reclaimable
+        (new claim_id, same seq) after ~60 s — at-least-once semantics.
+        """
+        url_part = f"/claim?timeout={int(timeout)}"
+        r = self._auth_post_signed(identity, url_part, {"handle": identity.handle}, timeout + 5)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("empty") or "message" not in data:
+            return None
+        m = self._decode(data["message"])
+        return {"claim_id": data["claim_id"], "message": m, "cursor": int(data.get("cursor", 0))}
+
+    def ack_claim(self, identity, claim_id: str, seq: int) -> dict:
+        """Advance the server cursor past a claimed message."""
+        r = self._auth_post_signed(
+            identity, "/ack",
+            {"handle": identity.handle, "claim_id": claim_id, "seq": int(seq)},
+            self._timeout,
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def next_task(self, identity, *, timeout: int = 30, on_claim=None) -> Optional[Message]:
+        """ACK-before-return helper: claim → optional side-channel ack → server ack → return.
+
+        `on_claim(message)` is called after decrypt but before the server-side
+        ack. Use it to send an application-level ack back into the room (or
+        anywhere else) so the peer knows the message was actually heard. If
+        `on_claim` returns False or raises, the server cursor is NOT advanced
+        and the same message will be re-claimed on the next call — the message
+        is not lost.
+        """
+        c = self.claim(identity, timeout=timeout)
+        if c is None:
+            return None
+        try:
+            if on_claim is not None and on_claim(c["message"]) is False:
+                return None
+        except Exception as _e:  # noqa: BLE001
+            return None
+        self.ack_claim(identity, c["claim_id"], c["message"].seq)
+        return c["message"]
+
     def status(self) -> dict:
         """Return a lightweight snapshot of the room (no join required)."""
         r = self._get_retry("/status")
