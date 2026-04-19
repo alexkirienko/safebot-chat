@@ -224,18 +224,48 @@ const TOOLS = [
   {
     name: 'next_task',
     description:
-      'Paved-road "give me the next message, at-least-once" primitive for turn-based agents (Codex, Claude Code, Cursor). ' +
-      'Blocks up to `timeout_seconds` waiting for a foreign message, returns exactly one decrypted message, and automatically ACKs the server cursor so the next call gets the NEXT message. ' +
-      'Loop pattern: call repeatedly in your host — each call is one turn worth of work. If your message returns `(no new messages)`, immediately call again. ' +
-      'On first use, the tool auto-generates a persistent @handle saved at ~/.config/safebot/mcp_identity.key and registers it on the server; set SAFEBOT_MCP_HANDLE to pick a specific handle. ' +
-      'If the task cannot be processed (you raise before the next tool call), the server treats the claim as expired after 60s and re-delivers — this is the at-least-once guarantee. ' +
-      'This is the RECOMMENDED primitive for every turn-based host; prefer it over wait_for_messages when you have an @handle.',
+      'One-shot "give me the next message" primitive for turn-based hosts. ' +
+      'Blocks up to `timeout_seconds` waiting for a foreign message, returns exactly one decrypted message, and ACKs the server cursor at tool return so the next call gets the NEXT message. ' +
+      'Delivery guarantee: the cursor advances ONLY if the server receives the ack — a network failure mid-call leaves the claim in flight and the same message re-delivers. ' +
+      'Host-crash after tool return, however, DOES lose the message: the cursor was already advanced. If you need at-least-once against host crashes, use claim_task + ack_task instead. ' +
+      'Loop: call repeatedly. On "(no new messages ...)" call again immediately. ' +
+      'On first use, auto-provisions a persistent @handle at ~/.config/safebot/mcp_identity.key; override with SAFEBOT_MCP_HANDLE.',
     inputSchema: {
       type: 'object',
       required: ['url'],
       properties: {
         url:             { type: 'string' },
         timeout_seconds: { type: 'integer', description: 'Max seconds to block (1–90). Default 60.', minimum: 1, maximum: 90 },
+      },
+    },
+  },
+  {
+    name: 'claim_task',
+    description:
+      'Two-step at-least-once primitive — step 1. Blocks up to `timeout_seconds` and returns the next foreign message WITHOUT acking. Returns a `claim_id` you must pass to `ack_task` once the host has fully processed the message. ' +
+      'If the host crashes between this call and ack_task (or simply never acks), the server claim expires after 60 s and the same message is re-delivered on the next claim_task call — this is the real at-least-once guarantee. ' +
+      'Prefer `next_task` if you want simpler ergonomics and can tolerate losing one message on host crash.',
+    inputSchema: {
+      type: 'object',
+      required: ['url'],
+      properties: {
+        url:             { type: 'string' },
+        timeout_seconds: { type: 'integer', description: 'Max seconds to block (1–90). Default 60.', minimum: 1, maximum: 90 },
+      },
+    },
+  },
+  {
+    name: 'ack_task',
+    description:
+      'Two-step at-least-once primitive — step 2. Advances the server cursor past a claim returned by `claim_task`. Idempotent: re-acking an already-advanced seq returns advanced:false, ok:true. ' +
+      'Mismatched (claim_id, seq) or an expired claim returns an error.',
+    inputSchema: {
+      type: 'object',
+      required: ['url', 'claim_id', 'seq'],
+      properties: {
+        url:      { type: 'string' },
+        claim_id: { type: 'string' },
+        seq:      { type: 'integer', minimum: 1 },
       },
     },
   },
@@ -434,13 +464,9 @@ async function tool_room_status({ url }) {
   };
 }
 
-async function tool_next_task({ url, timeout_seconds = 60 }) {
-  const { roomId, key, base } = parseRoomUrl(url);
-  const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 60));
-  const ident = await loadOrCreateIdentity(base);
-  // /claim — Identity-signed long-poll.
-  const claimPath = `/api/rooms/${roomId}/claim?timeout=${t}`;
-  const claimRes = await fetch(`${base}${claimPath}`, {
+async function doClaim(base, roomId, ident, timeoutSec) {
+  const claimPath = `/api/rooms/${roomId}/claim?timeout=${timeoutSec}`;
+  const res = await fetch(`${base}${claimPath}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -449,33 +475,48 @@ async function tool_next_task({ url, timeout_seconds = 60 }) {
     },
     body: JSON.stringify({ handle: ident.handle, exclude_senders: [] }),
   });
-  if (!claimRes.ok) {
-    const body = await claimRes.text().catch(() => '');
-    throw new Error(`claim failed: ${claimRes.status} ${body}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`claim failed: ${res.status} ${body}`);
   }
-  const claim = await claimRes.json();
+  return res.json();
+}
+
+async function doAck(base, roomId, ident, claim_id, seq) {
+  const ackPath = `/api/rooms/${roomId}/ack`;
+  const res = await fetch(`${base}${ackPath}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': USER_AGENT,
+      'Authorization': authHeader(ident, 'POST', ackPath),
+    },
+    body: JSON.stringify({ handle: ident.handle, claim_id, seq }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`ack failed: ${res.status} ${JSON.stringify(body)}`);
+  return body;
+}
+
+async function tool_next_task({ url, timeout_seconds = 60 }) {
+  const { roomId, key, base } = parseRoomUrl(url);
+  const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 60));
+  const ident = await loadOrCreateIdentity(base);
+  const claim = await doClaim(base, roomId, ident, t);
   if (claim.empty || !claim.message) {
     return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as @${ident.handle}, cursor=${claim.cursor || 0}; call next_task again to keep listening)` }] };
   }
   const m = claim.message;
   const text = decrypt(key, m.ciphertext, m.nonce);
-  // /ack — advance cursor. If this fails the claim will expire and re-deliver;
-  // that's fine for at-least-once, just surface a warning.
-  const ackPath = `/api/rooms/${roomId}/ack`;
+  // Ack before return. Gives the "one call, one message, cursor advances"
+  // ergonomics. Network failure on ack leaves the claim in flight → same
+  // message re-delivers on next call (at-least-once vs network). Host-crash
+  // AFTER return loses the message; use claim_task+ack_task for that guarantee.
   let ackWarn = '';
   try {
-    const ackRes = await fetch(`${base}${ackPath}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': USER_AGENT,
-        'Authorization': authHeader(ident, 'POST', ackPath),
-      },
-      body: JSON.stringify({ handle: ident.handle, claim_id: claim.claim_id, seq: m.seq }),
-    });
-    if (!ackRes.ok) ackWarn = `\n(warning: ack returned ${ackRes.status}; this message will be re-delivered on next call)`;
+    await doAck(base, roomId, ident, claim.claim_id, m.seq);
   } catch (e) {
-    ackWarn = `\n(warning: ack failed: ${e.message}; message will be re-delivered)`;
+    ackWarn = `\n(warning: ${e.message}; message will be re-delivered on next call)`;
   }
   const verified = m.sender_verified ? ' ✓' : '';
   return {
@@ -489,6 +530,42 @@ async function tool_next_task({ url, timeout_seconds = 60 }) {
   };
 }
 
+async function tool_claim_task({ url, timeout_seconds = 60 }) {
+  const { roomId, key, base } = parseRoomUrl(url);
+  const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 60));
+  const ident = await loadOrCreateIdentity(base);
+  const claim = await doClaim(base, roomId, ident, t);
+  if (claim.empty || !claim.message) {
+    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as @${ident.handle}, cursor=${claim.cursor || 0}; call claim_task again to keep listening)` }] };
+  }
+  const m = claim.message;
+  const text = decrypt(key, m.ciphertext, m.nonce);
+  const verified = m.sender_verified ? ' ✓' : '';
+  return {
+    content: [{
+      type: 'text',
+      text:
+        `[seq=${m.seq}] ${m.sender}${verified}: ${text == null ? '[undecryptable — wrong room key]' : text}` +
+        `\n\n(claim_id=${claim.claim_id} seq=${m.seq} — call ack_task with these once you have fully processed the message; ` +
+        `claim expires in 60s and re-delivers if you never ack)`,
+    }],
+  };
+}
+
+async function tool_ack_task({ url, claim_id, seq }) {
+  const { roomId, base } = parseRoomUrl(url);
+  const ident = await loadOrCreateIdentity(base);
+  const r = await doAck(base, roomId, ident, String(claim_id || ''), Number(seq) || 0);
+  return {
+    content: [{
+      type: 'text',
+      text: r.advanced
+        ? `ack ok — cursor advanced to seq=${r.cursor}`
+        : `ack ok — no change (cursor already at ${r.cursor}; the message was already acked by a prior call)`,
+    }],
+  };
+}
+
 const DISPATCH = {
   create_room:       tool_create_room,
   send_message:      tool_send_message,
@@ -496,6 +573,8 @@ const DISPATCH = {
   get_transcript:    tool_get_transcript,
   room_status:       tool_room_status,
   next_task:         tool_next_task,
+  claim_task:        tool_claim_task,
+  ack_task:          tool_ack_task,
 };
 
 // ---- MCP wiring --------------------------------------------------------
