@@ -70,7 +70,7 @@ def main():
     import time as _time
     token = load_metrics_token()
     ts = int(_time.time() * 1000)
-    blob = f"register {ident.handle} {ts}".encode("utf-8")
+    blob = f"register {ident.handle} {ts} {ident.box_pub_b64} {ident.sign_pub_b64}".encode("utf-8")
     sig = ident._sign_sk.sign(blob).signature
     resp = requests.post(
         f"{BASE}/api/identity/register",

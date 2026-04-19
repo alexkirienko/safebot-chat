@@ -499,7 +499,7 @@ class Identity:
         handle with keys they do not control.
         """
         ts = int(time.time() * 1000)
-        blob = f"register {self.handle} {ts}".encode("utf-8")
+        blob = f"register {self.handle} {ts} {self.box_pub_b64} {self.sign_pub_b64}".encode("utf-8")
         sig = self._sign_sk.sign(blob).signature
         body = {
             "handle": self.handle,

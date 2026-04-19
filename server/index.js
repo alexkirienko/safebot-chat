@@ -362,13 +362,22 @@ function classifyUA(ua) {
   return 'agent';
 }
 
+function tokenEq(a, b) {
+  // Constant-time comparison — plain `===` on secrets leaks the length of
+  // the matching prefix via timing and trips audit tools that look for it.
+  const aBuf = Buffer.from(String(a || ''), 'utf8');
+  const bBuf = Buffer.from(String(b || ''), 'utf8');
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
 function requireAdmin(req, res) {
   const want = process.env.METRICS_TOKEN;
   if (!want) { res.status(503).json({ error: 'metrics disabled (no METRICS_TOKEN configured)' }); return false; }
   const auth = String(req.headers.authorization || '');
   const qtok = String(req.query.token || '');
   const presented = auth.startsWith('Bearer ') ? auth.slice(7) : qtok;
-  if (!presented || presented !== want) { res.status(401).json({ error: 'unauthorised' }); return false; }
+  if (!presented || !tokenEq(presented, want)) { res.status(401).json({ error: 'unauthorised' }); return false; }
   return true;
 }
 
@@ -1209,7 +1218,7 @@ app.post('/api/identity/register', (req, res) => {
   // doesn't grant namespace-squat privilege.
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const identityAdminToken = process.env.IDENTITY_ADMIN_TOKEN || process.env.METRICS_TOKEN;
-  const isOperator = identityAdminToken && bearer === identityAdminToken;
+  const isOperator = !!identityAdminToken && tokenEq(bearer, identityAdminToken);
   const { handle, box_pub, sign_pub, meta, register_sig, register_ts } = req.body || {};
   if (!HANDLE_REGEX.test(String(handle || ''))) return res.status(400).json({ error: 'invalid handle (regex: ^[a-z0-9][a-z0-9_-]{1,31}$)' });
   if (RESERVED_HANDLES.has(handle) && !isOperator) return res.status(409).json({ error: 'handle reserved' });
@@ -1229,9 +1238,12 @@ app.post('/api/identity/register', (req, res) => {
   }
   try {
     const signPub = Buffer.from(sign_pub, 'base64');
-    const blob = Buffer.from(`register ${handle} ${register_ts}`, 'utf8');
+    // Bind the registration sig to BOTH pubkeys so an attacker cannot swap
+    // the box_pub after seeing a valid (handle, sign_pub, sig) request on
+    // the wire — the sig covers box_pub too.
+    const blob = Buffer.from(`register ${handle} ${register_ts} ${box_pub} ${sign_pub}`, 'utf8');
     if (!nacl.sign.detached.verify(blob, Buffer.from(register_sig, 'base64'), signPub)) {
-      return res.status(401).json({ error: 'bad register_sig — does not verify against sign_pub' });
+      return res.status(401).json({ error: 'bad register_sig — does not verify against sign_pub (sign "register <handle> <ts> <box_pub> <sign_pub>")' });
     }
   } catch (_) { return res.status(400).json({ error: 'bad register_sig' }); }
   const rec = {
