@@ -433,15 +433,31 @@ function verifyInboxSig(req, handle) {
     const urlPart = req.originalUrl || req.url || req.path;
     const blob = Buffer.from(`${req.method} ${urlPart} ${ts} ${nonce}`, 'utf8');
     if (!nacl.sign.detached.verify(blob, Buffer.from(sig, 'base64'), signPub)) return false;
-    // Cap the seen-set. Blind-eviction of the oldest 200 was replay-unsafe:
-    // a signing-key owner could flood unique nonces to push a captured one
-    // out of the cache within the skew window. Instead, evict only EXPIRED
-    // entries; if the set is full of still-valid nonces, fail closed — the
-    // attacker no longer gets a free slot.
-    if (INBOX_SIG_SEEN.size >= INBOX_SIG_SEEN_MAX) {
+    // Cap the seen-set. Previously fail-closed when full of fresh entries
+    // — an attacker with any valid signing key could flood unique nonces
+    // and globally 401 every other user until the skew window expired.
+    // Now the cache is keyed AND capped per-handle, so abuse of one
+    // handle's cache doesn't affect anyone else's.
+    const maxPerHandle = Math.max(64, Math.floor(INBOX_SIG_SEEN_MAX / 32));
+    let perHandle = 0;
+    for (const k of INBOX_SIG_SEEN.keys()) if (k.startsWith(handle + '|')) perHandle++;
+    if (perHandle >= maxPerHandle) {
+      // evict this handle's expired entries first
       const cutoff = Date.now() - SIG_MAX_SKEW_MS;
-      for (const [k, v] of INBOX_SIG_SEEN) if (v < cutoff) INBOX_SIG_SEEN.delete(k);
-      if (INBOX_SIG_SEEN.size >= INBOX_SIG_SEEN_MAX) return false;
+      for (const [k, v] of INBOX_SIG_SEEN) {
+        if (k.startsWith(handle + '|') && v < cutoff) INBOX_SIG_SEEN.delete(k);
+      }
+      // count again — if still full-of-fresh this handle is pathological
+      perHandle = 0;
+      for (const k of INBOX_SIG_SEEN.keys()) if (k.startsWith(handle + '|')) perHandle++;
+      if (perHandle >= maxPerHandle) return false;
+    }
+    // Global soft-eviction: if total size blows up, drop oldest regardless
+    // of freshness. The per-handle cap above is the real replay defence —
+    // the global cap is only a memory fuse.
+    if (INBOX_SIG_SEEN.size >= INBOX_SIG_SEEN_MAX) {
+      const it = INBOX_SIG_SEEN.keys();
+      for (let i = 0; i < 200; i++) { const k = it.next().value; if (k === undefined) break; INBOX_SIG_SEEN.delete(k); }
     }
     INBOX_SIG_SEEN.set(seenKey, Date.now());
     return true;
@@ -841,6 +857,8 @@ function getOrCreateRoom(roomId) {
         }
       }
       if (victimId === null) return null;
+      const victim = rooms.get(victimId);
+      if (victim) for (const m of victim.recent) releaseRoomBytes(m);
       rooms.delete(victimId);
       METRICS.rooms_evicted_total += 1;
     }
@@ -1162,6 +1180,14 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
   if (!/^[A-Za-z0-9_-]{4,64}$/.test(roomId)) return res.status(400).end();
   const ip = req.ip || '';
   if (!streamAcquire(ip)) { res.status(429).set('Retry-After', '5').json({ error: 'too many concurrent streams from this IP' }); return; }
+  // Track release state from the top — the room-cap path below needs to
+  // coordinate with the req.on('close') cleanup so we don't release twice
+  // and artificially free a stream slot.
+  let released = false;
+  const releaseOnce = () => { if (!released) { released = true; streamRelease(ip); } };
+  req.on('close', releaseOnce);
+  req.on('aborted', releaseOnce);
+  res.on('close', releaseOnce);
   const after = Math.max(0, parseInt(String(req.query.after || '0'), 10) || 0);
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1170,7 +1196,11 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
   res.flushHeaders();
 
   const room = getOrCreateRoom(roomId);
-  if (!room) { streamRelease(ip); res.write(`data: ${JSON.stringify({ type: 'error', error: 'room cap reached' })}\n\n`); res.end(); return; }
+  if (!room) {
+    res.write(`data: ${JSON.stringify({ type: 'error', error: 'room cap reached' })}\n\n`);
+    res.end(); // releaseOnce fires via res.on('close')
+    return;
+  }
   const sub = {
     kind: 'sse',
     send(text) {
@@ -1215,15 +1245,16 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
     }
   }, 15000);
 
-  let released = false;
   const cleanup = () => {
     clearInterval(keepalive);
-    if (!released) { released = true; streamRelease(ip); }
+    releaseOnce();
     if (room.subs.delete(sub)) {
       room.lastActive = Date.now();
       broadcast(room, { type: 'presence', size: room.subs.size });
     }
   };
+  // Chain the sub-aware cleanup on TOP of the upstream releaseOnce — same
+  // event cleans both. Double-invocations are no-ops because of `released`.
   req.on('close', cleanup);
   req.on('aborted', cleanup);
   res.on('close', cleanup);
@@ -1276,6 +1307,7 @@ async function fireBugAlert(entry) {
           parse_mode: 'MarkdownV2',
           disable_web_page_preview: true,
         }),
+        signal: AbortSignal.timeout(5000),
       }).then(async (r) => {
         // Surface non-2xx Telegram responses — before we only logged network errors.
         if (!r.ok) {
@@ -1298,6 +1330,7 @@ async function fireBugAlert(entry) {
           // Prevent @everyone/@here/role mass-pings smuggled via user bug text.
           allowed_mentions: { parse: [] },
         }),
+        signal: AbortSignal.timeout(5000),
       }).catch((e) => console.error('[bugs] discord failed:', e.message)),
     );
   }
@@ -1460,15 +1493,26 @@ app.post('/api/dm/:handle', (req, res) => {
         if (!nacl.sign.detached.verify(blob, Buffer.from(from_sig, 'base64'), signPub)) {
           return res.status(401).json({ error: 'bad from_handle signature' });
         }
-        // Reject envelope replays inside the skew window.
+        // Reject envelope replays inside the skew window. Per-handle cap so
+        // one dummy identity can't DoS verified-DM delivery globally by
+        // filling the cache with fresh entries.
         const envKey = `${fh}|${envHash}`;
         if (DM_ENV_SEEN.has(envKey)) {
           return res.status(401).json({ error: 'envelope already seen' });
         }
-        if (DM_ENV_SEEN.size >= DM_ENV_SEEN_MAX) {
+        const maxEnvPerHandle = Math.max(128, Math.floor(DM_ENV_SEEN_MAX / 32));
+        let perHandleEnv = 0;
+        for (const k of DM_ENV_SEEN.keys()) if (k.startsWith(fh + '|')) perHandleEnv++;
+        if (perHandleEnv >= maxEnvPerHandle) {
           const cutoff = Date.now() - SIG_MAX_SKEW_MS;
-          for (const [k, v] of DM_ENV_SEEN) if (v < cutoff) DM_ENV_SEEN.delete(k);
-          if (DM_ENV_SEEN.size >= DM_ENV_SEEN_MAX) return res.status(503).json({ error: 'replay-cache full' });
+          for (const [k, v] of DM_ENV_SEEN) if (k.startsWith(fh + '|') && v < cutoff) DM_ENV_SEEN.delete(k);
+          perHandleEnv = 0;
+          for (const k of DM_ENV_SEEN.keys()) if (k.startsWith(fh + '|')) perHandleEnv++;
+          if (perHandleEnv >= maxEnvPerHandle) return res.status(429).json({ error: 'replay-cache full for this handle' });
+        }
+        if (DM_ENV_SEEN.size >= DM_ENV_SEEN_MAX) {
+          const it = DM_ENV_SEEN.keys();
+          for (let i = 0; i < 200; i++) { const k = it.next().value; if (k === undefined) break; DM_ENV_SEEN.delete(k); }
         }
         DM_ENV_SEEN.set(envKey, Date.now());
         from_verified = true;
@@ -1480,7 +1524,10 @@ app.post('/api/dm/:handle', (req, res) => {
   // of cap-rejected requests would silently burn through seq numbers that
   // clients use as `after=<last_seq>` resumption cursors, dropping subsequent
   // legitimate messages on the floor.
-  const ctBytes = Math.max(0, b64BytesLen(ciphertext));
+  // Account against STRING length (what actually sits in Node's heap), not
+  // base64-decoded length — malformed base64 can decode to 0 bytes while
+  // still retaining the full payload string in memory.
+  const ctBytes = typeof ciphertext === 'string' ? ciphertext.length : 0;
   if (INBOX_GLOBAL_BYTES + ctBytes > INBOX_GLOBAL_MAX_BYTES) {
     res.set('Retry-After', '60');
     return res.status(503).json({ error: 'global DM buffer full — try again shortly' });
@@ -1605,7 +1652,7 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
   if (!rateLimitOk(ip, roomId) || !globalRateLimitOk(ip)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
   const room = getOrCreateRoom(roomId);
   if (!room) { res.set('Retry-After', '60'); return res.status(503).json({ error: 'room cap reached' }); }
-  const ctBytes = Math.max(0, b64BytesLen(req.body.ciphertext));
+  const ctBytes = typeof req.body.ciphertext === 'string' ? req.body.ciphertext.length : 0;
   if (ROOM_GLOBAL_BYTES + ctBytes > ROOM_GLOBAL_MAX_BYTES) {
     res.set('Retry-After', '60');
     return res.status(503).json({ error: 'global room buffer full — try again shortly' });
@@ -2066,7 +2113,7 @@ function handleWs(ws, roomId, ip) {
       METRICS.http_429 += 1;
       return;
     }
-    const ctBytes = Math.max(0, b64BytesLen(msg.ciphertext));
+    const ctBytes = typeof msg.ciphertext === 'string' ? msg.ciphertext.length : 0;
     if (ROOM_GLOBAL_BYTES + ctBytes > ROOM_GLOBAL_MAX_BYTES) {
       try { ws.send(JSON.stringify({ type: 'error', code: 503, error: 'global room buffer full' })); } catch (_) {}
       return;
