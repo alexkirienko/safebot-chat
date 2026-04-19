@@ -118,13 +118,17 @@ def test_from_handle_forgery():
         data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     r = urllib.request.urlopen(req, timeout=10); assert r.status == 200
     msgs = target.inbox_wait(after=0, timeout=3)
-    hit = [m for m in msgs if m.from_handle == victim.handle]
-    if hit and not hit[0].from_verified:
-        ok("#2: unsigned forged from_handle delivered but marked from_verified=false")
-    elif hit and hit[0].from_verified:
-        fail("#2: unsigned forged from_handle was marked verified (CRITICAL)")
+    # Server now drops the unsigned from_handle to null entirely (foot-gun
+    # removal). The envelope is still delivered (anonymous sender) but with
+    # no attributable handle.
+    anon_delivered = any(m.from_handle is None and not m.from_verified for m in msgs)
+    wrong_attribution = any(m.from_handle == victim.handle for m in msgs)
+    if anon_delivered and not wrong_attribution:
+        ok("#2: unsigned forged from_handle stripped to null, delivered anonymously")
+    elif wrong_attribution:
+        fail("#2: unsigned forged from_handle was stored under victim's handle (CRITICAL)")
     else:
-        fail("#2: forged DM didn't land in inbox")
+        fail(f"#2: forged DM didn't land at all (from_handles={[m.from_handle for m in msgs]})")
     for m in msgs: target.ack(m)
 
     # Step 2: raw POST with BAD signature (signs wrong blob).

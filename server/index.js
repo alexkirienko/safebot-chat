@@ -1492,12 +1492,13 @@ app.post('/api/dm/:handle', (req, res) => {
   const envelope = {
     seq, id: crypto.randomUUID(),
     ciphertext, nonce, sender_eph_pub,
-    // When the sig verified, store the canonicalized (lowercased, no @) form
-    // so recipients can't be tricked by mixed-case display variants. When
-    // unverified, pass through the raw claim so callers can see what was
-    // offered (and can't trust it — from_verified is false).
-    from_handle: from_verified ? canonical_from
-      : (typeof from_handle === 'string' ? from_handle.slice(0, 34) : null),
+    // Store the canonicalized handle ONLY when the sig verified. Unsigned
+    // claims are dropped entirely — passing them through with
+    // from_verified=false was a footgun: naive UI or bot code would still
+    // display '@alice' and look replyable, when in fact anybody forged it.
+    // With this, consumers either see a proven handle or see `null` and
+    // must treat the sender as anonymous.
+    from_handle: from_verified ? canonical_from : null,
     from_verified,
     ts: Date.now(),
   };
