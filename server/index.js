@@ -233,10 +233,30 @@ function loadIdentities() {
   try {
     const raw = fs.readFileSync(IDENTITIES_STATE_PATH, 'utf8');
     const obj = JSON.parse(raw);
+    let dropped = 0;
     for (const [handle, rec] of Object.entries(obj.identities || {})) {
-      identities.set(handle, rec);
+      // Validate each persisted record against the same schema we enforce at
+      // registration time. A tampered file must not inject garbage into the
+      // identities map or crash auth paths later.
+      if (handle === '__proto__' || handle === 'constructor' || handle === 'prototype') { dropped++; continue; }
+      if (!rec || typeof rec !== 'object' || Array.isArray(rec)) { dropped++; continue; }
+      if (typeof rec.handle !== 'string' || !HANDLE_REGEX.test(rec.handle) || rec.handle !== handle) { dropped++; continue; }
+      if (typeof rec.box_pub !== 'string' || typeof rec.sign_pub !== 'string') { dropped++; continue; }
+      try {
+        if (Buffer.from(rec.box_pub, 'base64').length !== 32) { dropped++; continue; }
+        if (Buffer.from(rec.sign_pub, 'base64').length !== 32) { dropped++; continue; }
+      } catch (_) { dropped++; continue; }
+      const clean = {
+        handle: rec.handle,
+        box_pub: rec.box_pub,
+        sign_pub: rec.sign_pub,
+        registered_at: Number.isFinite(rec.registered_at) ? rec.registered_at : Date.now(),
+        meta: (rec.meta && typeof rec.meta === 'object') ? { bio: String(rec.meta.bio || '').slice(0, 280) } : {},
+        inbox_seq: Number.isFinite(rec.inbox_seq) && rec.inbox_seq > 0 ? rec.inbox_seq : 0,
+      };
+      identities.set(handle, clean);
     }
-    console.log(`[identities] loaded ${identities.size} from disk`);
+    console.log(`[identities] loaded ${identities.size} from disk` + (dropped ? ` (rejected ${dropped} malformed)` : ''));
   } catch (_) { /* fresh slate */ }
 }
 function persistIdentities() {
@@ -1450,7 +1470,15 @@ app.post('/api/dm/:handle', (req, res) => {
   INBOX_GLOBAL_BYTES += ctBytes;
   inbox.push(envelope);
   pruneInbox(handle);
-  wakeDmWaiters(handle, [envelope]);
+  // Only wake waiters if the envelope survived prune — otherwise they'd
+  // receive a ciphertext that's already been evicted (and is un-ackable).
+  const stillHere = inboxes.get(handle) || [];
+  if (stillHere.some((m) => m.id === envelope.id)) {
+    wakeDmWaiters(handle, [envelope]);
+  }
+  // Delete the inbox entry entirely if it's now empty — stops the outer
+  // Map from retaining one entry per handle that ever received a DM.
+  if ((inboxes.get(handle) || []).length === 0) inboxes.delete(handle);
   METRICS.dm_sent_total = (METRICS.dm_sent_total || 0) + 1;
   METRICS.bytes_relayed_total += ciphertext.length;
   res.json({ ok: true, id: envelope.id, seq });
@@ -1516,7 +1544,8 @@ app.delete('/api/dm/:handle/inbox/:id', (req, res) => {
   for (const m of inbox) {
     if (m.id === id) releaseBytes(m); else kept.push(m);
   }
-  inboxes.set(handle, kept);
+  if (kept.length === 0) inboxes.delete(handle);
+  else inboxes.set(handle, kept);
   res.json({ ok: true, removed: before - kept.length });
 });
 
@@ -1922,7 +1951,9 @@ server.requestTimeout   = 0;           // SSE streams have no request timeout
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
 
 server.on('upgrade', (req, socket, head) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  let url;
+  try { url = new URL(req.url, `http://${req.headers.host || 'x'}`); }
+  catch (_) { socket.destroy(); return; }
   const m = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{4,64})\/ws$/);
   if (!m) { socket.destroy(); return; }
   const roomId = m[1];
@@ -1964,7 +1995,7 @@ function handleWs(ws, roomId, ip) {
     let msg;
     try { msg = JSON.parse(data.toString('utf8')); } catch (_) { return; }
     if (!validMessage(msg)) return;
-    if (!rateLimitOk(ip || 'ws', roomId)) {
+    if (!rateLimitOk(ip || 'ws', roomId) || !globalRateLimitOk(ip || 'ws')) {
       try { ws.send(JSON.stringify({ type: 'error', code: 429, error: 'rate limited' })); } catch (_) {}
       METRICS.http_429 += 1;
       return;
