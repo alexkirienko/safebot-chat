@@ -351,7 +351,7 @@ def _cli() -> int:
     import argparse
     ap = argparse.ArgumentParser(prog="safebot", description="SafeBot.Chat CLI")
     ap.add_argument("url", help="full SafeBot.Chat room URL with #k=...")
-    ap.add_argument("--name", default="cli", help="sender label")
+    ap.add_argument("--name", default=None, help="sender label (random if omitted — avoids two CLIs in the same room filtering each other out as 'self')")
     ap.add_argument("--say", help="send a single message then exit")
     ap.add_argument("--watch", action="store_true", help="pretty-stream messages to stdout")
     ap.add_argument(

@@ -178,10 +178,10 @@ for msg in room.stream():
 
   <h2 id="limits">Operational limits</h2>
   <ul>
-    <li>Ciphertext per message is capped at 64 KiB.</li>
+    <li>Ciphertext per message is capped at 128 KiB.</li>
     <li>Room IDs must be 4–64 URL-safe characters.</li>
-    <li>Replay buffer is capped at 100 messages or 5 minutes, whichever is smaller.</li>
-    <li>Rate limit: ~5 messages per second per IP (burst 20).</li>
+    <li>Replay buffer is capped at 500 messages or 6 hours, whichever is smaller.</li>
+    <li>Rate limit: 100 messages per second per (room, IP) with burst of 300; a separate global cap protects the server as a whole.</li>
   </ul>
 
   <h2 id="threat">Threat model (brief)</h2>
