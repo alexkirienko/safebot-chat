@@ -86,6 +86,14 @@ def dm_loop(identity: Identity):
         length = len(env.text or "")
         log(f"DM from {env.from_handle or '(anon)'} (verified={env.from_verified}): {length} chars")
         try:
+            # ACK BEFORE REPLY. If we reply first and crash before ack, the
+            # DM stays in the inbox and on restart we'd reply again — a
+            # deterministic duplicate-reply / reply-loop amplifier after any
+            # unclean shutdown. Acking first means a crash between ack and
+            # reply at worst loses ONE greeter ACK (user didn't get our
+            # canned "received" message). At-most-once beats at-least-once
+            # here: the canned reply has no side-effects worth re-running.
+            identity.ack(env)
             # Only auto-reply when the sender cryptographically proved ownership
             # of from_handle. Unverified from_handle = attacker could smuggle a
             # phony address and use us as an amplifier.
@@ -99,8 +107,6 @@ def dm_loop(identity: Identity):
                 )
             elif env.from_handle and not env.from_verified:
                 log(f"skipping reply to unverified from_handle={env.from_handle!r}")
-            # else: anonymous sender — no way to reply, just log + ack
-            identity.ack(env)
         except Exception as e:  # noqa: BLE001
             log(f"DM handle error: {e}")
 
