@@ -385,6 +385,15 @@ const INBOX_SIG_SEEN_MAX = Number(process.env.INBOX_SIG_SEEN_MAX || 10_000);
 // 256 handles × 128 KiB × 1 k handles would otherwise be ~32 GiB.
 const INBOX_GLOBAL_MAX_BYTES = Number(process.env.INBOX_GLOBAL_MAX_BYTES || 512 * 1024 * 1024); // 512 MiB
 let INBOX_GLOBAL_BYTES = 0;
+// Replay-cache for verified DM envelopes (key = envHash). A captured
+// from_sig+envelope could otherwise be re-POSTed verbatim within the 60s
+// skew and bulk-fill the recipient's ring buffer, evicting unread msgs.
+const DM_ENV_SEEN = new Map();
+const DM_ENV_SEEN_MAX = Number(process.env.DM_ENV_SEEN_MAX || 20_000);
+setInterval(() => {
+  const cutoff = Date.now() - SIG_MAX_SKEW_MS;
+  for (const [k, v] of DM_ENV_SEEN) if (v < cutoff) DM_ENV_SEEN.delete(k);
+}, 5 * 60 * 1000).unref?.();
 // Same pattern for room recent-buffer ciphertext. ROOM_MAX*200*128 KiB could
 // otherwise park 125 GiB of ciphertext in RAM before the 30s janitor runs.
 const ROOM_GLOBAL_MAX_BYTES = Number(process.env.ROOM_GLOBAL_MAX_BYTES || 512 * 1024 * 1024);
@@ -1286,6 +1295,8 @@ async function fireBugAlert(entry) {
             (entry.where ? `where: \`${entry.where}\`\n` : '') +
             (entry.contact ? `contact: ${entry.contact}\n` : '') +
             `id: \`${entry.id}\``,
+          // Prevent @everyone/@here/role mass-pings smuggled via user bug text.
+          allowed_mentions: { parse: [] },
         }),
       }).catch((e) => console.error('[bugs] discord failed:', e.message)),
     );
@@ -1449,6 +1460,17 @@ app.post('/api/dm/:handle', (req, res) => {
         if (!nacl.sign.detached.verify(blob, Buffer.from(from_sig, 'base64'), signPub)) {
           return res.status(401).json({ error: 'bad from_handle signature' });
         }
+        // Reject envelope replays inside the skew window.
+        const envKey = `${fh}|${envHash}`;
+        if (DM_ENV_SEEN.has(envKey)) {
+          return res.status(401).json({ error: 'envelope already seen' });
+        }
+        if (DM_ENV_SEEN.size >= DM_ENV_SEEN_MAX) {
+          const cutoff = Date.now() - SIG_MAX_SKEW_MS;
+          for (const [k, v] of DM_ENV_SEEN) if (v < cutoff) DM_ENV_SEEN.delete(k);
+          if (DM_ENV_SEEN.size >= DM_ENV_SEEN_MAX) return res.status(503).json({ error: 'replay-cache full' });
+        }
+        DM_ENV_SEEN.set(envKey, Date.now());
         from_verified = true;
         canonical_from = fh;
       } catch (_) { return res.status(400).json({ error: 'bad from_handle signature' }); }
@@ -1994,7 +2016,19 @@ server.on('upgrade', (req, socket, head) => {
   // direct attacker can't spoof a different source.
   const peer = req.socket.remoteAddress || '';
   const loopback = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
-  const ip = (loopback ? (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() : '') || peer;
+  // Only trust a forwarded-client header when the TCP peer is actually our
+  // proxy (loopback for Cloudflare tunnel → localhost). Prefer CF's own
+  // CF-Connecting-IP; otherwise take the LAST XFF hop (the one our proxy
+  // appended, not anything the attacker inserted earlier in the chain).
+  let ip = peer;
+  if (loopback) {
+    const cf = String(req.headers['cf-connecting-ip'] || '').trim();
+    if (cf) ip = cf;
+    else {
+      const xff = String(req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (xff.length) ip = xff[xff.length - 1];
+    }
+  }
   wss.handleUpgrade(req, socket, head, (ws) => {
     handleWs(ws, roomId, ip);
   });
