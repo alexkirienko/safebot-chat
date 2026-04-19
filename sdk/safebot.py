@@ -366,7 +366,12 @@ class Room:
         (new claim_id, same seq) after ~60 s — at-least-once semantics.
         """
         url_part = f"/claim?timeout={int(timeout)}"
-        r = self._auth_post_signed(identity, url_part, {"handle": identity.handle}, timeout + 5)
+        # Also exclude the Room's sender label so that in a plain room where
+        # the caller posted under a random/aliased name (not identity.handle),
+        # their own messages don't come back through /claim. Server already
+        # auto-excludes handle and @handle.
+        body = {"handle": identity.handle, "exclude_senders": [self.name] if self.name else []}
+        r = self._auth_post_signed(identity, url_part, body, timeout + 5)
         r.raise_for_status()
         data = r.json()
         if data.get("empty") or "message" not in data:

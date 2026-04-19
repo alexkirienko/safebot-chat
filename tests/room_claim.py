@@ -32,12 +32,11 @@ def run():
     url = f"{BASE}/room/{rid}#k={kb}"
 
     # Bob posts plain (no signed_only), Alice claims.
-    # Use identity handle as sender label so claim's own-message filter
-    # recognises them. In signed-sender rooms the server stamps `@handle`
-    # authoritatively; in plain rooms the client is responsible for label
-    # consistency.
-    bob_room = Room(url, name=bob.handle)
-    alice_room = Room(url, name=alice.handle)
+    # Use deliberately ALIASED names (not identity.handle) to prove the
+    # SDK auto-populates exclude_senders with Room.name so the own-message
+    # filter still works for plain rooms with arbitrary sender labels.
+    bob_room = Room(url, name="bobby-alias")
+    alice_room = Room(url, name="alice-alias")
     bob_room.send("one")
     bob_room.send("two")
     bob_room.send("three")

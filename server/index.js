@@ -532,29 +532,48 @@ function getCursorRec(handle, roomId) {
     ROOM_CURSORS.set(handle, perHandle);
   }
   let rec = perHandle.get(roomId);
-  if (!rec) {
-    if (perHandle.size >= ROOM_CURSORS_PER_HANDLE_MAX) {
-      // Evict oldest-idle entry. cursors are cheap but per-handle map shouldn't
-      // grow unbounded if a handle is asked to claim from thousands of rooms.
-      const firstKey = perHandle.keys().next().value;
-      if (firstKey !== undefined) perHandle.delete(firstKey);
-    }
-    rec = { cursor: 0, inflight: null };
+  if (rec) {
+    // LRU: delete and re-insert so this roomId moves to the newest position
+    // in Map insertion order. Map iteration order == insertion order, so the
+    // evictable entry is always `perHandle.keys().next()`.
+    perHandle.delete(roomId);
     perHandle.set(roomId, rec);
+    return rec;
   }
+  if (perHandle.size >= ROOM_CURSORS_PER_HANDLE_MAX) {
+    // Evict least-recently-touched (front of insertion order).
+    const firstKey = perHandle.keys().next().value;
+    if (firstKey !== undefined) perHandle.delete(firstKey);
+  }
+  rec = { cursor: 0, inflight: null };
+  perHandle.set(roomId, rec);
   return rec;
 }
 function claimExpired(inflight) {
   return !inflight || (Date.now() - inflight.claimed_at) > CLAIM_TTL_MS;
 }
-function findNextForeign(room, cursor, handle) {
-  const tagged = '@' + handle;
+function findNextForeign(room, cursor, handle, excludeSet) {
+  // In signed-sender rooms, sender is authoritative (server stamps @handle).
+  // In plain rooms the client may have posted under arbitrary labels (random
+  // name, alias, etc.) — claim-callers can pass an `exclude_senders` array
+  // listing every label they ever used so their own messages don't come back
+  // through /claim. Always includes the handle and @handle.
   for (const m of room.recent) {
     if (m.seq <= cursor) continue;
-    if (m.sender === handle || m.sender === tagged) continue;
+    const s = m.sender;
+    if (excludeSet && excludeSet.has(s)) continue;
     return m;
   }
   return null;
+}
+function buildExcludeSet(handle, extra) {
+  const s = new Set([handle, '@' + handle]);
+  if (Array.isArray(extra)) {
+    for (const x of extra) {
+      if (typeof x === 'string' && x.length && x.length <= 64) s.add(x);
+    }
+  }
+  return s;
 }
 function buildClaimEnvelope(m) {
   return { seq: m.seq, id: m.id, sender: m.sender, ciphertext: m.ciphertext, nonce: m.nonce, ts: m.ts, sender_verified: !!m.sender_verified };
@@ -2009,6 +2028,7 @@ app.post('/api/rooms/:roomId/claim', (req, res) => {
   }
   if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
   const timeout = Math.max(1, Math.min(90, parseInt(String(req.query.timeout || '30'), 10) || 30));
+  const excludeSet = buildExcludeSet(handle, (req.body && req.body.exclude_senders) || []);
   const room = rooms.get(roomId);
   if (!room) return res.json({ ok: true, empty: true, last_seq: 0, cursor: 0, exists: false });
   pruneRecent(room);
@@ -2028,7 +2048,7 @@ app.post('/api/rooms/:roomId/claim', (req, res) => {
   }
   // Expired inflight: let it be reclaimed (may be the same seq, new claim_id).
   if (rec.inflight && claimExpired(rec.inflight)) rec.inflight = null;
-  const next = findNextForeign(room, rec.cursor, handle);
+  const next = findNextForeign(room, rec.cursor, handle, excludeSet);
   if (next) {
     rec.inflight = { claim_id: crypto.randomUUID(), seq: next.seq, claimed_at: Date.now() };
     return res.json({ ok: true, claim_id: rec.inflight.claim_id, message: buildClaimEnvelope(next), cursor: rec.cursor, last_seq: roomLastSeq(room) });
@@ -2059,7 +2079,7 @@ app.post('/api/rooms/:roomId/claim', (req, res) => {
       if (m) return res.json({ ok: true, claim_id: rec.inflight.claim_id, message: buildClaimEnvelope(m), cursor: rec.cursor, last_seq: roomLastSeq(r2) });
       rec.inflight = null;
     }
-    const nx = findNextForeign(r2, rec.cursor, handle);
+    const nx = findNextForeign(r2, rec.cursor, handle, excludeSet);
     if (nx) {
       rec.inflight = { claim_id: crypto.randomUUID(), seq: nx.seq, claimed_at: Date.now() };
       return res.json({ ok: true, claim_id: rec.inflight.claim_id, message: buildClaimEnvelope(nx), cursor: rec.cursor, last_seq: roomLastSeq(r2) });
@@ -2172,6 +2192,62 @@ const openapiSpec = {
         summary: 'Server-Sent Events stream of ciphertext messages',
         parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string', pattern: '^[A-Za-z0-9_-]{4,64}$' } }],
         responses: { '200': { description: 'text/event-stream', content: { 'text/event-stream': {} } } },
+      },
+    },
+    '/api/rooms/{roomId}/claim': {
+      post: {
+        summary: 'Pull next foreign message via server-tracked cursor (Identity-signed)',
+        description:
+          'At-least-once pull primitive. Returns the oldest seq > cursor whose sender is not the caller; promotes it to an inflight claim with a random claim_id and a 60-second lease. Re-calling while that claim is alive returns the SAME envelope + claim_id. On empty, blocks up to timeout like /wait. Requires Authorization: SafeBot ts=...,n=...,sig=... header signed by the handle\'s Ed25519 sign_sk over "<method> <url> <ts> <nonce>".',
+        parameters: [
+          { name: 'roomId', in: 'path', required: true, schema: { type: 'string', pattern: '^[A-Za-z0-9_-]{4,64}$' } },
+          { name: 'timeout', in: 'query', required: false, schema: { type: 'integer', default: 30, minimum: 1, maximum: 90 } },
+        ],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: {
+            type: 'object',
+            required: ['handle'],
+            properties: {
+              handle: { type: 'string', pattern: '^[a-z0-9_-]{1,32}$' },
+              exclude_senders: {
+                type: 'array',
+                items: { type: 'string', maxLength: 64 },
+                description: 'Extra sender labels to treat as "self" (for plain rooms where the agent posted under a random or aliased name). Handle and @handle are always excluded.',
+              },
+            },
+          } } },
+        },
+        responses: {
+          '200': { description: 'Claim or empty-after-timeout', content: { 'application/json': { schema: { $ref: '#/components/schemas/Claim' } } } },
+          '401': { description: 'Bad or missing Authorization' },
+          '429': { description: 'Rate limited' },
+        },
+      },
+    },
+    '/api/rooms/{roomId}/ack': {
+      post: {
+        summary: 'Advance cursor past a claimed message (Identity-signed)',
+        description:
+          'If (claim_id, seq) matches the current inflight claim, cursor=seq and inflight clears. If seq <= cursor, the ack is idempotent no-op (advanced:false). Mismatched claim_id or seq -> 409.',
+        parameters: [{ name: 'roomId', in: 'path', required: true, schema: { type: 'string', pattern: '^[A-Za-z0-9_-]{4,64}$' } }],
+        requestBody: {
+          required: true,
+          content: { 'application/json': { schema: {
+            type: 'object',
+            required: ['handle', 'claim_id', 'seq'],
+            properties: {
+              handle: { type: 'string', pattern: '^[a-z0-9_-]{1,32}$' },
+              claim_id: { type: 'string' },
+              seq: { type: 'integer', minimum: 1 },
+            },
+          } } },
+        },
+        responses: {
+          '200': { description: 'Ack result', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, advanced: { type: 'boolean' }, cursor: { type: 'integer' } } } } } },
+          '401': { description: 'Bad or missing Authorization' },
+          '409': { description: 'Stale or unknown claim' },
+        },
       },
     },
     '/api/identity/register': {
@@ -2301,6 +2377,26 @@ const openapiSpec = {
           exists: { type: 'boolean' }, roomId: { type: 'string' },
           participants: { type: 'integer' }, recent_count: { type: 'integer' },
           last_seq: { type: 'integer' }, age_seconds: { type: 'integer' }, idle_seconds: { type: 'integer' },
+          signed_only: { type: 'boolean', description: 'True if the room was locked to signed-sender-only mode on its first message. See POST /messages with signed_only:true.' },
+        },
+      },
+      Claim: {
+        type: 'object',
+        description: 'Response envelope for /claim. Either {empty:true} on timeout or {claim_id, message, cursor}.',
+        properties: {
+          ok: { type: 'boolean' },
+          empty: { type: 'boolean' },
+          claim_id: { type: 'string', description: 'Opaque handle; pass to /ack once processed.' },
+          cursor: { type: 'integer' },
+          last_seq: { type: 'integer' },
+          message: {
+            type: 'object',
+            properties: {
+              seq: { type: 'integer' }, id: { type: 'string' }, sender: { type: 'string' },
+              ciphertext: { type: 'string' }, nonce: { type: 'string' }, ts: { type: 'integer' },
+              sender_verified: { type: 'boolean' },
+            },
+          },
         },
       },
       IdentityRegister: {
@@ -2462,7 +2558,15 @@ function handleWs(ws, roomId, ip) {
       try { ws.send(JSON.stringify({ type: 'error', code: 401, error: 'bad sender_sig' })); } catch (_) {}
       return;
     }
-    if (!room.signedOnly && msg.signed_only === true && room.recent.length === 0 && wsHasSig) {
+    if (!room.signedOnly && msg.signed_only === true && room.recent.length === 0) {
+      if (!wsHasSig) {
+        // Parity with HTTP: asking to lock a room without a sig is a 400,
+        // not a silent downgrade to an ordinary message. Previously this
+        // branch required `wsHasSig` and fell through, accepting the frame
+        // as unsigned — which was a transport-dependent room-locking bug.
+        try { ws.send(JSON.stringify({ type: 'error', code: 400, error: 'signed_only requires sender_sig on first message' })); } catch (_) {}
+        return;
+      }
       room.signedOnly = true;
     }
     if (room.signedOnly && !wsHasSig) {
