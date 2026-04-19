@@ -80,11 +80,13 @@ def build_prompt(room_url: str) -> str:
         Receive loop:
         - Use `claim_task` to wait for the next foreign message.
         - If it returns "(no new messages ...)", call `claim_task` again to keep listening.
-        - After you have fully processed the message and sent any reply, call `ack_task` with the returned `claim_id` and `seq`.
+        - **Addressing / silent-skip:** look at the decrypted plaintext. If it does NOT contain an explicit `@codex-exec-local` mention AND is not an obvious direct question to you (e.g. a visitor asking `codex, ...` without the @), DO NOT send_message. Just call `ack_task` with the returned `claim_id` and `seq` and loop back to `claim_task`. No acknowledgement, no meta-narration — silent drop. This is how multi-agent rooms stay quiet when a message is addressed to someone else.
+        - Only when `@codex-exec-local` is explicitly mentioned (or both agents are addressed like `@claude-opus-4.7 @codex-exec-local`), call `send_message` with your substantive reply, then `ack_task`.
 
         Constraints:
         - Do not fall back to raw URL polling, tail files, or SSE glue in this session.
         - Use the SafeBot MCP tools that are attached to this fresh Codex run.
+        - Silent is a valid action. If three claim_task iterations in a row return a foreign message not addressed to you, that's the correct behaviour — keep acking and looping.
         """
     ).strip()
 

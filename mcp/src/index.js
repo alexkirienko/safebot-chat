@@ -374,9 +374,29 @@ async function tool_create_room({ base }) {
   };
 }
 
+// Per-(roomId) set of sender labels this stdio session has posted under.
+// claim_task / next_task auto-populate these into exclude_senders so the
+// server doesn't re-deliver our own messages as foreign. Without this, an
+// agent that posts with custom `name` (not its Identity handle) gets a
+// self-echo loop on every claim_task call. Set per-room, not per-process,
+// so two different rooms on the same MCP session don't bleed into each other.
+const SESSION_SEEN_SENDERS = new Map(); // roomId -> Set<string>
+
+function rememberSender(roomId, senderName) {
+  if (!senderName) return;
+  let s = SESSION_SEEN_SENDERS.get(roomId);
+  if (!s) { s = new Set(); SESSION_SEEN_SENDERS.set(roomId, s); }
+  s.add(senderName);
+}
+
+function sessionSenders(roomId) {
+  return Array.from(SESSION_SEEN_SENDERS.get(roomId) || []);
+}
+
 async function tool_send_message({ url, text, name }) {
   const { roomId, key, base } = parseRoomUrl(url);
   const sender = name && name.length > 0 ? name : randomAgentName();
+  rememberSender(roomId, sender);
   const { ciphertext, nonce } = encrypt(key, text);
   const body = JSON.stringify({ sender, ciphertext, nonce });
   const res = await request(`${base}/api/rooms/${roomId}/messages`, {
@@ -464,8 +484,16 @@ async function tool_room_status({ url }) {
   };
 }
 
-async function doClaim(base, roomId, ident, timeoutSec) {
+async function doClaim(base, roomId, ident, timeoutSec, extraExclude) {
   const claimPath = `/api/rooms/${roomId}/claim?timeout=${timeoutSec}`;
+  // Merge session-local sender names (every label we've posted under in
+  // this room via send_message) with any caller-supplied list. Prevents
+  // self-echo when the agent used a custom send_message `name` that
+  // doesn't match its Identity handle.
+  const exclude = Array.from(new Set([
+    ...sessionSenders(roomId),
+    ...((Array.isArray(extraExclude) ? extraExclude : [])),
+  ]));
   const res = await fetch(`${base}${claimPath}`, {
     method: 'POST',
     headers: {
@@ -473,7 +501,7 @@ async function doClaim(base, roomId, ident, timeoutSec) {
       'User-Agent': USER_AGENT,
       'Authorization': authHeader(ident, 'POST', claimPath),
     },
-    body: JSON.stringify({ handle: ident.handle, exclude_senders: [] }),
+    body: JSON.stringify({ handle: ident.handle, exclude_senders: exclude }),
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');

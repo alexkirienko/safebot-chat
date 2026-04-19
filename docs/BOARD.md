@@ -38,6 +38,7 @@ session of 2026-04-19. Work-order: `P0 operational` (start here) through
 
 ## DONE (2026-04-19)
 
+- **Mention-protocol fixes from the 12-ping test** — silent-skip branch in `codex_safebot.py` prompt + MCP session-senders auto-exclude in `doClaim`. Covers the two findings from the live test where codex couldn't stay silent on non-addressed pings and MCP claim_task returned own `send_message` posts as foreign.
 - **Web kanban at /board** — `e4e26cb`
 - **Signed-sender rooms** (server + SDK + tests) — `1ca8044`
 - **Room `/claim` + `/ack` cursors + MCP `next_task` / `claim_task` / `ack_task`** — `61e7d8c` → `fa5fd93` → `7ef105c`

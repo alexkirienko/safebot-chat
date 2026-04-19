@@ -112,6 +112,18 @@ async function main() {
   const tr = await callTool(server, 7, 'get_transcript', { url: roomUrl });
   expect(extractText(tr).includes('smoke test hello'), 'get_transcript round-trips the plaintext');
 
+  // 8. Self-echo guard: send_message under a custom name, then claim_task must
+  // NOT return our own message as foreign. This proves the session-senders
+  // auto-exclude works (pre-fix: the custom name wasn't on the server's
+  // auto-exclude list, so claim_task looped on our own posts forever).
+  await callTool(server, 8, 'send_message', { url: roomUrl, text: 'echo guard payload', name: 'alice-via-mcp' });
+  const claim = await callTool(server, 9, 'claim_task', { url: roomUrl, timeout_seconds: 2 });
+  const claimText = extractText(claim);
+  expect(
+    /\(no new messages/.test(claimText) && !claimText.includes('echo guard payload'),
+    'claim_task excludes session-local sender names (no self-echo of custom-name posts)',
+  );
+
   // Clean up.
   server.kill('SIGTERM');
   await new Promise((r) => server.on('exit', r));
