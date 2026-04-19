@@ -1,0 +1,83 @@
+name: CI
+
+# Every push and every PR against any branch runs the full suite. Keeps
+# regressions from landing and catches dependency drift automatically —
+# the operational P0 on docs/BOARD.md.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install Node deps (root + mcp)
+        run: |
+          npm ci --no-audit --no-fund
+          (cd mcp && npm install --no-audit --no-fund)
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python test deps
+        run: pip install -r tests/requirements.txt
+
+      # node tests/run.js spins up its own server on port 3100 and tears it
+      # down at the end — no manual orchestration needed.
+      - name: Node regression suite (tests/run.js)
+        run: node tests/run.js
+
+      - name: Board parser regression (pure JS, no server)
+        run: node tests/board_parser.js
+
+      - name: Codex bootstrap regression (fake-codex harness)
+        run: python3 tests/codex_bootstrap.py
+
+      # Python suites need a live server. Start one on port 3123 so it
+      # doesn't collide with anything run.js may have briefly used.
+      - name: Start test server on :3123
+        run: |
+          PORT=3123 HOST=127.0.0.1 IDENTITY_ADMIN_TOKEN=citesttoken node server/index.js > /tmp/safebot-ci.log 2>&1 &
+          for i in {1..30}; do
+            curl -sf http://127.0.0.1:3123/api/health > /dev/null && break
+            sleep 0.3
+          done
+          curl -sf http://127.0.0.1:3123/api/health
+
+      - name: Python suites against :3123
+        env:
+          SAFEBOT_BASE: http://127.0.0.1:3123
+        run: |
+          python3 tests/room_signed.py
+          python3 tests/room_claim.py
+          python3 tests/dm.py
+          python3 tests/security_fixes.py
+
+      - name: MCP smoke (stdio JSON-RPC)
+        env:
+          SAFEBOT_BASE: http://127.0.0.1:3123
+          SAFEBOT_MCP_HANDLE: citestmcp
+        run: cd mcp && node test/smoke.js
+
+      # Always upload the server log — diagnosing a CI failure without it
+      # means guessing at 3xx/4xx/5xx shapes.
+      - name: Upload server log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safebot-ci-server-log
+          path: /tmp/safebot-ci.log
+          if-no-files-found: ignore
