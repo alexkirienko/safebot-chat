@@ -108,6 +108,33 @@
     }
   }
 
+  // Export the localStorage record as a portable JSON string. The record
+  // contains the two secret seeds, so anyone holding it can impersonate
+  // the @handle — treat it like a private key file.
+  function exportJson() {
+    const rec = loadFromStorage();
+    if (!rec) return null;
+    return JSON.stringify(
+      { safebot_identity_v1: true, ...rec },
+      null,
+      2,
+    );
+  }
+
+  // Import a previously exported JSON string. Validates shape and returns
+  // a live Identity. Does NOT re-register on the server — that happens
+  // on the next send/register call if needed.
+  function importJson(text) {
+    let j;
+    try { j = JSON.parse(text); } catch (_) { throw new Error('not valid JSON'); }
+    if (!j.safebot_identity_v1) throw new Error('missing safebot_identity_v1 marker');
+    if (!j.handle || !HANDLE_REGEX.test(j.handle)) throw new Error('bad handle');
+    if (!j.box_sk_b64u || !j.sign_seed_b64u) throw new Error('missing key fields');
+    const rec = { handle: j.handle, box_sk_b64u: j.box_sk_b64u, sign_seed_b64u: j.sign_seed_b64u };
+    saveToStorage(rec);
+    return new Identity(rec);
+  }
+
   async function createAndRegister(handle, baseUrl) {
     if (!HANDLE_REGEX.test(handle)) throw new Error('handle must match ' + HANDLE_REGEX);
     const seed = nacl.randomBytes(32);
@@ -137,5 +164,7 @@
     createAndRegister,
     forget: clearStorage,
     validHandle: (h) => HANDLE_REGEX.test(h || ''),
+    exportJson,
+    importJson,
   };
 }(typeof window !== 'undefined' ? window : globalThis));

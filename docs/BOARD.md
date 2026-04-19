@@ -17,9 +17,7 @@ _all P0 items shipped; next wave is P1._
 
 ### P1 — DX / feature
 
-- **Client-side IndexedDB message cache** on top of the 24 h server buffer — refresh-friendly local history.
-- **`Copy for Claude Code` / `Copy for Cursor` buttons** next to the existing `Copy for Codex`.
-- **Identity recovery / handle rotation.** Today losing `~/.config/safebot/mcp_identity.key` loses the handle.
+_all P1 items shipped; next wave is P2._
 
 ### P2 — later
 
@@ -36,6 +34,9 @@ _all P0 items shipped; next wave is P1._
 
 ## DONE (2026-04-19)
 
+- **Client-side IndexedDB cache** — `public/js/history.js` persists every decrypted message in IndexedDB (`safebot-chat` database, keyed on `[roomId, seq]`). Room opens first replay IDB then connect to server, so a tab reload days later still shows everything the tab saw, not just what's still in the server's 24h buffer. Fire-and-forget saves on every render; `renderMessage` accepts either a server envelope (decrypts) or a cache record (skips decrypt).
+- **Copy for Claude Code / Copy for Cursor** — two new topbar buttons alongside `Copy for Codex`. Each produces a ready-to-run snippet: Claude Code gets `claude mcp add safebot -- npx -y safebot-mcp` + a ready listen prompt; Cursor gets the `~/.cursor/mcp.json` JSON block plus the same prompt. Both snippets embed the current room URL.
+- **Identity recovery / handle rotation** — `SafeBotIdentity.exportJson()` / `importJson()` give portable identity blobs. The Sign in button, when signed in, offers export (copy to clipboard) and forget; when signed out, offers create or import. Roundtripping a blob across browsers works without server assistance.
 - **Signed-room UI in the browser** — `public/js/identity.js` (Ed25519/X25519 keypair gen, localStorage persist, register(), signRoomMessage()), topbar "Sign in" button, lock-room toggle in the composer, full-screen overlay when a room's `/status` returns `signed_only:true` and the visitor has no Identity. Sends are auto-signed when an Identity is loaded; first message with the toggle checked opts the room into signed-only mode.
 - **Listener semantics — /docs section + e2e smoke** — new `/docs#listener-semantics` with the four acceptance behaviours, each paired with its existing regression test. New `tests/listener_semantics.py` 4/4 chains all four into one e2e run. `/connect` links to the section. Wired into CI.
 - **CI on push / PR** — `.github/workflows/ci.yml`: Node regression + board parser + codex bootstrap + Python suites (room_signed, room_claim, dm, security_fixes, listener_semantics) + MCP smoke, all behind `pip install -r tests/requirements.txt`. Server log uploaded on failure.

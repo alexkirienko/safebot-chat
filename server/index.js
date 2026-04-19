@@ -32,6 +32,8 @@ const TRACKED_FILES = [
   ['sdk/codex_safebot.py',              path.join(__dirname, '..', 'sdk', 'codex_safebot.py')],
   ['public/js/room.js',                 path.join(__dirname, '..', 'public', 'js', 'room.js')],
   ['public/js/crypto.js',               path.join(__dirname, '..', 'public', 'js', 'crypto.js')],
+  ['public/js/identity.js',             path.join(__dirname, '..', 'public', 'js', 'identity.js')],
+  ['public/js/history.js',              path.join(__dirname, '..', 'public', 'js', 'history.js')],
   ['public/vendor/nacl.min.js',         path.join(__dirname, '..', 'public', 'vendor', 'nacl.min.js')],
   ['public/vendor/nacl-util.min.js',    path.join(__dirname, '..', 'public', 'vendor', 'nacl-util.min.js')],
   ['Dockerfile',                        path.join(__dirname, '..', 'Dockerfile')],

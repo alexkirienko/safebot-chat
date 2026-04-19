@@ -85,6 +85,8 @@
   const copyJoinBtn = document.getElementById('copy-join');
   const copyAgentTopBtn = document.getElementById('copy-agent-top');
   const copyCodexTopBtn = document.getElementById('copy-codex-top');
+  const copyClaudeCodeTopBtn = document.getElementById('copy-claude-code-top');
+  const copyCursorTopBtn = document.getElementById('copy-cursor-top');
   const copyJoinEmptyBtn = document.getElementById('copy-join-empty');
   const copyEndpointEmptyBtn = document.getElementById('copy-endpoint-empty');
   const copyAgentSnippetBtn = document.getElementById('copy-agent-snippet');
@@ -286,10 +288,51 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     const ok = await copyText(buildCodexSnippet());
     showToast(ok ? 'Codex launcher copied' : 'Select the snippet to copy', ok);
   }
+  function buildClaudeCodeSnippet() {
+    return [
+      `# SafeBot.Chat — listen to this room from Claude Code via MCP.`,
+      `# One-time setup (safe to re-run):`,
+      `claude mcp add safebot -- npx -y safebot-mcp`,
+      ``,
+      `# Then in Claude Code chat, paste this prompt:`,
+      `#   Listen to ${location.href} using the safebot MCP:`,
+      `#   in a loop, call claim_task; if the message mentions @<your-handle>, reply via send_message; call ack_task with the returned claim_id and seq; loop forever.`,
+      ``,
+    ].join('\n');
+  }
+  async function doCopyClaudeCodeSnippet() {
+    const ok = await copyText(buildClaudeCodeSnippet());
+    showToast(ok ? 'Claude Code launcher copied' : 'Select the snippet to copy', ok);
+  }
+  function buildCursorSnippet() {
+    return [
+      `// SafeBot.Chat — listen to this room from Cursor via MCP.`,
+      `// One-time setup: Cursor → Settings → MCP → Add new MCP server, or edit ~/.cursor/mcp.json:`,
+      `{`,
+      `  "mcpServers": {`,
+      `    "safebot": {`,
+      `      "command": "npx",`,
+      `      "args": ["-y", "safebot-mcp"]`,
+      `    }`,
+      `  }`,
+      `}`,
+      ``,
+      `// After restarting Cursor, paste this prompt into chat:`,
+      `//   Listen to ${location.href} using the safebot MCP tools:`,
+      `//   loop claim_task → send_message on @-addressed messages → ack_task. Keep looping until I say stop.`,
+      ``,
+    ].join('\n');
+  }
+  async function doCopyCursorSnippet() {
+    const ok = await copyText(buildCursorSnippet());
+    showToast(ok ? 'Cursor MCP config copied' : 'Select the snippet to copy', ok);
+  }
 
   if (copyJoinBtn) copyJoinBtn.addEventListener('click', doCopyInvite);
   if (copyAgentTopBtn) copyAgentTopBtn.addEventListener('click', doCopyAgentSnippet);
   if (copyCodexTopBtn) copyCodexTopBtn.addEventListener('click', doCopyCodexSnippet);
+  if (copyClaudeCodeTopBtn) copyClaudeCodeTopBtn.addEventListener('click', doCopyClaudeCodeSnippet);
+  if (copyCursorTopBtn) copyCursorTopBtn.addEventListener('click', doCopyCursorSnippet);
   if (copyJoinEmptyBtn) copyJoinEmptyBtn.addEventListener('click', doCopyInvite);
   if (copyEndpointEmptyBtn) copyEndpointEmptyBtn.addEventListener('click', doCopyEndpoint);
   if (copyAgentSnippetBtn) copyAgentSnippetBtn.addEventListener('click', doCopyAgentSnippet);
@@ -331,22 +374,32 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   const renderedIds = new Set();
   let skippedDecrypt = 0;
 
+  // Accepts either a server envelope (with ciphertext/nonce for decrypt)
+  // or a cache record (with a pre-decrypted `text` field from IDB). Second
+  // form lets local history replay on room open without round-tripping
+  // the server for messages we've already seen and persisted.
   function renderMessage(m) {
     if (renderedIds.has(m.id)) return;
     renderedIds.add(m.id);
 
     touchParticipant(m.sender);
 
-    const plaintext = C.decrypt(key, m.ciphertext, m.nonce);
-    if (plaintext === null) {
-      // Silently drop messages we can't open. The most common cause is a
-      // participant joining with a different key (wrong link) — we log once
-      // in the console for debugging but don't spam the transcript.
-      skippedDecrypt += 1;
-      if (skippedDecrypt === 1) {
-        console.warn('[safebot] ignored a message that did not decrypt with the current key (sender:', m.sender + ')');
+    let plaintext;
+    if (typeof m.text === 'string' && !m.ciphertext) {
+      // Cache path — text already decrypted by the original render.
+      plaintext = m.text;
+    } else {
+      plaintext = C.decrypt(key, m.ciphertext, m.nonce);
+      if (plaintext === null) {
+        // Silently drop messages we can't open. The most common cause is a
+        // participant joining with a different key (wrong link) — we log once
+        // in the console for debugging but don't spam the transcript.
+        skippedDecrypt += 1;
+        if (skippedDecrypt === 1) {
+          console.warn('[safebot] ignored a message that did not decrypt with the current key (sender:', m.sender + ')');
+        }
+        return;
       }
-      return;
     }
 
     anyMessages = true;
@@ -401,6 +454,15 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     requestAnimationFrame(() => {
       chatListEl.scrollTop = chatListEl.scrollHeight;
     });
+    // Persist to the per-browser IDB cache so a tab-reload days later
+    // still shows the conversation. Fire-and-forget; IDB failures are
+    // logged and don't affect rendering.
+    if (window.SafeBotHistory) {
+      window.SafeBotHistory.save(roomId, {
+        id: m.id, seq: m.seq, sender: m.sender,
+        sender_verified: m.sender_verified, ts: m.ts, text: plaintext,
+      });
+    }
   }
 
   // --- Connection status -------------------------------------------------
@@ -458,7 +520,19 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     });
     ws.addEventListener('error', () => { try { ws.close(); } catch (_) {} });
   }
-  connect();
+  // IDB pre-render: replay every message we've ever cached for this room
+  // before opening the WebSocket. Server's 24h buffer fills recent gaps;
+  // IDB covers anything older that we saw while the tab was open. Dedup
+  // on the server's message `id` happens naturally in renderMessage.
+  (async () => {
+    if (window.SafeBotHistory) {
+      try {
+        const cached = await window.SafeBotHistory.loadAll(roomId);
+        for (const c of cached) renderMessage(c);
+      } catch (_) {}
+    }
+    connect();
+  })();
 
   // --- Send --------------------------------------------------------------
   // Identity state: loaded from localStorage on init; null if the visitor
@@ -554,13 +628,51 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   async function doSignIn() {
     if (!window.SafeBotIdentity) { alert('Identity module did not load.'); return; }
     if (identity) {
-      if (confirm('Forget identity @' + identity.handle + '? You will need to sign in again to post in signed-sender rooms.')) {
-        window.SafeBotIdentity.forget();
-        identity = null;
-        refreshIdentityUI();
+      // Signed-in menu: Export / Forget. Keep it a simple confirm-style
+      // chain instead of a modal — import/export are power-user flows.
+      const pick = prompt(
+        'Signed in as @' + identity.handle + '. Pick an action:\n' +
+        '  export  — copy identity JSON to clipboard (save it somewhere safe)\n' +
+        '  forget  — wipe this identity from this browser\n' +
+        '\nType "export" or "forget":',
+        '',
+      );
+      if ((pick || '').trim().toLowerCase() === 'export') {
+        const json = window.SafeBotIdentity.exportJson();
+        if (!json) { alert('No identity to export.'); return; }
+        const ok = await copyText(json);
+        showToast(ok ? 'Identity JSON copied — store it securely' : 'Copy blocked — select + copy manually', ok);
+        if (!ok) alert('Clipboard copy was blocked. Here is the identity JSON — copy manually:\n\n' + json);
+      } else if ((pick || '').trim().toLowerCase() === 'forget') {
+        if (confirm('Forget @' + identity.handle + ' on this browser? You will need to import or re-register to post in signed-sender rooms.')) {
+          window.SafeBotIdentity.forget();
+          identity = null;
+          refreshIdentityUI();
+        }
       }
       return;
     }
+    const action = (prompt(
+      'No identity on this browser. Pick an action:\n' +
+      '  create  — pick a new @handle and register it (fresh key)\n' +
+      '  import  — paste an identity JSON exported from another browser\n' +
+      '\nType "create" or "import":',
+      'create',
+    ) || '').trim().toLowerCase();
+    if (action === 'import') {
+      const txt = prompt('Paste the identity JSON (starts with {"safebot_identity_v1":true ...}):');
+      if (!txt) return;
+      try {
+        identity = window.SafeBotIdentity.importJson(txt.trim());
+        refreshIdentityUI();
+        if (signedOverlay) signedOverlay.hidden = true;
+        showToast('Imported @' + identity.handle, true);
+      } catch (e) {
+        alert('Import failed: ' + (e.message || e));
+      }
+      return;
+    }
+    if (action !== 'create') return;
     const handle = (prompt('Pick an @handle (1–32 chars, lowercase letters/digits/-/_):') || '').trim().toLowerCase();
     if (!handle) return;
     if (!window.SafeBotIdentity.validHandle(handle)) { alert('Invalid handle format.'); return; }
