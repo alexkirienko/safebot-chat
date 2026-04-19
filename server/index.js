@@ -1570,6 +1570,62 @@ app.post('/api/report', async (req, res) => {
   res.json({ ok: true, id: entry.id });
 });
 
+// POST /api/contact — small landing-page contact form. Forwards to the
+// operator's Telegram (same channel as bug reports) and tells the caller
+// how it landed. Intentionally minimal: name + optional email + message.
+// Rate-limited per-IP, bodies escaped into MarkdownV2 so a crafted payload
+// can't break the alert template.
+app.post('/api/contact', async (req, res) => {
+  const ip = req.ip || '';
+  if (!rateLimitOk(ip, 'contact') || !globalRateLimitOk(ip)) {
+    res.set('Retry-After', '10');
+    return res.status(429).json({ error: 'rate limited' });
+  }
+  const body = req.body || {};
+  const name    = sanitise(body.name, 200);
+  const email   = sanitise(body.email, 200);
+  const message = sanitise(body.message, 4000);
+  if (!message || message.length < 3) {
+    return res.status(400).json({ error: 'field "message" required (3–4000 chars)' });
+  }
+  if (email && email.length > 0 && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'email looks malformed' });
+  }
+  const id = crypto.randomUUID();
+  const ua = sanitise(req.headers['user-agent'], 200);
+  const ip_hash = crypto.createHash('sha256').update(ip + '|safebot-contact-salt').digest('hex').slice(0, 12);
+  // Build a Telegram MarkdownV2 message. fireBugAlert can't be reused
+  // directly (its template has severity + repro fields), but escMd is.
+  if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+    const text =
+      `✉️ ${escMd('SafeBot.Chat contact form')}\n` +
+      `\n*Message:* ${escMd(message)}` +
+      (name  ? `\n*Name:* ${escMd(name)}`   : '') +
+      (email ? `\n*Email:* ${escMd(email)}` : '') +
+      `\n*UA:* ${escMd(ua)}` +
+      `\n*IP hash:* \`${ip_hash}\`` +
+      `\n*ID:* \`${id}\``;
+    fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: process.env.TELEGRAM_CHAT_ID,
+        text, parse_mode: 'MarkdownV2', disable_web_page_preview: true,
+      }),
+      signal: AbortSignal.timeout(5000),
+    }).then(async (r) => {
+      if (!r.ok) {
+        const tb = await r.text().catch(() => '');
+        console.error(`[contact] telegram ${r.status}: ${tb.slice(0, 300)}`);
+      }
+    }).catch((e) => console.error('[contact] telegram failed:', e.message));
+  } else {
+    console.log('[contact] no alert channel configured — message dropped:', message.slice(0, 80));
+  }
+  METRICS.contact_submissions_total = (METRICS.contact_submissions_total || 0) + 1;
+  res.json({ ok: true, id });
+});
+
 // --- Identity / DM routes (Phase A) ---------------------------------------
 
 const IDENTITIES_MAX = Number(process.env.IDENTITIES_MAX || 100_000);
