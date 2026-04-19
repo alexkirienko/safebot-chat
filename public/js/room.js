@@ -461,11 +461,30 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   connect();
 
   // --- Send --------------------------------------------------------------
-  function send(plaintext) {
+  // Identity state: loaded from localStorage on init; null if the visitor
+  // hasn't signed in. When present, every outgoing message is signed so the
+  // server can stamp `@handle` + sender_verified:true on the envelope.
+  let identity = window.SafeBotIdentity && window.SafeBotIdentity.load();
+  let firstMessageSent = false;
+  async function send(plaintext) {
     plaintext = (plaintext || '').trim();
     if (!plaintext) return;
     const { ciphertext, nonce } = C.encrypt(key, plaintext);
-    const payload = JSON.stringify({ sender: me, ciphertext, nonce });
+    const body = { sender: me, ciphertext, nonce };
+    if (identity) {
+      try {
+        const sigFields = await identity.signRoomMessage(roomId, ciphertext);
+        Object.assign(body, sigFields);
+      } catch (e) { console.error('[safebot] sign failed:', e); }
+    }
+    // signed_only is a one-shot flip applied on the very first message of
+    // a fresh room. Honoured server-side only when room.recent is empty.
+    const toggle = document.getElementById('signed-only-toggle');
+    if (!firstMessageSent && toggle && toggle.checked && identity) {
+      body.signed_only = true;
+    }
+    firstMessageSent = true;
+    const payload = JSON.stringify(body);
     if (ws && ws.readyState === 1) ws.send(payload);
     else sendQueue.push(payload);
   }
@@ -506,6 +525,68 @@ key  share #k=… separately (URL fragment never reaches the server)`;
 
   // Autofocus composer after a beat so the invite card can animate in first.
   setTimeout(() => messageEl.focus(), 400);
+
+  // --- Signed-sender UI wiring -----------------------------------------
+  // If the visitor has an Identity in localStorage, enable the lock-room
+  // toggle and show the "@handle" badge instead of "Sign in". If the room
+  // is already locked (signed_only:true on /status), require an Identity
+  // and show the overlay otherwise.
+  const signinBtn = document.getElementById('topbar-signin');
+  const signinLabel = document.getElementById('topbar-signin-label');
+  const signedOverlay = document.getElementById('signed-overlay');
+  const signedOnlyRow = document.getElementById('signed-only-row');
+  const signedOnlyToggle = document.getElementById('signed-only-toggle');
+  const overlaySigninBtn = document.getElementById('signed-overlay-signin');
+
+  function refreshIdentityUI() {
+    if (identity) {
+      if (signinLabel) signinLabel.textContent = '@' + identity.handle;
+      if (signinBtn) signinBtn.title = 'Signed in as @' + identity.handle + '. Click to forget.';
+      if (signedOnlyRow) signedOnlyRow.hidden = false;
+    } else {
+      if (signinLabel) signinLabel.textContent = 'Sign in';
+      if (signinBtn) signinBtn.title = 'Sign in as @handle to enable verified-sender mode';
+      if (signedOnlyRow) signedOnlyRow.hidden = true;
+    }
+  }
+  refreshIdentityUI();
+
+  async function doSignIn() {
+    if (!window.SafeBotIdentity) { alert('Identity module did not load.'); return; }
+    if (identity) {
+      if (confirm('Forget identity @' + identity.handle + '? You will need to sign in again to post in signed-sender rooms.')) {
+        window.SafeBotIdentity.forget();
+        identity = null;
+        refreshIdentityUI();
+      }
+      return;
+    }
+    const handle = (prompt('Pick an @handle (1–32 chars, lowercase letters/digits/-/_):') || '').trim().toLowerCase();
+    if (!handle) return;
+    if (!window.SafeBotIdentity.validHandle(handle)) { alert('Invalid handle format.'); return; }
+    try {
+      const ident = await window.SafeBotIdentity.createAndRegister(handle, location.origin);
+      identity = ident;
+      refreshIdentityUI();
+      if (signedOverlay) signedOverlay.hidden = true;
+      showToast('Registered as @' + handle, true);
+    } catch (e) {
+      alert(String(e.message || e));
+    }
+  }
+  if (signinBtn) signinBtn.addEventListener('click', doSignIn);
+  if (overlaySigninBtn) overlaySigninBtn.addEventListener('click', doSignIn);
+
+  // Probe /status for signed_only; show overlay if set and no Identity.
+  (async () => {
+    try {
+      const r = await fetch(`/api/rooms/${roomId}/status`, { cache: 'no-store' });
+      const s = await r.json();
+      if (s && s.signed_only && !identity && signedOverlay) {
+        signedOverlay.hidden = false;
+      }
+    } catch (_) {}
+  })();
 
   // --- Mention notification (tab flash + beep + browser notif) ----------
   const origTitle = document.title;

@@ -91,6 +91,10 @@
       <svg width="14" height="14"><use href="#ic-download"/></svg>
       <span class="label-desktop">Save</span>
     </button>
+    <button class="ghost-btn" id="topbar-signin" title="Sign in as @handle to enable verified-sender mode">
+      <svg width="14" height="14"><use href="#ic-shield"/></svg>
+      <span class="label-desktop" id="topbar-signin-label">Sign in</span>
+    </button>
     <button class="ghost-btn topbar-people-btn" id="topbar-people" title="Participants" aria-label="Toggle participants">
       <svg width="14" height="14"><use href="#ic-people"/></svg>
     </button>
@@ -173,9 +177,23 @@
           </button>
         </div>
         <div class="chat__hint" id="chat-hint">encrypted locally · press ⏎ to send, ⇧⏎ for newline</div>
+        <label class="chat__signed" id="signed-only-row" hidden>
+          <input type="checkbox" id="signed-only-toggle" />
+          <span>Lock this room to signed @handle senders only (applies on first message, cannot be undone)</span>
+        </label>
       </div>
     </form>
   </section>
+
+  <!-- Overlay shown when this room is signed_only and the visitor has no Identity.
+       The composer is disabled while this is visible. -->
+  <div class="signed-overlay" id="signed-overlay" hidden>
+    <div class="signed-overlay__card">
+      <h3>This room requires a signed @handle</h3>
+      <p>The first participant locked this room to signed-sender mode. To post here you need a registered @handle on this browser.</p>
+      <button class="btn btn--primary" id="signed-overlay-signin">Sign in / create @handle</button>
+    </div>
+  </div>
 
   <!-- People rail — always visible on the RIGHT (desktop); collapsible on mobile -->
   <aside class="rail-people" id="rail-people">
@@ -203,6 +221,7 @@
 <script src="/vendor/nacl.min.js"></script>
 <script src="/vendor/nacl-util.min.js"></script>
 <script src="/js/crypto.js"></script>
+<script src="/js/identity.js"></script>
 <script src="/js/room.js"></script>
 </body>
 </html>
