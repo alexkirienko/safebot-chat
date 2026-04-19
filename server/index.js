@@ -284,9 +284,14 @@ function wakeDmWaiters(handle, msgs) {
 const WAITER_CAP_PER_IP = Number(process.env.WAITER_CAP_PER_IP || 16);
 const waitersByIp = new Map();
 function waiterAcquire(ip) {
-  const n = (waitersByIp.get(ip) || 0) + 1;
-  waitersByIp.set(ip, n);
-  return n <= WAITER_CAP_PER_IP;
+  // Test BEFORE incrementing — a previous version incremented first and
+  // returned false if over cap, which let rejected requests permanently
+  // inflate the counter and lock the IP out. Counter is only ever bumped
+  // on success, and released on resolve/close.
+  const cur = waitersByIp.get(ip) || 0;
+  if (cur >= WAITER_CAP_PER_IP) return false;
+  waitersByIp.set(ip, cur + 1);
+  return true;
 }
 function waiterRelease(ip) {
   const n = (waitersByIp.get(ip) || 1) - 1;
@@ -1119,7 +1124,7 @@ async function fireBugAlert(entry) {
 }
 
 app.post('/api/report', async (req, res) => {
-  const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
+  const ip = req.ip || '';
   if (!rateLimitOk(ip, 'bugs')) {
     res.set('Retry-After', '10');
     return res.status(429).json({ error: 'rate limited' });
@@ -1165,7 +1170,7 @@ app.post('/api/report', async (req, res) => {
 // --- Identity / DM routes (Phase A) ---------------------------------------
 
 app.post('/api/identity/register', (req, res) => {
-  const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
+  const ip = req.ip || '';
   if (!rateLimitOk(ip, 'register')) { res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' }); }
   // Operators can bypass the RESERVED_HANDLES list by presenting the metrics
   // token (same token that gates /admin/stats). Anonymous registration can't.
@@ -1221,7 +1226,7 @@ app.get('/api/identity/:handle', (req, res) => {
 // recipient's box_pub via nacl.box with an ephemeral keypair — server
 // never sees plaintext.
 app.post('/api/dm/:handle', (req, res) => {
-  const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
+  const ip = req.ip || '';
   const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
   if (!HANDLE_REGEX.test(handle)) return res.status(400).json({ error: 'invalid handle' });
   if (!rateLimitOk(ip, `dm:${handle}`)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
@@ -1347,7 +1352,7 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
   const { roomId } = req.params;
   if (!/^[A-Za-z0-9_-]{4,64}$/.test(roomId)) return res.status(400).json({ error: 'bad roomId' });
   if (!validMessage(req.body)) return res.status(400).json({ error: 'bad message' });
-  const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
+  const ip = req.ip || '';
   if (!rateLimitOk(ip, roomId)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
   const room = getOrCreateRoom(roomId);
   const msg = {
@@ -1736,7 +1741,13 @@ server.on('upgrade', (req, socket, head) => {
   const m = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9_-]{4,64})\/ws$/);
   if (!m) { socket.destroy(); return; }
   const roomId = m[1];
-  const ip = ((req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim()) || req.socket.remoteAddress || '';
+  // WS upgrade runs before Express middleware, so req.ip isn't populated.
+  // Trust X-Forwarded-For only when the peer is loopback (Cloudflare tunnel
+  // lands on 127.0.0.1); otherwise fall back to the raw socket IP so a
+  // direct attacker can't spoof a different source.
+  const peer = req.socket.remoteAddress || '';
+  const loopback = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+  const ip = (loopback ? (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() : '') || peer;
   wss.handleUpgrade(req, socket, head, (ws) => {
     handleWs(ws, roomId, ip);
   });

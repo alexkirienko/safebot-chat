@@ -55,7 +55,10 @@ def room_loop():
     try:
         for msg in room.stream(include_self=False, auto_reconnect=True):
             text = msg.text if msg.text is not None else "[undecryptable]"
-            log(f"room heard {msg.sender}: {text[:120]!r}")
+            # Do not log the plaintext body — the greeter runs on the relay
+            # host and systemd journald persists stdout. Length + sender is
+            # enough for ops visibility while keeping "no plaintext on disk".
+            log(f"room heard {msg.sender}: {len(text)} chars")
             if msg.sender == room.name:
                 continue
             try:
@@ -71,8 +74,10 @@ def room_loop():
 def dm_loop(identity: Identity):
     log(f"DM greeter online: @{identity.handle} at {identity.dm_url()}")
     for env in identity.inbox_stream(timeout=30):
-        preview = (env.text or "[undecryptable]")[:200]
-        log(f"DM from {env.from_handle or '(anon)'}: {preview!r}")
+        # Log length/source only — the plaintext stays out of journald so the
+        # "no plaintext on disk" invariant holds for the greeter process too.
+        length = len(env.text or "")
+        log(f"DM from {env.from_handle or '(anon)'} (verified={env.from_verified}): {length} chars")
         try:
             # Only auto-reply when the sender cryptographically proved ownership
             # of from_handle. Unverified from_handle = attacker could smuggle a
