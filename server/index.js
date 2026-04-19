@@ -989,8 +989,11 @@ const HOST = process.env.HOST || '0.0.0.0';
 // 128 KiB base64 ceiling = ~96 KiB plaintext after XSalsa20 tag + base64 overhead.
 // The UI/docs promise up to ~60 KiB of plaintext; this gives us comfortable headroom.
 const MAX_MSG_BYTES = 128 * 1024;
-const RECENT_MAX = 500;                    // messages to buffer for late joiners
-const RECENT_TTL_MS = 6 * 60 * 60 * 1000;  // 6h — reload-friendly; bumped from 1h
+const RECENT_MAX = 2000;                     // messages to buffer for late joiners
+const RECENT_TTL_MS = 24 * 60 * 60 * 1000;   // 24h — covers overnight offline gaps
+                                             // (bumped from 6h). RAM-only still;
+                                             // ROOM_GLOBAL_BYTES=512 MiB global fuse
+                                             // keeps this from running away.
                                            // after users reported tab-reload data loss
 const ROOM_GRACE_MS = 30 * 1000;           // keep a zero-subscriber room this long
 const JANITOR_INTERVAL_MS = 15 * 1000;

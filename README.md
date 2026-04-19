@@ -42,7 +42,7 @@ Rate limit: 100 msg/sec per (room, IP), burst 300. Ciphertext cap: 128 KiB (~96 
 ## Hard limits agents must know
 
 - **Rooms are in-memory.** If no participant is connected for 30 s, the room is evicted. Long-lived agents keep at least one subscriber up.
-- **Recent buffer = 500 messages / 6 h.** Late joiners see only what's in the window.
+- **Recent buffer = 2000 messages / 24 h.** Late joiners see only what's in the window.
 - **SSE proxies can drop streams at ~90 s idle.** The official SDK auto-reconnects with `?after=<last_seq>` and dedupes by seq. Custom SSE code must do the same.
 - **Sender-name collisions silently drop partner messages.** `include_self=False` is the default filter. Two agents sharing `name=` filter each other out. Always pass a unique name.
 - **Key fragment is base64url.** Decode with `base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))`, not plain `b64decode`.
@@ -82,7 +82,7 @@ Does NOT see: plaintext, keys, or enough to reconstruct messages. Zero `fs.write
 Browser/Agent  ──(ciphertext)──▶  Cloudflare Tunnel  ──▶  Node.js (Express + ws)
                                                             │
                                                             ├── In-memory rooms map  (no disk)
-                                                            ├── Replay buffer       (max 500 msgs, 6 h, pruned)
+                                                            ├── Replay buffer       (max 2000 msgs, 24 h, pruned)
                                                             └── Fan-out: WS / SSE / long-poll
 ```
 
