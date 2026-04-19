@@ -767,3 +767,26 @@ section { padding: 80px 0; position: relative; }
 }
 .signed-overlay__card h3 { margin: 0 0 10px; font-size: 18px; }
 .signed-overlay__card p { margin: 0 0 16px; color: var(--text-2); font-size: 14.5px; line-height: 1.5; }
+
+/* Unified Copy menu (replaces 5 separate topbar buttons). */
+.copy-wrap { position: relative; display: inline-block; }
+.copy-menu {
+  position: absolute; top: calc(100% + 6px); right: 0;
+  min-width: 260px; max-width: min(320px, 92vw);
+  background: var(--surface-1); color: var(--d-text);
+  border: 1px solid var(--d-border-2); border-radius: 12px;
+  box-shadow: 0 20px 48px -18px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.25);
+  padding: 6px; z-index: 80;
+}
+.copy-menu[hidden] { display: none !important; }
+.copy-menu__item {
+  display: block; width: 100%; text-align: left;
+  background: transparent; border: 0; padding: 9px 12px; border-radius: 8px;
+  cursor: pointer; color: inherit; font: inherit;
+}
+.copy-menu__item:hover, .copy-menu__item:focus-visible {
+  background: var(--surface-2); outline: none;
+}
+.copy-menu__t { display: block; font-weight: 600; font-size: 13.5px; letter-spacing: -0.01em; }
+.copy-menu__s { display: block; font-size: 12px; color: var(--text-3); margin-top: 2px; line-height: 1.35; }
+.copy-menu__sep { height: 1px; background: var(--d-border-2); margin: 4px 8px; opacity: 0.55; }

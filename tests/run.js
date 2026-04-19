@@ -304,8 +304,12 @@ async function e2eTests() {
     const texts = await pageA.$$eval('.bubble__body', (els) => els.map((e) => e.textContent));
     if (!texts.some((t) => /hey A, this is B/.test(t))) throw new Error('A did not receive B: ' + texts.join(' | '));
 
-    // Copy invite button (top bar) shows toast.
-    await pageA.click('#copy-join');
+    // Copy menu — open the consolidated Copy dropdown and pick "Invite link".
+    // (Previously there were five individual copy-for-X buttons; they now
+    // live inside #copy-menu, triggered from #copy-menu-btn.)
+    await pageA.click('#copy-menu-btn');
+    await pageA.waitForSelector('#copy-menu:not([hidden])', { timeout: 2000 });
+    await pageA.click('#copy-menu [data-copy-kind="invite"]');
     try {
       await pageA.waitForFunction(() => {
         const t = document.getElementById('toast');

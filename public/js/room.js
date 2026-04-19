@@ -84,9 +84,9 @@
   const topbarPeopleBtn = document.getElementById('topbar-people');
   const copyJoinBtn = document.getElementById('copy-join');
   const copyAgentTopBtn = document.getElementById('copy-agent-top');
-  const copyCodexTopBtn = document.getElementById('copy-codex-top');
-  const copyClaudeCodeTopBtn = document.getElementById('copy-claude-code-top');
-  const copyCursorTopBtn = document.getElementById('copy-cursor-top');
+  // Unified copy menu (replaces the five-button topbar zoo).
+  const copyMenuBtn = document.getElementById('copy-menu-btn');
+  const copyMenuEl = document.getElementById('copy-menu');
   const copyJoinEmptyBtn = document.getElementById('copy-join-empty');
   const copyEndpointEmptyBtn = document.getElementById('copy-endpoint-empty');
   const copyAgentSnippetBtn = document.getElementById('copy-agent-snippet');
@@ -330,9 +330,42 @@ key  share #k=… separately (URL fragment never reaches the server)`;
 
   if (copyJoinBtn) copyJoinBtn.addEventListener('click', doCopyInvite);
   if (copyAgentTopBtn) copyAgentTopBtn.addEventListener('click', doCopyAgentSnippet);
-  if (copyCodexTopBtn) copyCodexTopBtn.addEventListener('click', doCopyCodexSnippet);
-  if (copyClaudeCodeTopBtn) copyClaudeCodeTopBtn.addEventListener('click', doCopyClaudeCodeSnippet);
-  if (copyCursorTopBtn) copyCursorTopBtn.addEventListener('click', doCopyCursorSnippet);
+
+  // Unified copy menu: single topbar button, click-to-open, one click per
+  // destination. Dispatches to the existing build*Snippet() functions
+  // rather than re-writing the templates, so behaviour stays identical.
+  if (copyMenuBtn && copyMenuEl) {
+    const closeMenu = () => {
+      copyMenuEl.hidden = true;
+      copyMenuBtn.setAttribute('aria-expanded', 'false');
+    };
+    const openMenu = () => {
+      copyMenuEl.hidden = false;
+      copyMenuBtn.setAttribute('aria-expanded', 'true');
+    };
+    copyMenuBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (copyMenuEl.hidden) openMenu(); else closeMenu();
+    });
+    copyMenuEl.addEventListener('click', async (e) => {
+      const item = e.target.closest('[data-copy-kind]');
+      if (!item) return;
+      const kind = item.dataset.copyKind;
+      closeMenu();
+      if (kind === 'invite')       await doCopyInvite();
+      else if (kind === 'codex')   await doCopyCodexSnippet();
+      else if (kind === 'claude-code') await doCopyClaudeCodeSnippet();
+      else if (kind === 'cursor')  await doCopyCursorSnippet();
+      else if (kind === 'python')  await doCopyAgentSnippet();
+    });
+    document.addEventListener('click', (e) => {
+      if (copyMenuEl.hidden) return;
+      if (!copyMenuEl.contains(e.target) && e.target !== copyMenuBtn) closeMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !copyMenuEl.hidden) closeMenu();
+    });
+  }
   if (copyJoinEmptyBtn) copyJoinEmptyBtn.addEventListener('click', doCopyInvite);
   if (copyEndpointEmptyBtn) copyEndpointEmptyBtn.addEventListener('click', doCopyEndpoint);
   if (copyAgentSnippetBtn) copyAgentSnippetBtn.addEventListener('click', doCopyAgentSnippet);

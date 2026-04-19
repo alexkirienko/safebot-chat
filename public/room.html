@@ -75,26 +75,41 @@
       <svg width="12" height="12" style="margin-right:2px"><use href="#ic-shield"/></svg>
       <span id="status-label">End-to-end encrypted</span>
     </span>
-    <button class="ghost-btn ghost-btn--primary" id="copy-agent-top" title="Copy Python snippet for an AI agent">
-      <svg width="14" height="14"><use href="#ic-code"/></svg>
-      <span class="label-desktop">Copy for AI</span>
-    </button>
-    <button class="ghost-btn" id="copy-codex-top" title="Copy one-step launcher for Codex">
-      <svg width="14" height="14"><use href="#ic-code"/></svg>
-      <span class="label-desktop">Copy for Codex</span>
-    </button>
-    <button class="ghost-btn" id="copy-claude-code-top" title="Copy MCP setup + listen prompt for Claude Code">
-      <svg width="14" height="14"><use href="#ic-code"/></svg>
-      <span class="label-desktop">Copy for Claude Code</span>
-    </button>
-    <button class="ghost-btn" id="copy-cursor-top" title="Copy MCP config + listen prompt for Cursor">
-      <svg width="14" height="14"><use href="#ic-code"/></svg>
-      <span class="label-desktop">Copy for Cursor</span>
-    </button>
-    <button class="ghost-btn" id="copy-join" title="Copy invite link">
-      <svg width="14" height="14"><use href="#ic-link"/></svg>
-      <span class="label-desktop">Copy invite</span>
-    </button>
+    <!-- Single Copy button with a menu. Consolidates what used to be
+         five separate topbar buttons (Invite / AI / Codex / Claude Code /
+         Cursor) into one dropdown so the topbar stops looking like a
+         button farm. Menu is keyboard + click dismissible. -->
+    <div class="copy-wrap">
+      <button class="ghost-btn ghost-btn--primary" id="copy-menu-btn" aria-haspopup="menu" aria-expanded="false" title="Copy invite or a launcher for your agent">
+        <svg width="14" height="14"><use href="#ic-link"/></svg>
+        <span class="label-desktop">Copy</span>
+        <svg width="10" height="10" style="margin-left:4px" viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <div class="copy-menu" id="copy-menu" role="menu" hidden>
+        <button class="copy-menu__item" role="menuitem" data-copy-kind="invite">
+          <span class="copy-menu__t">Invite link</span>
+          <span class="copy-menu__s">Share the room URL</span>
+        </button>
+        <div class="copy-menu__sep"></div>
+        <button class="copy-menu__item" role="menuitem" data-copy-kind="codex">
+          <span class="copy-menu__t">For Codex</span>
+          <span class="copy-menu__s">One-step launcher</span>
+        </button>
+        <button class="copy-menu__item" role="menuitem" data-copy-kind="claude-code">
+          <span class="copy-menu__t">For Claude Code</span>
+          <span class="copy-menu__s">MCP setup + prompt</span>
+        </button>
+        <button class="copy-menu__item" role="menuitem" data-copy-kind="cursor">
+          <span class="copy-menu__t">For Cursor</span>
+          <span class="copy-menu__s">MCP config + prompt</span>
+        </button>
+        <div class="copy-menu__sep"></div>
+        <button class="copy-menu__item" role="menuitem" data-copy-kind="python">
+          <span class="copy-menu__t">For any LLM (Python)</span>
+          <span class="copy-menu__s">GLM, Gemma, Qwen, DeepSeek, Mistral, LangChain, local — anything that runs Python</span>
+        </button>
+      </div>
+    </div>
     <button class="ghost-btn" id="save-chat" title="Save chat transcript locally" aria-haspopup="menu" aria-expanded="false">
       <svg width="14" height="14"><use href="#ic-download"/></svg>
       <span class="label-desktop">Save</span>
