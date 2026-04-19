@@ -195,10 +195,114 @@ def test_markdown_escape():
         fail(f"#7: /api/report {e.code}")
 
 
+# ---- #N: from_sig is bound to envelope hash (no cross-ciphertext replay) --
+
+def test_from_sig_envelope_binding():
+    print("\n▶ #N: captured from_sig cannot be replayed with different ciphertext")
+    victim = Identity(rand_handle("victim2"), base_url=BASE); victim.register(bio="v")
+    target = Identity(rand_handle("target2"), base_url=BASE); target.register(bio="t")
+
+    recipient = json.loads(urllib.request.urlopen(f"{BASE}/api/identity/{target.handle}", timeout=10).read())
+    recipient_pk = _pub.PublicKey(base64.b64decode(recipient["box_pub"]))
+
+    # Step 1: build a legit signed envelope from victim → target and send it.
+    eph1 = _pub.PrivateKey.generate()
+    box1 = _pub.Box(eph1, recipient_pk)
+    nonce1 = _utils.random(24)
+    ct1 = box1.encrypt(b"legit payload", nonce1).ciphertext
+    b1 = {
+        "ciphertext": base64.b64encode(ct1).decode(),
+        "nonce": base64.b64encode(nonce1).decode(),
+        "sender_eph_pub": base64.b64encode(bytes(eph1.public_key)).decode(),
+        "from_handle": victim.handle,
+    }
+    import hashlib, time
+    from_ts = int(time.time() * 1000)
+    env_hash = hashlib.sha256(
+        (b1["ciphertext"] + "|" + b1["nonce"] + "|" + b1["sender_eph_pub"]).encode("ascii")
+    ).hexdigest()
+    blob = f"dm {target.handle} {victim.handle} {from_ts} {env_hash}".encode()
+    b1["from_sig"] = base64.b64encode(victim._sign_sk.sign(blob).signature).decode()
+    b1["from_ts"] = from_ts
+    req = urllib.request.Request(f"{BASE}/api/dm/{target.handle}",
+        data=json.dumps(b1).encode(), headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
+
+    # Step 2: attacker captures (from_sig, from_ts) and reattaches them to a
+    # different ciphertext. Server must reject.
+    eph2 = _pub.PrivateKey.generate()
+    box2 = _pub.Box(eph2, recipient_pk)
+    nonce2 = _utils.random(24)
+    ct2 = box2.encrypt(b"FORGED attacker content", nonce2).ciphertext
+    b2 = {
+        "ciphertext": base64.b64encode(ct2).decode(),
+        "nonce": base64.b64encode(nonce2).decode(),
+        "sender_eph_pub": base64.b64encode(bytes(eph2.public_key)).decode(),
+        "from_handle": victim.handle,
+        "from_sig": b1["from_sig"],
+        "from_ts": b1["from_ts"],
+    }
+    req = urllib.request.Request(f"{BASE}/api/dm/{target.handle}",
+        data=json.dumps(b2).encode(), headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        fail("#N: replayed from_sig on different ciphertext was NOT rejected (CRITICAL)")
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            ok("#N: sig bound to envelope — replayed sig on new ciphertext rejected 401")
+        else:
+            fail(f"#N: expected 401 on replayed sig, got {e.code}")
+
+
+# ---- verifyInboxSig binds the signature to the query string ---------------
+
+def test_inbox_sig_bound_to_query():
+    print("\n▶ #Q: captured inbox Authorization header can't be reused with different query")
+    me = Identity(rand_handle("qbind"), base_url=BASE); me.register(bio="q")
+    # Capture the headers the SDK built for an after=0 request.
+    import nacl.signing as _sg, time
+    ts = int(time.time() * 1000)
+    good_path = f"/api/dm/{me.handle}/inbox/wait?after=0&timeout=1"
+    blob = f"GET {good_path} {ts}".encode()
+    sig = me._sign_sk.sign(blob).signature
+    hdr = {"Authorization": f"SafeBot ts={ts},sig={base64.b64encode(sig).decode()}"}
+    # Good path works:
+    r = urllib.request.urlopen(urllib.request.Request(BASE + good_path, headers=hdr), timeout=5)
+    assert r.status == 200
+    # Replay same header against a different query — must 401:
+    bad_path = f"/api/dm/{me.handle}/inbox/wait?after=999999&timeout=1"
+    try:
+        urllib.request.urlopen(urllib.request.Request(BASE + bad_path, headers=hdr), timeout=5)
+        fail("#Q: reused header on different query was NOT rejected")
+    except urllib.error.HTTPError as e:
+        if e.code == 401: ok("#Q: header reuse with altered query correctly 401")
+        else: fail(f"#Q: expected 401 on replayed header, got {e.code}")
+
+
+# ---- register requires proof-of-sign_sk ----------------------------------
+
+def test_register_requires_proof():
+    print("\n▶ #R: /register rejects without register_sig")
+    h = rand_handle("noproof")
+    idn = Identity(h, base_url=BASE)  # has sign_sk locally, just omits proof
+    body = {"handle": idn.handle, "box_pub": idn.box_pub_b64, "sign_pub": idn.sign_pub_b64}
+    req = urllib.request.Request(f"{BASE}/api/identity/register",
+        data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    try:
+        urllib.request.urlopen(req, timeout=10)
+        fail("#R: register without sig was accepted (CRITICAL)")
+    except urllib.error.HTTPError as e:
+        if e.code == 400: ok("#R: register without proof correctly 400")
+        else: fail(f"#R: expected 400, got {e.code}")
+
+
 if __name__ == "__main__":
     print(f"▶︎ Security-fix regression tests against {BASE}")
     test_ws_seq()
     test_from_handle_forgery()
+    test_from_sig_envelope_binding()
+    test_inbox_sig_bound_to_query()
+    test_register_requires_proof()
     test_ghost_room()
     test_markdown_escape()
     print()

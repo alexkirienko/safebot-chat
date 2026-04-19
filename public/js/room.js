@@ -351,7 +351,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     body.className = 'bubble__body';
     let mentionedMe = false;
     // Tokenise so @handles become styled spans. Handles match [A-Za-z0-9_-]{1,48}.
-    const re = /(^|[\s(,.;:!?])@([A-Za-z0-9_-]{1,48})/g;
+    // Require whitespace/punctuation both BEFORE and AFTER the handle so
+    // `foo@example.com` (the `@example` inside an email address) doesn't get
+    // styled as a mention or trigger a browser notification.
+    const re = /(^|[\s(,;:!?])@([A-Za-z0-9_-]{1,48})(?=$|[\s),.;:!?])/g;
     let idx = 0, m2;
     while ((m2 = re.exec(plaintext)) !== null) {
       const before = plaintext.slice(idx, m2.index + m2[1].length);

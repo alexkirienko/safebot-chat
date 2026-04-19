@@ -67,13 +67,19 @@ def main():
         print(f"[provision] created identity @{HANDLE}, saved to {key_path}")
 
     # Always attempt registration (idempotent: 409 means already taken by us).
+    import time as _time
     token = load_metrics_token()
+    ts = int(_time.time() * 1000)
+    blob = f"register {ident.handle} {ts}".encode("utf-8")
+    sig = ident._sign_sk.sign(blob).signature
     resp = requests.post(
         f"{BASE}/api/identity/register",
         json={
             "handle": ident.handle,
             "box_pub": ident.box_pub_b64,
             "sign_pub": ident.sign_pub_b64,
+            "register_ts": ts,
+            "register_sig": base64.b64encode(sig).decode("ascii"),
             "meta": {"bio": "Official SafeBot.Chat demo greeter — echoes messages. Source: github.com/alexkirienko/safebot-chat"},
         },
         headers={"Authorization": f"Bearer {token}"},

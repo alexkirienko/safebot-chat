@@ -274,11 +274,31 @@ function wakeDmWaiters(handle, msgs) {
     try { w.resolve(filtered); } catch (_) {}
     set.delete(w);
   }
+  // Drop the Map entry when empty so handles with no current waiters stop
+  // retaining a forever-empty Set.
+  if (set.size === 0) dmWaiters.delete(handle);
+}
+
+// Per-IP concurrent long-poll waiter cap. An attacker opening thousands of
+// /wait connections would otherwise tie up fd's + timers.
+const WAITER_CAP_PER_IP = Number(process.env.WAITER_CAP_PER_IP || 16);
+const waitersByIp = new Map();
+function waiterAcquire(ip) {
+  const n = (waitersByIp.get(ip) || 0) + 1;
+  waitersByIp.set(ip, n);
+  return n <= WAITER_CAP_PER_IP;
+}
+function waiterRelease(ip) {
+  const n = (waitersByIp.get(ip) || 1) - 1;
+  if (n <= 0) waitersByIp.delete(ip); else waitersByIp.set(ip, n);
 }
 
 function verifyInboxSig(req, handle) {
   // Header: Authorization: SafeBot ts=<ms>,sig=<base64>
-  // Signed blob: `<method> <path> <ts>`
+  // Signed blob: `<method> <originalUrl> <ts>`. Using originalUrl (includes
+  // the query string) binds the signature to `?after=` / `?timeout=` so a
+  // captured header can't be replayed against the same endpoint with
+  // different parameters within the skew window.
   const auth = String(req.headers.authorization || '');
   if (!auth.startsWith('SafeBot ')) return false;
   const parts = Object.fromEntries(auth.slice(8).split(',').map((kv) => {
@@ -295,7 +315,8 @@ function verifyInboxSig(req, handle) {
   try {
     const signPub = Buffer.from(rec.sign_pub, 'base64');
     if (signPub.length !== 32) return false;
-    const blob = Buffer.from(`${req.method} ${req.path} ${ts}`, 'utf8');
+    const urlPart = req.originalUrl || req.url || req.path;
+    const blob = Buffer.from(`${req.method} ${urlPart} ${ts}`, 'utf8');
     return nacl.sign.detached.verify(blob, Buffer.from(sig, 'base64'), signPub);
   } catch (_) { return false; }
 }
@@ -697,6 +718,16 @@ function broadcast(room, payload) {
 
 function nextSeq(room) { return room.nextSeq++; }
 
+// The resumable last_seq reported to clients is "seq of the newest message we
+// actually have" — not `nextSeq - 1`. Before any message lands, nextSeq still
+// equals `Date.now()` at creation, so returning `nextSeq-1` handed clients a
+// huge floor (~now-1ms) that could collide with post-restart seqs or NTP
+// steps backwards. Reporting 0 for an empty room lets the client treat the
+// resumption window as "start from whatever arrives".
+function roomLastSeq(room) {
+  return room.recent.length ? room.recent[room.recent.length - 1].seq : 0;
+}
+
 function sinceSeq(room, afterSeq, limit) {
   pruneRecent(room);
   const out = [];
@@ -719,6 +750,10 @@ function validMessage(msg) {
 
 const app = express();
 app.disable('x-powered-by');
+// Trust only the first hop (Cloudflare tunnel -> localhost). Prevents an
+// external client from spoofing X-Forwarded-For when the deployment puts
+// something else in front of us. Override with TRUST_PROXY=<n> | 'loopback' | etc.
+app.set('trust proxy', process.env.TRUST_PROXY || 'loopback');
 app.use(express.json({ limit: '192kb' }));
 
 // Security headers.
@@ -966,7 +1001,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
   for (const m of room.recent) {
     if (m.seq > after) sub.send(JSON.stringify({ type: 'message', ...m }));
   }
-  sub.send(JSON.stringify({ type: 'ready', roomId, size: room.subs.size + 1, last_seq: room.nextSeq - 1 }));
+  sub.send(JSON.stringify({ type: 'ready', roomId, size: room.subs.size + 1, last_seq: roomLastSeq(room) }));
 
   room.subs.add(sub);
   room.lastActive = Date.now();
@@ -1015,6 +1050,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
 // (Telegram / Discord) controlled by env vars on the operator's side.
 
 const BUGS_LOG = process.env.BUGS_LOG || '/var/log/safebot-bugs.jsonl';
+const BUGS_LOG_MAX_BYTES = Number(process.env.BUGS_LOG_MAX_BYTES || 5 * 1024 * 1024); // 5 MiB
 
 function sanitise(v, max) {
   return typeof v === 'string' ? v.slice(0, max) : '';
@@ -1106,10 +1142,20 @@ app.post('/api/report', async (req, res) => {
     // Hashed+truncated IP so we can detect spam waves without storing actual IPs.
     ip_hash: crypto.createHash('sha256').update(ip + '|safebot-bug-salt').digest('hex').slice(0, 12),
   };
-  // Persist asynchronously — don't block the request handler. If the log
-  // path isn't writable we still fire the alert.
-  fs.promises.appendFile(BUGS_LOG, JSON.stringify(entry) + '\n')
-    .catch((e) => console.error('[bugs] log write failed:', e.message));
+  // Persist asynchronously — don't block the request handler. Rotate the log
+  // when it crosses BUGS_LOG_MAX_BYTES so a single abusive sender can't fill
+  // the disk. We keep exactly one rotated copy (.1) to bound disk usage.
+  (async () => {
+    try {
+      try {
+        const st = await fs.promises.stat(BUGS_LOG);
+        if (st.size > BUGS_LOG_MAX_BYTES) {
+          await fs.promises.rename(BUGS_LOG, BUGS_LOG + '.1').catch(() => {});
+        }
+      } catch (_) { /* file missing on first write is fine */ }
+      await fs.promises.appendFile(BUGS_LOG, JSON.stringify(entry) + '\n');
+    } catch (e) { console.error('[bugs] log write failed:', e.message); }
+  })();
   // Fire alert async — caller doesn't wait.
   fireBugAlert(entry).catch(() => {});
   METRICS.bug_reports_total += 1;
@@ -1126,7 +1172,7 @@ app.post('/api/identity/register', (req, res) => {
   const adminToken = process.env.METRICS_TOKEN;
   const bearer = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const isOperator = adminToken && bearer === adminToken;
-  const { handle, box_pub, sign_pub, meta } = req.body || {};
+  const { handle, box_pub, sign_pub, meta, register_sig, register_ts } = req.body || {};
   if (!HANDLE_REGEX.test(String(handle || ''))) return res.status(400).json({ error: 'invalid handle (regex: ^[a-z0-9][a-z0-9_-]{1,31}$)' });
   if (RESERVED_HANDLES.has(handle) && !isOperator) return res.status(409).json({ error: 'handle reserved' });
   if (typeof box_pub !== 'string' || typeof sign_pub !== 'string') return res.status(400).json({ error: 'box_pub and sign_pub required (base64 32-byte keys)' });
@@ -1134,6 +1180,22 @@ app.post('/api/identity/register', (req, res) => {
     if (Buffer.from(box_pub, 'base64').length !== 32 || Buffer.from(sign_pub, 'base64').length !== 32) throw new Error('bad key length');
   } catch (_) { return res.status(400).json({ error: 'keys must be 32 bytes base64' }); }
   if (identities.has(handle)) return res.status(409).json({ error: 'handle taken' });
+  // Require proof that the registrant actually holds sign_sk matching sign_pub:
+  // sign `"register <handle> <register_ts>"`. Without this, a third party
+  // could race to register someone else's handle with arbitrary keys.
+  if (typeof register_sig !== 'string' || typeof register_ts !== 'number') {
+    return res.status(400).json({ error: 'register_sig (base64 Ed25519) and register_ts (ms) required — sign "register <handle> <register_ts>" with sign_sk' });
+  }
+  if (Math.abs(Date.now() - register_ts) > SIG_MAX_SKEW_MS) {
+    return res.status(400).json({ error: 'register_ts skew too large' });
+  }
+  try {
+    const signPub = Buffer.from(sign_pub, 'base64');
+    const blob = Buffer.from(`register ${handle} ${register_ts}`, 'utf8');
+    if (!nacl.sign.detached.verify(blob, Buffer.from(register_sig, 'base64'), signPub)) {
+      return res.status(401).json({ error: 'bad register_sig — does not verify against sign_pub' });
+    }
+  } catch (_) { return res.status(400).json({ error: 'bad register_sig' }); }
   const rec = {
     handle, box_pub, sign_pub,
     registered_at: Date.now(),
@@ -1161,6 +1223,7 @@ app.get('/api/identity/:handle', (req, res) => {
 app.post('/api/dm/:handle', (req, res) => {
   const ip = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
   const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
+  if (!HANDLE_REGEX.test(handle)) return res.status(400).json({ error: 'invalid handle' });
   if (!rateLimitOk(ip, `dm:${handle}`)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
   const rec = identities.get(handle);
   if (!rec) return res.status(404).json({ error: 'no such handle' });
@@ -1174,10 +1237,12 @@ app.post('/api/dm/:handle', (req, res) => {
     if (Buffer.from(nonce, 'base64').length !== 24) throw new Error();
   } catch (_) { return res.status(400).json({ error: 'sender_eph_pub must be 32B base64, nonce 24B base64' }); }
   // Optional authenticated from_handle: sender proves ownership of from_handle
-  // by signing `"dm <to_handle> <from_handle> <from_ts>"` with its sign_sk.
-  // Server verifies against from_handle's published sign_pub. Unsigned claims
-  // are stored but marked from_verified=false so greeters can refuse to
-  // auto-reply and clients can display an "unverified" hint.
+  // by signing the *envelope body* (not just handles+ts) with its sign_sk.
+  // Signed blob:
+  //   "dm <to_handle> <from_handle> <from_ts> <sha256(ct|nonce|sender_eph_pub)>"
+  // Binding the sig to the ciphertext hash prevents a captured envelope from
+  // being replayed verbatim with a different `to` or with the attacker
+  // attaching someone else's sig to new ciphertext within the 60 s skew.
   let from_verified = false;
   const { from_sig, from_ts } = req.body || {};
   if (typeof from_handle === 'string' && from_handle) {
@@ -1190,7 +1255,12 @@ app.post('/api/dm/:handle', (req, res) => {
       if (!sender) return res.status(400).json({ error: 'from_handle not registered' });
       try {
         const signPub = Buffer.from(sender.sign_pub, 'base64');
-        const blob = Buffer.from(`dm ${handle} ${fh} ${from_ts}`, 'utf8');
+        const envHash = crypto.createHash('sha256')
+          .update(String(ciphertext)).update('|')
+          .update(String(nonce)).update('|')
+          .update(String(sender_eph_pub))
+          .digest('hex');
+        const blob = Buffer.from(`dm ${handle} ${fh} ${from_ts} ${envHash}`, 'utf8');
         if (!nacl.sign.detached.verify(blob, Buffer.from(from_sig, 'base64'), signPub)) {
           return res.status(401).json({ error: 'bad from_handle signature' });
         }
@@ -1220,6 +1290,7 @@ app.post('/api/dm/:handle', (req, res) => {
 // Owner pulls undelivered DMs. Auth = Ed25519 signature of request line.
 app.get('/api/dm/:handle/inbox/wait', (req, res) => {
   const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
+  if (!HANDLE_REGEX.test(handle)) return res.status(400).json({ error: 'invalid handle' });
   if (!identities.has(handle)) return res.status(404).json({ error: 'no such handle' });
   if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
   const after = Math.max(0, parseInt(String(req.query.after || '0'), 10) || 0);
@@ -1227,6 +1298,11 @@ app.get('/api/dm/:handle/inbox/wait', (req, res) => {
   pruneInbox(handle);
   const queue = (inboxes.get(handle) || []).filter((m) => m.seq > after);
   if (queue.length > 0) return res.json({ messages: queue, last_seq: queue[queue.length - 1].seq });
+  const ip = req.ip || '';
+  if (!waiterAcquire(ip)) {
+    res.set('Retry-After', '5');
+    return res.status(429).json({ error: 'too many concurrent waiters from this IP' });
+  }
   METRICS.dm_waits_total = (METRICS.dm_waits_total || 0) + 1;
   let finished = false;
   if (!dmWaiters.has(handle)) dmWaiters.set(handle, new Set());
@@ -1235,7 +1311,9 @@ app.get('/api/dm/:handle/inbox/wait', (req, res) => {
     resolve(msgs) {
       if (finished) return;
       finished = true;
-      dmWaiters.get(handle)?.delete(waiter);
+      waiterRelease(ip);
+      const s = dmWaiters.get(handle);
+      if (s) { s.delete(waiter); if (s.size === 0) dmWaiters.delete(handle); }
       res.json({ messages: msgs || [], last_seq: msgs && msgs.length ? msgs[msgs.length - 1].seq : after });
     },
     timer: setTimeout(() => waiter.resolve([]), timeout * 1000),
@@ -1244,13 +1322,16 @@ app.get('/api/dm/:handle/inbox/wait', (req, res) => {
   req.on('close', () => {
     if (finished) return;
     finished = true;
+    waiterRelease(ip);
     clearTimeout(waiter.timer);
-    dmWaiters.get(handle)?.delete(waiter);
+    const s = dmWaiters.get(handle);
+    if (s) { s.delete(waiter); if (s.size === 0) dmWaiters.delete(handle); }
   });
 });
 
 app.delete('/api/dm/:handle/inbox/:id', (req, res) => {
   const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
+  if (!HANDLE_REGEX.test(handle)) return res.status(400).json({ error: 'invalid handle' });
   if (!identities.has(handle)) return res.status(404).json({ error: 'no such handle' });
   if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
   const id = String(req.params.id || '');
@@ -1302,7 +1383,7 @@ app.get('/api/rooms/:roomId/status', (req, res) => {
     exists: true, roomId,
     participants: room.subs.size,
     recent_count: room.recent.length,
-    last_seq: room.nextSeq - 1,
+    last_seq: roomLastSeq(room),
     age_seconds: Math.floor((Date.now() - room.createdAt) / 1000),
     idle_seconds: Math.floor((Date.now() - room.lastActive) / 1000),
   });
@@ -1320,7 +1401,7 @@ app.get('/api/rooms/:roomId/transcript', (req, res) => {
   const msgs = sinceSeq(room, after, limit);
   res.json({
     messages: msgs,
-    last_seq: room.nextSeq - 1,
+    last_seq: roomLastSeq(room),
     count: msgs.length,
     exists: true,
   });
@@ -1342,20 +1423,26 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
   // If we already have messages past `after`, return them immediately.
   const pending = sinceSeq(room, after, 500);
   if (pending.length > 0) {
-    return res.json({ messages: pending, last_seq: room.nextSeq - 1 });
+    return res.json({ messages: pending, last_seq: roomLastSeq(room) });
   }
 
   // Otherwise, park the connection until a new message arrives or we time out.
+  const ip = req.ip || '';
+  if (!waiterAcquire(ip)) {
+    res.set('Retry-After', '5');
+    return res.status(429).json({ error: 'too many concurrent waiters from this IP' });
+  }
   METRICS.longpoll_waits_total += 1;
   let finished = false;
   const waiter = {
     resolve(msgs) {
       if (finished) return;
       finished = true;
+      waiterRelease(ip);
       room.waiters.delete(waiter);
       if (msgs && msgs.length) METRICS.longpoll_wakes_total += 1;
       else METRICS.longpoll_timeouts_total += 1;
-      res.json({ messages: msgs || [], last_seq: room.nextSeq - 1 });
+      res.json({ messages: msgs || [], last_seq: roomLastSeq(room) });
     },
     timer: setTimeout(() => waiter.resolve([]), timeout * 1000),
   };
@@ -1363,6 +1450,7 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
   req.on('close', () => {
     if (finished) return;
     finished = true;
+    waiterRelease(ip);
     clearTimeout(waiter.timer);
     room.waiters.delete(waiter);
   });

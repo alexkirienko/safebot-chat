@@ -218,7 +218,11 @@ class Room:
                         txt = decoded.text or ""
                         # Word-boundary @name match (case-insensitive).
                         import re as _re
-                        if not _re.search(rf"(^|[\s(,.;:!?])@{_re.escape(self.name)}\b", txt, _re.IGNORECASE):
+                        # Word-boundary on BOTH sides — don't match `foo@name.com`.
+                        if not _re.search(
+                            rf"(^|[\s(,;:!?])@{_re.escape(self.name)}(?=$|[\s),.;:!?])",
+                            txt, _re.IGNORECASE,
+                        ):
                             continue
                     yield decoded
                 # Clean end — server closed. Reconnect if requested.
@@ -487,11 +491,22 @@ class Identity:
     # --- network ------------------------------------------------------
 
     def register(self, bio: str = "") -> dict:
-        """Publish the handle + two pub keys. Returns the server record."""
+        """Publish the handle + two pub keys.
+
+        The server requires a signature proving ownership of sign_sk:
+        sign `"register <handle> <ts>"` with sign_sk; the server verifies
+        against sign_pub. Without this anyone could race to register a
+        handle with keys they do not control.
+        """
+        ts = int(time.time() * 1000)
+        blob = f"register {self.handle} {ts}".encode("utf-8")
+        sig = self._sign_sk.sign(blob).signature
         body = {
             "handle": self.handle,
             "box_pub": self.box_pub_b64,
             "sign_pub": self.sign_pub_b64,
+            "register_ts": ts,
+            "register_sig": base64.b64encode(sig).decode("ascii"),
             "meta": {"bio": bio} if bio else {},
         }
         r = self._session.post(f"{self.base_url}/api/identity/register", json=body, timeout=15)
@@ -501,18 +516,21 @@ class Identity:
     def dm_url(self) -> str:
         return f"{self.base_url}/@{self.handle}"
 
-    def _auth_headers(self, method: str, path: str) -> dict:
+    def _auth_headers(self, method: str, path_with_query: str) -> dict:
+        # Server now verifies the signature against `<method> <originalUrl> <ts>`
+        # where originalUrl includes the query string. The caller must pass the
+        # exact path + query that will appear on the request line; otherwise
+        # verification fails.
         ts = int(time.time() * 1000)
-        blob = f"{method} {path} {ts}".encode("utf-8")
+        blob = f"{method} {path_with_query} {ts}".encode("utf-8")
         sig = self._sign_sk.sign(blob).signature
         sig_b64 = base64.b64encode(sig).decode("ascii")
         return {"Authorization": f"SafeBot ts={ts},sig={sig_b64}"}
 
     def inbox_wait(self, after: int = 0, timeout: int = 30) -> list[Envelope]:
-        path = f"/api/dm/{self.handle}/inbox/wait"
-        params = {"after": int(after), "timeout": int(timeout)}
+        path = f"/api/dm/{self.handle}/inbox/wait?after={int(after)}&timeout={int(timeout)}"
         headers = self._auth_headers("GET", path)
-        r = self._session.get(self.base_url + path, params=params, headers=headers, timeout=timeout + 5)
+        r = self._session.get(self.base_url + path, headers=headers, timeout=timeout + 5)
         r.raise_for_status()
         data = r.json()
         return [self._open(m) for m in data.get("messages", [])]
@@ -606,10 +624,17 @@ def dm(
     }
     if from_identity is not None:
         body["from_handle"] = from_identity.handle
-        # Prove ownership of from_handle so the recipient can trust it.
-        import time as _time
+        # Prove ownership of from_handle AND bind the signature to this specific
+        # envelope (ciphertext + nonce + sender_eph_pub). Without the hash, an
+        # attacker observing the wire could replay the same (from_sig, from_ts)
+        # against a different ciphertext within the server's ±60 s skew window.
+        import hashlib as _h, time as _time
         from_ts = int(_time.time() * 1000)
-        blob = f"dm {handle} {from_identity.handle} {from_ts}".encode("utf-8")
+        env_hash = _h.sha256(
+            (body["ciphertext"] + "|" + body["nonce"] + "|" + body["sender_eph_pub"])
+            .encode("ascii")
+        ).hexdigest()
+        blob = f"dm {handle} {from_identity.handle} {from_ts} {env_hash}".encode("utf-8")
         sig = from_identity._sign_sk.sign(blob).signature
         body["from_sig"] = base64.b64encode(sig).decode("ascii")
         body["from_ts"] = from_ts
