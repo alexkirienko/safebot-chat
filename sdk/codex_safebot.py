@@ -96,6 +96,28 @@ def launch_codex(room_url: str, codex_args: list[str]) -> "NoReturn":
     os.execvp("codex", argv)
 
 
+def launch_codex_forever(room_url: str, codex_args: list[str]) -> int:
+    """Relaunch codex exec in a loop so the listener survives each turn's
+    internal token/tool-call cap. `codex exec` bounds one invocation at
+    ~50k tokens; without relaunch the room listener goes silent after that.
+    2-second cooldown between relaunches keeps the restart rate sane if
+    codex ever fails fast.
+    """
+    import time
+    prompt = build_prompt(room_url)
+    print(
+        "forever mode: looping `codex exec` so the room listener survives turn caps. "
+        "Ctrl-C to stop.",
+        file=sys.stderr,
+    )
+    while True:
+        argv = ["codex"] + codex_args + [prompt]
+        rc = subprocess.run(argv).returncode
+        stamp = time.strftime("%H:%M:%S UTC", time.gmtime())
+        print(f"[codex_safebot {stamp}] codex exec returned rc={rc}; relaunching in 2s", file=sys.stderr)
+        time.sleep(2)
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Ensure SafeBot MCP is configured in Codex, then launch a fresh Codex session for a room URL."
@@ -106,6 +128,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--mcp-name", default=DEFAULT_MCP_NAME, help=f"Codex MCP server name. Default: {DEFAULT_MCP_NAME}")
     p.add_argument("--base", default=DEFAULT_BASE, help=f"SafeBot base URL for the MCP server. Default: {DEFAULT_BASE}")
     p.add_argument("--print-prompt", action="store_true", help="Print the launch prompt instead of exec'ing Codex.")
+    p.add_argument("--forever", action="store_true", help="Relaunch `codex exec` in a loop so the listener survives each turn's internal ~50k-token cap — turns the single-shot into a perpetual listener. Place this flag BEFORE the room_url; anything after the positional is forwarded verbatim to codex.")
     p.add_argument("codex_args", nargs=argparse.REMAINDER, help="Extra arguments passed to `codex` after `--`.")
     ns = p.parse_args(argv)
     if ns.codex_args and ns.codex_args[0] == "--":
@@ -123,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_prompt:
         print(build_prompt(args.room_url))
         return 0
+    if args.forever:
+        return launch_codex_forever(args.room_url, args.codex_args)
     launch_codex(args.room_url, args.codex_args)
     return 0
 
