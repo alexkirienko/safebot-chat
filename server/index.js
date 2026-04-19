@@ -1430,7 +1430,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
 
   room.subs.add(sub);
   room.lastActive = Date.now();
-  broadcast(room, { type: 'presence', size: room.subs.size });
+  broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
   METRICS.sse_connects_total += 1;
 
   const keepalive = setInterval(() => {
@@ -1442,7 +1442,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
       clearInterval(keepalive);
       if (room.subs.delete(sub)) {
         room.lastActive = Date.now();
-        broadcast(room, { type: 'presence', size: room.subs.size });
+        broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
       }
       return;
     }
@@ -1451,7 +1451,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
       clearInterval(keepalive);
       if (room.subs.delete(sub)) {
         room.lastActive = Date.now();
-        broadcast(room, { type: 'presence', size: room.subs.size });
+        broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
       }
     }
   }, 15000);
@@ -1461,7 +1461,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
     releaseOnce();
     if (room.subs.delete(sub)) {
       room.lastActive = Date.now();
-      broadcast(room, { type: 'presence', size: room.subs.size });
+      broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
     }
   };
   // Chain the sub-aware cleanup on TOP of the upstream releaseOnce — same
@@ -2618,6 +2618,22 @@ server.on('upgrade', (req, socket, head) => {
   });
 });
 
+// Presence-names helper: collect every sub that has declared a name via
+// the hello frame. Subs that never sent hello (legacy browsers, SSE
+// readers, bots) are simply absent from the list — they'll show up in
+// the sidebar as soon as they post, via the renderMessage path.
+function collectSubNames(room) {
+  const out = [];
+  const seen = new Set();
+  for (const sub of room.subs) {
+    if (sub && sub.name && !seen.has(sub.name)) {
+      out.push(sub.name);
+      seen.add(sub.name);
+    }
+  }
+  return out;
+}
+
 function handleWs(ws, roomId, ip) {
   if (!streamAcquire(ip)) {
     try { ws.send(JSON.stringify({ type: 'error', code: 429, error: 'too many concurrent streams from this IP' })); ws.close(); } catch (_) {}
@@ -2637,12 +2653,26 @@ function handleWs(ws, roomId, ip) {
 
   room.subs.add(sub);
   room.lastActive = Date.now();
-  broadcast(room, { type: 'presence', size: room.subs.size });
+  broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
   METRICS.ws_connects_total += 1;
 
   ws.on('message', (data) => {
     let msg;
     try { msg = JSON.parse(data.toString('utf8')); } catch (_) { return; }
+    // Hello frame: a subscriber declares its display name up-front so the
+    // presence broadcast can carry a names list. Without this, a browser
+    // visitor who joins but doesn't post anything never appears in other
+    // participants' sidebar — they only show up after their first message.
+    // Name is bounded to 64 chars and a conservative charset to keep it out
+    // of HTML/log-injection territory; stricter client-side already.
+    if (msg && msg.type === 'hello') {
+      const name = typeof msg.name === 'string' ? msg.name.slice(0, 64) : '';
+      if (/^[A-Za-z0-9@._\-\u00A0-\uFFFF]{1,64}$/.test(name)) {
+        sub.name = name;
+        broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
+      }
+      return;
+    }
     if (!validMessage(msg)) return;
     if (!rateLimitOk(ip || 'ws', roomId) || !globalRateLimitOk(ip || 'ws')) {
       try { ws.send(JSON.stringify({ type: 'error', code: 429, error: 'rate limited' })); } catch (_) {}
@@ -2701,7 +2731,7 @@ function handleWs(ws, roomId, ip) {
     streamRelease(ip);
     room.subs.delete(sub);
     room.lastActive = Date.now();
-    broadcast(room, { type: 'presence', size: room.subs.size });
+    broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
     METRICS.ws_disconnects_total += 1;
   });
   ws.on('error', () => { try { ws.close(); } catch (_) {} });

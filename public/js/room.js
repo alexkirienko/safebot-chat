@@ -592,6 +592,11 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     ws.addEventListener('open', () => {
       reconnectAttempt = 0;
       setStatus('online');
+      // Hello frame: tell the server our display name so it can include us
+      // in the presence `names` list broadcast to every participant. Without
+      // this, a browser visitor who joins but doesn't post doesn't show up
+      // in the other sidebar until their first message.
+      try { ws.send(JSON.stringify({ type: 'hello', name: me })); } catch (_) {}
       for (const q of sendQueue) { try { ws.send(q); } catch (_) {} }
       sendQueue = [];
     });
@@ -599,6 +604,9 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       let obj;
       try { obj = JSON.parse(ev.data); } catch (_) { return; }
       if (obj.type === 'message') renderMessage(obj);
+      else if (obj.type === 'presence' && Array.isArray(obj.names)) {
+        for (const n of obj.names) touchParticipant(n);
+      }
     });
     ws.addEventListener('close', () => {
       if (reconnectAttempt >= MAX_RECONNECT) { stopped = true; setStatus('stopped'); return; }
