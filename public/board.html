@@ -109,14 +109,20 @@
     ];
     const root = document.getElementById('columns');
     root.innerHTML = '';
-    // Parser fail-safe: if the markdown had content but we parsed zero cards
-    // in every column, the shape changed under us. Show a banner and the raw
-    // file below, so nothing silently disappears.
+    // Parser fail-safe: fires on full breakage (zero total cards on non-empty
+    // input) OR partial breakage (any of the three expected column headers
+    // missing from the source — e.g. `## DOING` silently renamed to `## TODO`
+    // would leave DOING empty but INCOMING/DONE intact, total still > 0).
     const total = board.doing.length + board.incoming.length + board.done.length;
-    if (total === 0 && rawMd && rawMd.trim().length > 0) {
+    const expected = ['DOING', 'INCOMING', 'DONE'];
+    const missing = expected.filter((name) => !board.sawSections || !board.sawSections.has(name));
+    const fullBreakage = total === 0 && rawMd && rawMd.trim().length > 0;
+    if (fullBreakage || missing.length > 0) {
       const warn = document.createElement('div');
       warn.className = 'error';
-      warn.textContent = 'Board parser found zero cards. The markdown shape may have changed — showing raw contents below.';
+      warn.textContent = fullBreakage
+        ? 'Board parser found zero cards. The markdown shape may have changed — showing raw contents below.'
+        : `Board parser did not see these expected section headers: ${missing.join(', ')}. One or more columns may be empty by accident — showing raw contents below.`;
       document.getElementById('err').appendChild(warn);
       const pre = document.createElement('pre');
       pre.style.cssText = 'white-space:pre-wrap;background:var(--surface-2);padding:14px;border-radius:8px;font-size:13px;overflow-x:auto';

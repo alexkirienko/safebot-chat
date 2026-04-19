@@ -14,7 +14,12 @@
   // onto the previous card until the next bullet or header.
   function parse(md) {
     const lines = md.split('\n');
-    const out = { doing: [], incoming: [], done: [] };
+    // sawSections records every ## <NAME> header the parser encountered,
+    // including unknown ones. The render-layer uses it to detect partial
+    // breakage: if the source has `## TODO` in place of `## DOING`, total
+    // card count is still positive but DOING will be missing from the set —
+    // a reliable signal that something drifted.
+    const out = { doing: [], incoming: [], done: [], sawSections: new Set() };
     let section = null;
     let pri = null;
     let current = null;
@@ -29,6 +34,8 @@
 
     for (const raw of lines) {
       const line = raw.replace(/\s+$/, '');
+      const h2 = line.match(/^##\s+(.+?)\s*$/);
+      if (h2) { out.sawSections.add(h2[1].toUpperCase().split(/\s+/)[0]); }
       if (/^## DOING\b/.test(line)) { flush(); section = 'DOING'; pri = null; continue; }
       if (/^## INCOMING\b/.test(line)) { flush(); section = 'INCOMING'; pri = null; continue; }
       if (/^## DONE\b/.test(line)) { flush(); section = 'DONE'; pri = null; continue; }

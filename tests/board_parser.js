@@ -147,6 +147,37 @@ test('bare < > inside link text are escaped, not rendered', () => {
   if (out.includes('<b>')) throw new Error('link text rendered as HTML: ' + out);
 });
 
+// ---------- 2b. sawSections drives partial-breakage fail-safe ----------
+
+test('sawSections contains DOING/INCOMING/DONE when all three headers present', () => {
+  const md = '## DOING\n- a\n## INCOMING\n- b\n## DONE\n- c\n';
+  const b = parse(md);
+  if (!b.sawSections.has('DOING'))    throw new Error('DOING missing from sawSections');
+  if (!b.sawSections.has('INCOMING')) throw new Error('INCOMING missing');
+  if (!b.sawSections.has('DONE'))     throw new Error('DONE missing');
+});
+
+test('partial breakage (## DOING renamed to ## TODO) leaves DOING out of sawSections', () => {
+  // This is the exact scenario codex-reviewer caught: one header mutates,
+  // the other two columns render fine, but the board shape silently lost
+  // a section. fail-safe must fire off sawSections, not total card count.
+  const md = '## TODO\n- lost card\n## INCOMING\n- still here\n## DONE\n- still here\n';
+  const b = parse(md);
+  if (b.sawSections.has('DOING')) throw new Error('DOING should NOT be in sawSections');
+  if (!b.sawSections.has('TODO')) throw new Error('TODO header was not recorded');
+  // Parser still returns the non-DOING cards intact.
+  eq(b.doing.length, 0);
+  eq(b.incoming.length, 1);
+  eq(b.done.length, 1);
+});
+
+test('sawSections records case-normalized first word of each ## header', () => {
+  const md = '## Process notes\n- foo\n## some-random-thing\n- bar\n';
+  const b = parse(md);
+  if (!b.sawSections.has('PROCESS')) throw new Error('Process not normalized: ' + [...b.sawSections]);
+  if (!b.sawSections.has('SOME-RANDOM-THING')) throw new Error('some-random-thing missing: ' + [...b.sawSections]);
+});
+
 // ---------- 3. live BOARD.md fixture: expected shape ----------
 
 test('live docs/BOARD.md parses to the expected column counts', () => {
