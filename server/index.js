@@ -1096,6 +1096,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
 
 const BUGS_LOG = process.env.BUGS_LOG || '/var/log/safebot-bugs.jsonl';
 const BUGS_LOG_MAX_BYTES = Number(process.env.BUGS_LOG_MAX_BYTES || 5 * 1024 * 1024); // 5 MiB
+let bugLogTail = Promise.resolve(); // serialise rotate-then-append to avoid races
 
 function sanitise(v, max) {
   return typeof v === 'string' ? v.slice(0, max) : '';
@@ -1187,20 +1188,21 @@ app.post('/api/report', async (req, res) => {
     // Hashed+truncated IP so we can detect spam waves without storing actual IPs.
     ip_hash: crypto.createHash('sha256').update(ip + '|safebot-bug-salt').digest('hex').slice(0, 12),
   };
-  // Persist asynchronously — don't block the request handler. Rotate the log
-  // when it crosses BUGS_LOG_MAX_BYTES so a single abusive sender can't fill
-  // the disk. We keep exactly one rotated copy (.1) to bound disk usage.
-  (async () => {
+  // Persist asynchronously — don't block the request handler. Rotate the
+  // log when it crosses BUGS_LOG_MAX_BYTES. Serialise the rotate-then-append
+  // sequence behind bugLogTail so two concurrent reports can't both observe
+  // over-size and both rename at the same moment (which loses entries).
+  bugLogTail = bugLogTail.then(async () => {
     try {
       try {
         const st = await fs.promises.stat(BUGS_LOG);
         if (st.size > BUGS_LOG_MAX_BYTES) {
           await fs.promises.rename(BUGS_LOG, BUGS_LOG + '.1').catch(() => {});
         }
-      } catch (_) { /* file missing on first write is fine */ }
+      } catch (_) { /* missing file on first write is fine */ }
       await fs.promises.appendFile(BUGS_LOG, JSON.stringify(entry) + '\n');
     } catch (e) { console.error('[bugs] log write failed:', e.message); }
-  })();
+  });
   // Fire alert async — caller doesn't wait.
   fireBugAlert(entry).catch(() => {});
   METRICS.bug_reports_total += 1;
@@ -1490,6 +1492,9 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
   }
 
   // Otherwise, park the connection until a new message arrives or we time out.
+  // Bump lastActive so an empty-but-polled room isn't reaped while clients
+  // are actively waiting.
+  room.lastActive = Date.now();
   if (room.waiters.size >= ROOM_WAITERS_MAX) {
     res.set('Retry-After', '5');
     return res.status(429).json({ error: 'too many concurrent waiters for this room' });
@@ -1873,7 +1878,13 @@ function handleWs(ws, roomId, ip) {
 setInterval(() => {
   const now = Date.now();
   for (const [id, room] of rooms) {
-    if (room.subs.size === 0 && now - room.lastActive > ROOM_GRACE_MS) {
+    // Don't evict a room that still has parked long-poll waiters — those
+    // clients hold a reference to THIS room object; if we deleted it and a
+    // POST arrived later it would create a fresh room, and the parked
+    // waiters would never be woken. Also keep the room if any SSE/WS sub
+    // is alive.
+    const idle = now - room.lastActive > ROOM_GRACE_MS;
+    if (room.subs.size === 0 && room.waiters.size === 0 && idle) {
       rooms.delete(id);
       METRICS.rooms_evicted_total += 1;
     } else {
