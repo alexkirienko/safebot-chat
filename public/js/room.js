@@ -106,10 +106,22 @@
   nameInputEl.value = me;
   nameInputEl.addEventListener('change', () => {
     const v = (nameInputEl.value || '').trim().slice(0, 48) || me;
+    if (v === me) return;
+    const oldMe = me;
     me = v; nameInputEl.value = me;
     sessionStorage.setItem('safebot:name', me);
+    // Drop the previous alias from our local sidebar so we don't show
+    // as two people. Other participants get the rename via the server
+    // broadcasting presence with the new `names` list after our hello.
+    seenNames.delete(oldMe);
     seenNames.set(me, Date.now());
     renderPeople();
+    // Re-announce to the server so it updates sub.name and re-broadcasts
+    // presence. Without this, the old name lingers in other tabs'
+    // sidebars until they refresh.
+    try {
+      if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', name: me }));
+    } catch (_) {}
   });
 
   C.fingerprint(key).then((fp) => {
@@ -606,6 +618,15 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       if (obj.type === 'message') renderMessage(obj);
       else if (obj.type === 'presence' && Array.isArray(obj.names)) {
         for (const n of obj.names) touchParticipant(n);
+      }
+      else if (obj.type === 'rename' && obj.from && obj.to && obj.from !== me) {
+        // A live participant changed their name. Drop the old alias and
+        // promote the new one so the sidebar shows one row, not two.
+        // Ignore the event if it's our own rename bouncing back (we
+        // already updated the local seenNames in the namechip handler).
+        seenNames.delete(obj.from);
+        seenNames.set(obj.to, Date.now());
+        renderPeople();
       }
     });
     ws.addEventListener('close', () => {

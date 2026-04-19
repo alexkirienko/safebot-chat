@@ -2668,7 +2668,15 @@ function handleWs(ws, roomId, ip) {
     if (msg && msg.type === 'hello') {
       const name = typeof msg.name === 'string' ? msg.name.slice(0, 64) : '';
       if (/^[A-Za-z0-9@._\-\u00A0-\uFFFF]{1,64}$/.test(name)) {
+        // Rename case: the sub previously declared a different name via
+        // hello. Announce the mapping so every other client drops the
+        // stale alias from its sidebar; without this event the old name
+        // lingers forever because presence.names only adds, never removes.
+        const prev = sub.name;
         sub.name = name;
+        if (prev && prev !== name) {
+          broadcast(room, { type: 'rename', from: prev, to: name });
+        }
         broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
       }
       return;
