@@ -948,6 +948,12 @@ app.use((req, res, next) => {
   let stripped = req.path;
   if (stripped.startsWith('/api/rooms/')) stripped = '/api/rooms/:id/*';
   else if (stripped.startsWith('/room/')) stripped = '/room/:id';
+  // DM routes carry the recipient handle (and, for ack, the inbox-id UUID)
+  // in the path. Collapse them so journald doesn't retain a stable
+  // per-handle enumerable trail.
+  else if (stripped.startsWith('/api/dm/')) stripped = '/api/dm/:handle/*';
+  else if (stripped.startsWith('/api/identity/')) stripped = '/api/identity/:handle';
+  else if (stripped.startsWith('/@')) stripped = '/@handle';
   // eslint-disable-next-line no-console
   console.log(`[${new Date().toISOString()}] ${req.method} ${stripped}`);
   res.on('finish', () => {
@@ -1496,6 +1502,14 @@ app.get('/api/dm/:handle/inbox/wait', (req, res) => {
   const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
   if (!HANDLE_REGEX.test(handle)) return res.status(400).json({ error: 'invalid handle' });
   if (!identities.has(handle)) return res.status(404).json({ error: 'no such handle' });
+  // Rate-limit BEFORE the Ed25519 verify. Without this a flood of garbage
+  // Authorization headers would make us burn CPU on one public-key verify
+  // per request. Keyed on (ip, handle) so a legit owner isn't penalised by
+  // someone else's spam against their inbox.
+  const ip = req.ip || '';
+  if (!rateLimitOk(ip, `auth:${handle}`) || !globalRateLimitOk(ip)) {
+    res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' });
+  }
   if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
   const after = Math.max(0, parseInt(String(req.query.after || '0'), 10) || 0);
   const timeout = Math.max(1, Math.min(90, parseInt(String(req.query.timeout || '30'), 10) || 30));
@@ -1507,7 +1521,6 @@ app.get('/api/dm/:handle/inbox/wait', (req, res) => {
     res.set('Retry-After', '5');
     return res.status(429).json({ error: 'too many concurrent waiters for this handle' });
   }
-  const ip = req.ip || '';
   if (!waiterAcquire(ip)) {
     res.set('Retry-After', '5');
     return res.status(429).json({ error: 'too many concurrent waiters from this IP' });
@@ -1542,6 +1555,10 @@ app.delete('/api/dm/:handle/inbox/:id', (req, res) => {
   const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
   if (!HANDLE_REGEX.test(handle)) return res.status(400).json({ error: 'invalid handle' });
   if (!identities.has(handle)) return res.status(404).json({ error: 'no such handle' });
+  const ip = req.ip || '';
+  if (!rateLimitOk(ip, `auth:${handle}`) || !globalRateLimitOk(ip)) {
+    res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' });
+  }
   if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
   const id = String(req.params.id || '');
   const inbox = inboxes.get(handle);
@@ -1939,11 +1956,11 @@ app.get('/api/docs', (_req, res) => {
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SafeBot.Chat — API Reference</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+<link rel="stylesheet" href="/vendor/swagger-ui.css">
 <style>body{background:#F6F7FB;margin:0}.topbar{display:none}</style>
 </head><body>
 <div id="swagger-ui"></div>
-<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script src="/vendor/swagger-ui-bundle.js"></script>
 <script>SwaggerUIBundle({url:'/api/openapi.json',dom_id:'#swagger-ui',deepLinking:true,docExpansion:'list'});</script>
 </body></html>`);
 });
