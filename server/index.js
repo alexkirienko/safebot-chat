@@ -1287,6 +1287,13 @@ app.get('/api/metrics', (req, res) => {
   });
 });
 
+// Short alias for the Tailnet link — `/stats` is easier to remember than
+// `/admin/stats` and either route goes through the same requireAdmin()
+// check (Tailnet-origin bypasses token; public still needs it).
+app.get('/stats', (req, res) => {
+  const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+  res.redirect(302, '/admin/stats' + qs);
+});
 app.get('/admin/stats', (req, res) => {
   if (!requireAdmin(req, res)) return;
   res.setHeader('Cache-Control', 'no-store');
