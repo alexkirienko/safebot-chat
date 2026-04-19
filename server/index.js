@@ -59,6 +59,12 @@ const STARTED_AT = new Date().toISOString();
 // stops surprising the operator on the dashboard. All counters are content-
 // free (no keys, no plaintext, no room IDs) — same privacy posture as the
 // rest of the server.
+const STATE_FILE_MAX = Number(process.env.STATE_FILE_MAX || 64 * 1024 * 1024); // 64 MiB fuse
+function safeReadJson(path) {
+  const st = fs.statSync(path);
+  if (st.size > STATE_FILE_MAX) throw new Error(`state file too large: ${path} (${st.size} > ${STATE_FILE_MAX})`);
+  return JSON.parse(fs.readFileSync(path, 'utf8'));
+}
 const METRICS_STATE_PATH = process.env.METRICS_STATE_PATH || '/var/lib/safebot/metrics.json';
 
 const METRICS_DEFAULTS = {
@@ -87,8 +93,7 @@ const METRICS_DEFAULTS = {
 
 function loadPersistedMetrics() {
   try {
-    const raw = fs.readFileSync(METRICS_STATE_PATH, 'utf8');
-    const saved = JSON.parse(raw);
+    const saved = safeReadJson(METRICS_STATE_PATH);
     const m = { ...METRICS_DEFAULTS, ...saved };
     // This process just started: bump restart counter, but preserve cumulative
     // totals and first_boot_at.
@@ -110,7 +115,7 @@ const METRICS_HISTORY_PATH = process.env.METRICS_HISTORY_PATH || '/var/lib/safeb
 const METRICS_HISTORY_MAX = 1440;
 function loadPersistedHistory() {
   try {
-    const arr = JSON.parse(fs.readFileSync(METRICS_HISTORY_PATH, 'utf8'));
+    const arr = safeReadJson(METRICS_HISTORY_PATH);
     if (!Array.isArray(arr)) return [];
     const cutoff = Date.now() - 24 * 3_600_000;
     return arr.filter((s) => s && typeof s.t === 'number' && s.t >= cutoff);
@@ -231,8 +236,7 @@ const dmWaiters = new Map();
 
 function loadIdentities() {
   try {
-    const raw = fs.readFileSync(IDENTITIES_STATE_PATH, 'utf8');
-    const obj = JSON.parse(raw);
+    const obj = safeReadJson(IDENTITIES_STATE_PATH);
     let dropped = 0;
     for (const [handle, rec] of Object.entries(obj.identities || {})) {
       // Validate each persisted record against the same schema we enforce at
@@ -385,6 +389,16 @@ const INBOX_SIG_SEEN_MAX = Number(process.env.INBOX_SIG_SEEN_MAX || 10_000);
 // 256 handles × 128 KiB × 1 k handles would otherwise be ~32 GiB.
 const INBOX_GLOBAL_MAX_BYTES = Number(process.env.INBOX_GLOBAL_MAX_BYTES || 512 * 1024 * 1024); // 512 MiB
 let INBOX_GLOBAL_BYTES = 0;
+// Replay-cache for register_sig; pruned periodically past the skew window.
+const REGISTER_SIG_SEEN = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - SIG_MAX_SKEW_MS * 2;
+  for (const [k, v] of REGISTER_SIG_SEEN) if (v < cutoff) REGISTER_SIG_SEEN.delete(k);
+  if (REGISTER_SIG_SEEN.size > 10_000) {
+    const it = REGISTER_SIG_SEEN.keys();
+    for (let i = 0; i < 200; i++) { const k = it.next().value; if (k === undefined) break; REGISTER_SIG_SEEN.delete(k); }
+  }
+}, 5 * 60 * 1000).unref?.();
 // Replay-cache for verified DM envelopes (key = envHash). A captured
 // from_sig+envelope could otherwise be re-POSTed verbatim within the 60s
 // skew and bulk-fill the recipient's ring buffer, evicting unread msgs.
@@ -1414,6 +1428,12 @@ app.post('/api/identity/register', (req, res) => {
   if (Math.abs(Date.now() - register_ts) > SIG_MAX_SKEW_MS) {
     return res.status(400).json({ error: 'register_ts skew too large' });
   }
+  // Replay-cache for registration: captured (register_sig, register_ts) must
+  // not be re-usable within the 60s skew. Keyed on the sig itself so a
+  // genuine owner retrying with a fresh ts still works.
+  if (REGISTER_SIG_SEEN.has(register_sig)) {
+    return res.status(401).json({ error: 'register_sig already used' });
+  }
   try {
     const signPub = Buffer.from(sign_pub, 'base64');
     // Bind the registration sig to BOTH pubkeys so an attacker cannot swap
@@ -1424,6 +1444,7 @@ app.post('/api/identity/register', (req, res) => {
       return res.status(401).json({ error: 'bad register_sig — does not verify against sign_pub (sign "register <handle> <ts> <box_pub> <sign_pub>")' });
     }
   } catch (_) { return res.status(400).json({ error: 'bad register_sig' }); }
+  REGISTER_SIG_SEEN.set(register_sig, Date.now());
   const rec = {
     handle, box_pub, sign_pub,
     registered_at: Date.now(),
@@ -1584,8 +1605,15 @@ app.get('/api/dm/:handle/inbox/wait', (req, res) => {
   const after = Math.max(0, parseInt(String(req.query.after || '0'), 10) || 0);
   const timeout = Math.max(1, Math.min(90, parseInt(String(req.query.timeout || '30'), 10) || 30));
   pruneInbox(handle);
-  const queue = (inboxes.get(handle) || []).filter((m) => m.seq > after);
-  if (queue.length > 0) return res.json({ messages: queue, last_seq: queue[queue.length - 1].seq });
+  // Cap how much an owner can pull in one response. The inbox ring is
+  // bounded (INBOX_MAX=256 messages) but each can be ~96 KiB plaintext;
+  // serialising the full queue at once could produce a ~25 MiB JSON
+  // response and spike memory on a busy inbox. Cap at 50 per response —
+  // client keeps polling with `after=<last_seq>` until drained.
+  const INBOX_PAGE = 50;
+  const all = (inboxes.get(handle) || []).filter((m) => m.seq > after);
+  const queue = all.slice(0, INBOX_PAGE);
+  if (queue.length > 0) return res.json({ messages: queue, last_seq: queue[queue.length - 1].seq, has_more: all.length > queue.length });
   const existingSet = dmWaiters.get(handle);
   if (existingSet && existingSet.size >= DM_WAITERS_MAX_PER_HANDLE) {
     res.set('Retry-After', '5');

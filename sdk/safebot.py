@@ -472,8 +472,25 @@ class Identity:
 
     @classmethod
     def from_bytes(cls, blob: bytes, base_url: str = "https://safebot.chat") -> "Identity":
+        # Validate the shape before slicing. A truncated file would silently
+        # yield wrong-length keys/handle and cause hard-to-debug auth errors
+        # later; fail loudly instead.
+        if not isinstance(blob, (bytes, bytearray)) or len(blob) < 1 + 1 + 64:
+            raise ValueError(f"identity blob too short ({len(blob) if blob else 0} bytes; need ≥66)")
         hl = blob[0]
-        handle = blob[1 : 1 + hl].decode("utf-8")
+        if hl < 2 or hl > 64:
+            raise ValueError(f"identity blob has bad handle length byte: {hl}")
+        if len(blob) != 1 + hl + 64:
+            raise ValueError(
+                f"identity blob size mismatch: header says handle={hl}B → total should be {1 + hl + 64}, got {len(blob)}"
+            )
+        try:
+            handle = blob[1 : 1 + hl].decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise ValueError(f"identity blob handle is not valid UTF-8: {e}") from e
+        import re as _re
+        if not _re.match(r"^[a-z0-9][a-z0-9_-]{1,31}$", handle):
+            raise ValueError(f"identity blob handle {handle!r} fails server-side regex")
         box_sk = blob[1 + hl : 1 + hl + 32]
         sign_sk = blob[1 + hl + 32 : 1 + hl + 64]
         return cls(handle, box_sk=box_sk, sign_sk=sign_sk, base_url=base_url)
