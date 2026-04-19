@@ -87,10 +87,12 @@
   // Unified copy menu (replaces the five-button topbar zoo).
   const copyMenuBtn = document.getElementById('copy-menu-btn');
   const copyMenuEl = document.getElementById('copy-menu');
-  const copyJoinEmptyBtn = document.getElementById('copy-join-empty');
+  // copyJoinEmptyBtn (was the invite-card "Copy invite link" button)
+  // was removed during the one-button consolidation — the URL row itself
+  // (#invite-url, click handler further down) now covers that action.
   const copyEndpointEmptyBtn = document.getElementById('copy-endpoint-empty');
-  const copyAgentSnippetBtn = document.getElementById('copy-agent-snippet');
-  const copyCodexSnippetBtn = document.getElementById('copy-codex-snippet');
+  // Per-snippet buttons in the invite card are gone — all flows go
+  // through the consolidated Copy menu in the topbar now.
   const toastEl = document.getElementById('toast');
   const toastText = document.getElementById('toast-text');
   const inviteUrlEl = document.getElementById('invite-url');
@@ -404,10 +406,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       if (e.key === 'Escape' && !copyMenuEl.hidden) closeMenu();
     });
   }
-  if (copyJoinEmptyBtn) copyJoinEmptyBtn.addEventListener('click', doCopyInvite);
   if (copyEndpointEmptyBtn) copyEndpointEmptyBtn.addEventListener('click', doCopyEndpoint);
-  if (copyAgentSnippetBtn) copyAgentSnippetBtn.addEventListener('click', doCopyAgentSnippet);
-  if (copyCodexSnippetBtn) copyCodexSnippetBtn.addEventListener('click', doCopyCodexSnippet);
 
   if (inviteUrlEl) {
     const trigger = async () => {

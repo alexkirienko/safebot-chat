@@ -352,11 +352,14 @@ section { padding: 80px 0; position: relative; }
 }
 .ghost-btn:hover { background: var(--d-surface); color: var(--d-text); border-color: var(--d-border-2); }
 .ghost-btn.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); background: rgba(34,197,94,0.08); }
+/* Solid primary variant — matches the .btn--primary look so the topbar
+   Copy button has the same weight as the hero CTA instead of a faint
+   tint. Colours and shadow mirror the large primary button deliberately. */
 .ghost-btn--primary {
-  color: #fff; background: color-mix(in srgb, var(--primary) 18%, transparent);
-  border-color: color-mix(in srgb, var(--primary) 55%, transparent);
+  color: #fff; background: var(--primary); border-color: var(--primary);
+  box-shadow: 0 10px 24px -12px rgba(109,124,255,.6);
 }
-.ghost-btn--primary:hover { background: color-mix(in srgb, var(--primary) 32%, transparent); color: #fff; border-color: var(--primary); }
+.ghost-btn--primary:hover { background: var(--primary-d); border-color: var(--primary-d); color: #fff; }
 .ghost-btn--primary svg { color: #fff; }
 
 /* Top-bar leave — red, small */
