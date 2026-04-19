@@ -556,30 +556,40 @@ section { padding: 80px 0; position: relative; }
 }
 .invite-card p { color: var(--d-text-2); font-size: 14.5px; margin: 0; max-width: 440px; margin-inline: auto; line-height: 1.55; }
 
+/* Solid-primary look — matches the topbar .ghost-btn--primary Copy
+   button so the two copy affordances read as the same action at the
+   same weight. Text/icon/hint all on white, shadow parity with
+   .btn--primary. */
 .invite-url {
   display: flex; align-items: center; gap: 10px;
-  background: var(--d-bg); border: 1px solid var(--d-border);
+  background: var(--primary); border: 1px solid var(--primary);
   padding: 12px 14px; border-radius: 12px;
-  cursor: pointer; transition: border-color .15s ease, background .15s ease;
+  cursor: pointer; transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
   margin: 0 0 18px;
   text-align: left;
+  box-shadow: 0 10px 24px -12px rgba(109,124,255,.6);
 }
-.invite-url:hover, .invite-url:focus-visible { border-color: var(--primary); background: rgba(109,124,255,0.05); outline: none; }
-.invite-url__ico { color: var(--d-text-3); flex: 0 0 auto; }
+.invite-url:hover, .invite-url:focus-visible {
+  background: var(--primary-d); border-color: var(--primary-d); outline: none;
+}
+.invite-url__ico { color: #fff; flex: 0 0 auto; }
 .invite-url__text {
   flex: 1; min-width: 0;
   font-family: 'JetBrains Mono', ui-monospace, monospace;
-  font-size: 12.5px; color: var(--d-text);
+  font-size: 12.5px; color: #fff;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   user-select: all;
 }
 .invite-url__hint {
   flex: 0 0 auto; font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
-  text-transform: uppercase; color: var(--d-text-3);
-  padding: 3px 8px; border-radius: 999px; border: 1px solid var(--d-border);
+  text-transform: uppercase; color: rgba(255,255,255,0.85);
+  padding: 3px 8px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.3); background: rgba(255,255,255,0.1);
   transition: color .15s ease, border-color .15s ease, background .15s ease;
 }
-.invite-url.ok .invite-url__hint { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); background: rgba(34,197,94,0.1); }
+.invite-url.ok .invite-url__hint {
+  color: #fff; border-color: rgba(255,255,255,0.6); background: rgba(255,255,255,0.22);
+}
 
 .invite-actions {
   display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;
