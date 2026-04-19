@@ -412,7 +412,7 @@ let DM_ENV_SEEN_SIZE = 0;
 const DM_ENV_SEEN_MAX = Number(process.env.DM_ENV_SEEN_MAX || 20_000);
 const DM_ENV_SEEN_PER_HANDLE_MAX = Math.max(128, Math.floor(DM_ENV_SEEN_MAX / 32));
 setInterval(() => {
-  const cutoff = Date.now() - SIG_MAX_SKEW_MS;
+  const cutoff = Date.now() - SIG_MAX_SKEW_MS * 2; // replay-cache TTL must cover both past and future halves of the ±skew window
   for (const [h, inner] of DM_ENV_SEEN) {
     for (const [n, v] of inner) if (v < cutoff) { inner.delete(n); DM_ENV_SEEN_SIZE--; }
     if (inner.size === 0) DM_ENV_SEEN.delete(h);
@@ -423,7 +423,7 @@ setInterval(() => {
 const ROOM_GLOBAL_MAX_BYTES = Number(process.env.ROOM_GLOBAL_MAX_BYTES || 512 * 1024 * 1024);
 let ROOM_GLOBAL_BYTES = 0;
 setInterval(() => {
-  const cutoff = Date.now() - SIG_MAX_SKEW_MS;
+  const cutoff = Date.now() - SIG_MAX_SKEW_MS * 2; // replay-cache TTL must cover both past and future halves of the ±skew window
   for (const [h, inner] of INBOX_SIG_SEEN) {
     for (const [n, v] of inner) if (v < cutoff) { inner.delete(n); INBOX_SIG_SEEN_SIZE--; }
     if (inner.size === 0) INBOX_SIG_SEEN.delete(h);
@@ -465,7 +465,7 @@ function verifyInboxSig(req, handle) {
     const perInner = inner || new Map();
     if (perInner.size >= INBOX_SIG_SEEN_PER_HANDLE_MAX) {
       // Drop this handle's expired entries; if still full, fail closed.
-      const cutoff = Date.now() - SIG_MAX_SKEW_MS;
+      const cutoff = Date.now() - SIG_MAX_SKEW_MS * 2; // replay-cache TTL must cover both past and future halves of the ±skew window
       for (const [n, v] of perInner) if (v < cutoff) { perInner.delete(n); INBOX_SIG_SEEN_SIZE--; }
       if (perInner.size >= INBOX_SIG_SEEN_PER_HANDLE_MAX) return false;
     }
@@ -1529,7 +1529,7 @@ app.post('/api/dm/:handle', (req, res) => {
         }
         const envPer = envInner || new Map();
         if (envPer.size >= DM_ENV_SEEN_PER_HANDLE_MAX) {
-          const cutoff = Date.now() - SIG_MAX_SKEW_MS;
+          const cutoff = Date.now() - SIG_MAX_SKEW_MS * 2; // replay-cache TTL must cover both past and future halves of the ±skew window
           for (const [n, v] of envPer) if (v < cutoff) { envPer.delete(n); DM_ENV_SEEN_SIZE--; }
           if (envPer.size >= DM_ENV_SEEN_PER_HANDLE_MAX) {
             return res.status(429).json({ error: 'replay-cache full for this handle' });
