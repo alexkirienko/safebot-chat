@@ -1409,9 +1409,18 @@ app.post('/api/report', async (req, res) => {
 
 // --- Identity / DM routes (Phase A) ---------------------------------------
 
+const IDENTITIES_MAX = Number(process.env.IDENTITIES_MAX || 100_000);
 app.post('/api/identity/register', (req, res) => {
   const ip = req.ip || '';
-  if (!rateLimitOk(ip, 'register')) { res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' }); }
+  if (!rateLimitOk(ip, 'register') || !globalRateLimitOk(ip)) {
+    res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' });
+  }
+  // Hard cap on total identities. Without this, a distributed attacker
+  // can grow the map and the persisted JSON file without bound.
+  if (identities.size >= IDENTITIES_MAX) {
+    res.set('Retry-After', '3600');
+    return res.status(503).json({ error: 'identity cap reached' });
+  }
   // Operators can bypass the RESERVED_HANDLES list only by presenting the
   // dedicated IDENTITY_ADMIN_TOKEN. No METRICS_TOKEN fallback: a leaked
   // dashboard/observability credential must NOT grant namespace squatting.
@@ -1555,10 +1564,12 @@ app.post('/api/dm/:handle', (req, res) => {
   // of cap-rejected requests would silently burn through seq numbers that
   // clients use as `after=<last_seq>` resumption cursors, dropping subsequent
   // legitimate messages on the floor.
-  // Account against STRING length (what actually sits in Node's heap), not
-  // base64-decoded length — malformed base64 can decode to 0 bytes while
-  // still retaining the full payload string in memory.
-  const ctBytes = typeof ciphertext === 'string' ? ciphertext.length : 0;
+  // Account against STRING length + a fixed per-envelope overhead (~512 B
+  // for the object shell + UUID + from_handle + seq numbers). Without the
+  // overhead, 0-byte/tiny ciphertexts slip under the 512 MiB fuse while
+  // still allocating ~few-hundred-byte envelope objects.
+  const ENV_OVERHEAD = 512;
+  const ctBytes = (typeof ciphertext === 'string' ? ciphertext.length : 0) + ENV_OVERHEAD;
   if (INBOX_GLOBAL_BYTES + ctBytes > INBOX_GLOBAL_MAX_BYTES) {
     res.set('Retry-After', '60');
     return res.status(503).json({ error: 'global DM buffer full — try again shortly' });
@@ -1690,7 +1701,7 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
   if (!rateLimitOk(ip, roomId) || !globalRateLimitOk(ip)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
   const room = getOrCreateRoom(roomId);
   if (!room) { res.set('Retry-After', '60'); return res.status(503).json({ error: 'room cap reached' }); }
-  const ctBytes = typeof req.body.ciphertext === 'string' ? req.body.ciphertext.length : 0;
+  const ctBytes = (typeof req.body.ciphertext === 'string' ? req.body.ciphertext.length : 0) + 512;
   if (ROOM_GLOBAL_BYTES + ctBytes > ROOM_GLOBAL_MAX_BYTES) {
     res.set('Retry-After', '60');
     return res.status(503).json({ error: 'global room buffer full — try again shortly' });
@@ -2151,7 +2162,7 @@ function handleWs(ws, roomId, ip) {
       METRICS.http_429 += 1;
       return;
     }
-    const ctBytes = typeof msg.ciphertext === 'string' ? msg.ciphertext.length : 0;
+    const ctBytes = (typeof msg.ciphertext === 'string' ? msg.ciphertext.length : 0) + 512;
     if (ROOM_GLOBAL_BYTES + ctBytes > ROOM_GLOBAL_MAX_BYTES) {
       try { ws.send(JSON.stringify({ type: 'error', code: 503, error: 'global room buffer full' })); } catch (_) {}
       return;
