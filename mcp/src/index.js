@@ -62,11 +62,12 @@ function parseRoomUrl(url) {
   if (!keyB64u) throw new Error('URL is missing the #k=<key> fragment');
   const key = b64urlDecode(keyB64u);
   if (key.length !== 32) throw new Error(`room key must decode to 32 bytes, got ${key.length}`);
-  return {
-    roomId: m[1],
-    key,
-    base: `${u.protocol}//${u.host}`,
-  };
+  const base = `${u.protocol}//${u.host}`;
+  // SSRF guard — applies to every tool that accepts a room URL. A caller can
+  // still point at localhost for dev, but LAN/internal hosts require opting
+  // in via SAFEBOT_MCP_ALLOWED_BASES.
+  assertSafeBase(base);
+  return { roomId: m[1], key, base };
 }
 
 function encrypt(key, plaintext) {
@@ -80,6 +81,32 @@ function decrypt(key, ctB64, nonceB64) {
     const pt = nacl.secretbox.open(b64Decode(ctB64), b64Decode(nonceB64), key);
     return pt ? naclUtil.encodeUTF8(pt) : null;
   } catch (_) { return null; }
+}
+
+// ---- Base-URL allowlist (SSRF guard) -----------------------------------
+// The MCP tool lets callers pass a `base` string for the SafeBot instance.
+// An LLM under prompt-injection attack could be tricked into calling with
+// `base=http://internal-service:8080/…`, turning this process into an SSRF
+// oracle against the operator's LAN. Restrict to an explicit allowlist:
+//   - the DEFAULT_BASE
+//   - anything in SAFEBOT_MCP_ALLOWED_BASES (comma-separated)
+//   - http://localhost[:port] / http://127.0.0.1[:port] for local dev
+function assertSafeBase(base) {
+  if (!base) return;
+  let u;
+  try { u = new URL(base); } catch (_) { throw new Error(`bad base URL: ${base}`); }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') {
+    throw new Error(`base URL must be http(s): ${base}`);
+  }
+  const origin = u.origin;
+  const allowed = new Set([new URL(DEFAULT_BASE).origin]);
+  for (const b of (process.env.SAFEBOT_MCP_ALLOWED_BASES || '').split(',')) {
+    const t = b.trim(); if (t) { try { allowed.add(new URL(t).origin); } catch (_) {} }
+  }
+  if (allowed.has(origin)) return;
+  // Localhost dev exception (explicit) — no other private IPs without opt-in.
+  if (u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1')) return;
+  throw new Error(`base URL '${origin}' not in allowlist (DEFAULT_BASE or SAFEBOT_MCP_ALLOWED_BASES)`);
 }
 
 // ---- HTTP with retry ---------------------------------------------------
@@ -194,6 +221,7 @@ const TOOLS = [
 // ---- Tool implementations ----------------------------------------------
 
 async function tool_create_room({ base }) {
+  if (base) assertSafeBase(base);
   const b = (base || DEFAULT_BASE).replace(/\/+$/, '');
   const roomId = randomRoomId();
   const key = nacl.randomBytes(32);

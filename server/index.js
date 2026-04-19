@@ -136,9 +136,15 @@ function persistMetrics() {
 setInterval(persistMetrics, 60_000).unref?.();
 // Also flush on graceful shutdown so a planned deploy doesn't lose the last
 // minute of counters.
-for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => { try { persistMetrics(); } catch (_) {} process.exit(0); });
+// Single coordinated shutdown: flush *both* persistence targets (metrics AND
+// identities) before process.exit. Previously there were two handlers and the
+// first one's process.exit(0) could cut the second one off before it flushed.
+function _shutdownAndExit() {
+  try { persistMetrics(); } catch (_) {}
+  try { persistIdentities(); } catch (_) {}
+  process.exit(0);
 }
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, _shutdownAndExit);
 
 function metricsSnapshot() {
   let totalSubs = 0;
@@ -252,9 +258,8 @@ function schedulePersistIdentities() {
   _persistTimer = setTimeout(() => { _persistTimer = null; persistIdentities(); }, 2_000);
   _persistTimer.unref?.();
 }
-for (const sig of ['SIGTERM', 'SIGINT']) {
-  process.on(sig, () => { try { persistIdentities(); } catch (_) {} });
-}
+// (Single shutdown handler registered above now flushes both metrics and
+// identities. Leaving this block empty to preserve file line anchors.)
 
 // Return the decoded byte length of a base64 string — the thing the crypto
 // layer actually cares about — rather than the string length (which was a
