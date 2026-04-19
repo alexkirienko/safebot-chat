@@ -121,6 +121,11 @@ async function request(url, opts = {}) {
         headers: { 'User-Agent': USER_AGENT, ...(opts.headers || {}) },
         body: opts.body,
         signal: opts.signal,
+        // Refuse redirects outright — assertSafeBase() already whitelisted
+        // the origin we're calling; a 3xx to somewhere else would let an
+        // attacker-controlled allowed origin pivot the request to an
+        // arbitrary internal URL (AWS metadata at 169.254.169.254 etc).
+        redirect: 'error',
       });
       if (r.status >= 500 || r.status === 429) {
         lastErr = new Error(`transient ${r.status}`);

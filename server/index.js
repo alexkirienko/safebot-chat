@@ -385,6 +385,10 @@ const INBOX_SIG_SEEN_MAX = Number(process.env.INBOX_SIG_SEEN_MAX || 10_000);
 // 256 handles × 128 KiB × 1 k handles would otherwise be ~32 GiB.
 const INBOX_GLOBAL_MAX_BYTES = Number(process.env.INBOX_GLOBAL_MAX_BYTES || 512 * 1024 * 1024); // 512 MiB
 let INBOX_GLOBAL_BYTES = 0;
+// Same pattern for room recent-buffer ciphertext. ROOM_MAX*200*128 KiB could
+// otherwise park 125 GiB of ciphertext in RAM before the 30s janitor runs.
+const ROOM_GLOBAL_MAX_BYTES = Number(process.env.ROOM_GLOBAL_MAX_BYTES || 512 * 1024 * 1024);
+let ROOM_GLOBAL_BYTES = 0;
 setInterval(() => {
   const cutoff = Date.now() - SIG_MAX_SKEW_MS;
   for (const [k, v] of INBOX_SIG_SEEN) if (v < cutoff) INBOX_SIG_SEEN.delete(k);
@@ -845,10 +849,11 @@ function getOrCreateRoom(roomId) {
   return room;
 }
 
+function releaseRoomBytes(msg) { if (msg && msg._bytes) ROOM_GLOBAL_BYTES = Math.max(0, ROOM_GLOBAL_BYTES - msg._bytes); }
 function pruneRecent(room) {
   const cutoff = Date.now() - RECENT_TTL_MS;
-  while (room.recent.length && room.recent[0].ts < cutoff) room.recent.shift();
-  while (room.recent.length > RECENT_MAX) room.recent.shift();
+  while (room.recent.length && room.recent[0].ts < cutoff) releaseRoomBytes(room.recent.shift());
+  while (room.recent.length > RECENT_MAX) releaseRoomBytes(room.recent.shift());
 }
 
 function broadcast(room, payload) {
@@ -1560,6 +1565,11 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
   if (!rateLimitOk(ip, roomId) || !globalRateLimitOk(ip)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
   const room = getOrCreateRoom(roomId);
   if (!room) { res.set('Retry-After', '60'); return res.status(503).json({ error: 'room cap reached' }); }
+  const ctBytes = Math.max(0, b64BytesLen(req.body.ciphertext));
+  if (ROOM_GLOBAL_BYTES + ctBytes > ROOM_GLOBAL_MAX_BYTES) {
+    res.set('Retry-After', '60');
+    return res.status(503).json({ error: 'global room buffer full — try again shortly' });
+  }
   const msg = {
     seq: nextSeq(room),
     id: crypto.randomUUID(),
@@ -1567,7 +1577,9 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
     ciphertext: req.body.ciphertext,
     nonce: req.body.nonce,
     ts: Date.now(),
+    _bytes: ctBytes,
   };
+  ROOM_GLOBAL_BYTES += ctBytes;
   room.recent.push(msg);
   pruneRecent(room);
   room.lastActive = Date.now();
@@ -2002,6 +2014,11 @@ function handleWs(ws, roomId, ip) {
       METRICS.http_429 += 1;
       return;
     }
+    const ctBytes = Math.max(0, b64BytesLen(msg.ciphertext));
+    if (ROOM_GLOBAL_BYTES + ctBytes > ROOM_GLOBAL_MAX_BYTES) {
+      try { ws.send(JSON.stringify({ type: 'error', code: 503, error: 'global room buffer full' })); } catch (_) {}
+      return;
+    }
     const out = {
       seq: nextSeq(room),
       id: crypto.randomUUID(),
@@ -2009,7 +2026,9 @@ function handleWs(ws, roomId, ip) {
       ciphertext: msg.ciphertext,
       nonce: msg.nonce,
       ts: Date.now(),
+      _bytes: ctBytes,
     };
+    ROOM_GLOBAL_BYTES += ctBytes;
     room.recent.push(out);
     pruneRecent(room);
     room.lastActive = Date.now();
@@ -2041,11 +2060,22 @@ setInterval(() => {
     // is alive.
     const idle = now - room.lastActive > ROOM_GRACE_MS;
     if (room.subs.size === 0 && room.waiters.size === 0 && idle) {
+      // Release bytes held by any still-buffered ciphertext before dropping
+      // the room — otherwise ROOM_GLOBAL_BYTES leaks.
+      for (const m of room.recent) releaseRoomBytes(m);
       rooms.delete(id);
       METRICS.rooms_evicted_total += 1;
     } else {
       pruneRecent(room);
     }
+  }
+  // Periodic DM-inbox prune: without this, abandoned handles with one-off
+  // DMs would keep their ciphertext in RAM (and counted against
+  // INBOX_GLOBAL_BYTES) until the server restarts. Walk every inbox once
+  // per janitor tick and let pruneInbox enforce INBOX_TTL_MS + INBOX_MAX.
+  for (const h of Array.from(inboxes.keys())) {
+    pruneInbox(h);
+    if ((inboxes.get(h) || []).length === 0) inboxes.delete(h);
   }
 }, JANITOR_INTERVAL_MS).unref?.();
 

@@ -373,9 +373,13 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (mentionedMe) notifyMention(m.sender, plaintext);
 
     chatListEl.appendChild(bubble);
-    // Scroll to bottom only if the user was already near the bottom.
-    const nearBottom = chatListEl.scrollHeight - chatListEl.scrollTop - chatListEl.clientHeight < 160;
-    if (nearBottom) chatListEl.scrollTop = chatListEl.scrollHeight;
+    // Auto-scroll on every new bubble. If the user scrolled up to read
+    // history and doesn't want to be yanked, use the page scroll (most
+    // chat UIs do scroll). If turning off for scrolled-up users is ever
+    // wanted, reintroduce a `nearBottom` gate here.
+    requestAnimationFrame(() => {
+      chatListEl.scrollTop = chatListEl.scrollHeight;
+    });
   }
 
   // --- Connection status -------------------------------------------------
