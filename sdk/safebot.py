@@ -484,7 +484,50 @@ def _cli() -> int:
         default=60.0,
         help="force SSE reconnect if no event arrives within N seconds (default 60; server sends keepalive every 15s)",
     )
+    # --- No-MCP-restart path (Claude Code / Cursor / any host with a shell tool) ---
+    # The host bash-loops these one-shots instead of loading the MCP server.
+    # Codex users should keep using `codex_safebot.py` + MCP — Codex starts
+    # fresh sessions, so there's no "mid-session MCP install" problem there.
+    ap.add_argument(
+        "--claim",
+        action="store_true",
+        help="[bash-loop] claim the next foreign message for this Identity. Prints one JSON line: "
+             '{"claim_id","seq","sender","ts","text","sender_verified","cursor"}. '
+             "Exit 0 = message, 1 = empty/timeout, 2 = error.",
+    )
+    ap.add_argument(
+        "--ack",
+        nargs=2, metavar=("CLAIM_ID", "SEQ"),
+        help="[bash-loop] advance the cursor past a previously claimed message.",
+    )
+    ap.add_argument(
+        "--next",
+        action="store_true",
+        help="[bash-loop] convenience: --claim → print → --ack in one call.",
+    )
+    ap.add_argument(
+        "--handle",
+        default=None,
+        help="[--claim/--ack/--next] Identity handle. If --identity-file is missing, "
+             "auto-create + register + save to ~/.config/safebot/cli_identity.key on first use.",
+    )
+    ap.add_argument(
+        "--identity-file",
+        default=None,
+        help="[--claim/--ack/--next] path to an Identity blob (default: ~/.config/safebot/cli_identity.key).",
+    )
+    ap.add_argument(
+        "--claim-timeout",
+        type=int, default=30,
+        help="[--claim/--next] server-side long-poll window in seconds (default 30, max 90).",
+    )
     args = ap.parse_args()
+
+    # Early dispatch: the no-MCP-restart flags don't need a Room.send() side
+    # effect and use their own Identity path, so handle them first.
+    if args.claim or args.ack or getattr(args, "next"):
+        return _cli_claim_ack(args)
+
     room = Room(args.url, name=args.name)
     if args.say:
         room.send(args.say)
@@ -777,6 +820,127 @@ def dm(
     resp = requests.post(f"{base_url}/api/dm/{handle}", json=body, timeout=15)
     resp.raise_for_status()
     return resp.json().get("id", "")
+
+
+def _cli_identity_path(args) -> str:
+    """Default path for the CLI's persistent Identity, scoped to $HOME.
+
+    Separate from the MCP server's `mcp_identity.key` so the two don't
+    fight over the same @handle — the CLI is its own thing, launched by
+    Claude Code / Cursor / Codex via a shell tool.
+    """
+    import os as _os
+    if args.identity_file:
+        return _os.path.expanduser(args.identity_file)
+    return _os.path.expanduser("~/.config/safebot/cli_identity.key")
+
+
+def _cli_load_or_create_identity(args, base_url: str):
+    """Load a persistent Identity for the --claim/--ack/--next flows.
+
+    If the on-disk file exists → load it. Otherwise require --handle,
+    mint a fresh keypair, register it server-side, and persist to the
+    default path (creating `~/.config/safebot/` with mode 0700 if
+    missing). Idempotent server-side: re-registering a handle the key
+    already owns returns 409, which we treat as OK.
+    """
+    import os as _os
+    path = _cli_identity_path(args)
+    if _os.path.exists(path):
+        with open(path, "rb") as f:
+            return Identity.from_bytes(f.read(), base_url=base_url)
+    if not args.handle:
+        print(
+            "safebot: no identity file at " + path + " and --handle not set.\n"
+            "        Run once with:  safebot.py <URL> --next --handle your-name\n"
+            "        (or point --identity-file at an existing Identity blob)",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    ident = Identity(args.handle, base_url=base_url)
+    try:
+        ident.register()
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "409" not in msg:
+            print(f"safebot: register failed: {msg}", file=sys.stderr)
+            raise SystemExit(2)
+    _os.makedirs(_os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
+    fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
+    try:
+        _os.write(fd, ident.to_bytes())
+    finally:
+        _os.close(fd)
+    return ident
+
+
+def _cli_claim_ack(args) -> int:
+    """Dispatch the three bash-loop subcommands: --claim, --ack, --next.
+
+    Each prints a single JSON line so bash loops can `jq -r` it, and each
+    has a distinct exit code contract:
+      --claim / --next: 0 = message returned, 1 = empty/timeout, 2 = error
+      --ack:            0 = ack processed, 2 = error
+    """
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(args.url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
+    try:
+        identity = _cli_load_or_create_identity(args, base_url)
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001
+        print(f"safebot: identity error: {e}", file=sys.stderr)
+        return 2
+    room = Room(args.url, name=args.name or identity.handle, identity=None)
+
+    try:
+        if args.ack:
+            claim_id, seq = args.ack
+            res = room.ack_claim(identity, claim_id, int(seq))
+            print(json.dumps(res, ensure_ascii=False))
+            return 0
+        if args.claim:
+            c = room.claim(identity, timeout=max(1, min(90, args.claim_timeout)))
+            if c is None:
+                print('{"empty": true}')
+                return 1
+            m = c["message"]
+            out = {
+                "claim_id": c["claim_id"],
+                "seq": m.seq,
+                "sender": m.sender,
+                "ts": m.ts,
+                "text": m.text,
+                "cursor": c.get("cursor"),
+            }
+            print(json.dumps(out, ensure_ascii=False))
+            return 0
+        # --next = claim → print → ack, one roundtrip
+        c = room.claim(identity, timeout=max(1, min(90, args.claim_timeout)))
+        if c is None:
+            print('{"empty": true}')
+            return 1
+        m = c["message"]
+        out = {
+            "claim_id": c["claim_id"],
+            "seq": m.seq,
+            "sender": m.sender,
+            "ts": m.ts,
+            "text": m.text,
+            "cursor": c.get("cursor"),
+        }
+        try:
+            room.ack_claim(identity, c["claim_id"], m.seq)
+        except Exception as e:  # noqa: BLE001
+            # Non-fatal: the claim will expire and the same message redelivers.
+            # Flag it in the JSON so the caller knows not to trust the cursor.
+            out["ack_warning"] = str(e)
+        print(json.dumps(out, ensure_ascii=False))
+        return 0
+    except Exception as e:  # noqa: BLE001
+        print(f"safebot: claim/ack failed: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

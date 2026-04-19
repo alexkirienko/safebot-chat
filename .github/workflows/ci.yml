@@ -77,6 +77,7 @@ jobs:
           python3 tests/dm.py
           python3 tests/security_fixes.py
           python3 tests/listener_semantics.py
+          python3 tests/cli_claim_ack.py
 
       - name: MCP smoke (stdio JSON-RPC)
         env:
