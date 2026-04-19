@@ -270,12 +270,13 @@ function b64BytesLen(s) {
   try { return Buffer.from(s, 'base64').length; } catch (_) { return -1; }
 }
 
+function releaseBytes(msg) { if (msg && msg._bytes) INBOX_GLOBAL_BYTES = Math.max(0, INBOX_GLOBAL_BYTES - msg._bytes); }
 function pruneInbox(handle) {
   const inbox = inboxes.get(handle);
   if (!inbox) return;
   const cutoff = Date.now() - INBOX_TTL_MS;
-  while (inbox.length && inbox[0].ts < cutoff) inbox.shift();
-  while (inbox.length > INBOX_MAX) inbox.shift();
+  while (inbox.length && inbox[0].ts < cutoff) releaseBytes(inbox.shift());
+  while (inbox.length > INBOX_MAX) releaseBytes(inbox.shift());
 }
 
 function wakeDmWaiters(handle, msgs) {
@@ -315,6 +316,44 @@ function waiterRelease(ip) {
   if (n <= 0) waitersByIp.delete(ip); else waitersByIp.set(ip, n);
 }
 
+// Persistent-stream (SSE + WS) concurrency cap per IP. Same shape as
+// waiterAcquire above but separate counter so long-polls and streams don't
+// eat each other's budget.
+const STREAM_CAP_PER_IP = Number(process.env.STREAM_CAP_PER_IP || 32);
+const streamsByIp = new Map();
+function streamAcquire(ip) {
+  const cur = streamsByIp.get(ip) || 0;
+  if (cur >= STREAM_CAP_PER_IP) return false;
+  streamsByIp.set(ip, cur + 1); return true;
+}
+function streamRelease(ip) {
+  const n = (streamsByIp.get(ip) || 1) - 1;
+  if (n <= 0) streamsByIp.delete(ip); else streamsByIp.set(ip, n);
+}
+
+// Second global token bucket keyed ONLY on ip (no room/handle suffix).
+// Caps total aggregate actions per-IP so an attacker can't bypass the
+// per-(ip,room) limit by fanning out across many rooms.
+const GLOBAL_RL_CAP = Number(process.env.GLOBAL_RL_CAP || 600);
+const GLOBAL_RL_REFILL_PER_SEC = Number(process.env.GLOBAL_RL_REFILL_PER_SEC || 200);
+const globalRlBuckets = new Map();
+function globalRateLimitOk(ip) {
+  if (!ip) return true;
+  const now = Date.now();
+  let b = globalRlBuckets.get(ip);
+  if (!b) { b = { tokens: GLOBAL_RL_CAP, last: now }; globalRlBuckets.set(ip, b); }
+  const elapsed = (now - b.last) / 1000;
+  b.tokens = Math.min(GLOBAL_RL_CAP, b.tokens + elapsed * GLOBAL_RL_REFILL_PER_SEC);
+  b.last = now;
+  if (b.tokens < 1) return false;
+  b.tokens -= 1;
+  return true;
+}
+setInterval(() => {
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  for (const [k, b] of globalRlBuckets) if (b.last < cutoff) globalRlBuckets.delete(k);
+}, 60 * 1000).unref?.();
+
 // Recently-seen inbox-sig nonces. Stored `${handle}|${nonce}` → ts. Pruned
 // opportunistically on access plus every 5 minutes. Bounds skew-window replay:
 // a captured Authorization header cannot be sent a second time while the
@@ -322,6 +361,10 @@ function waiterRelease(ip) {
 // owner spamming unique nonces can't OOM the process.
 const INBOX_SIG_SEEN = new Map();
 const INBOX_SIG_SEEN_MAX = Number(process.env.INBOX_SIG_SEEN_MAX || 10_000);
+// Global cap on total queued DM ciphertext bytes across all inboxes —
+// 256 handles × 128 KiB × 1 k handles would otherwise be ~32 GiB.
+const INBOX_GLOBAL_MAX_BYTES = Number(process.env.INBOX_GLOBAL_MAX_BYTES || 512 * 1024 * 1024); // 512 MiB
+let INBOX_GLOBAL_BYTES = 0;
 setInterval(() => {
   const cutoff = Date.now() - SIG_MAX_SKEW_MS;
   for (const [k, v] of INBOX_SIG_SEEN) if (v < cutoff) INBOX_SIG_SEEN.delete(k);
@@ -357,12 +400,15 @@ function verifyInboxSig(req, handle) {
     const urlPart = req.originalUrl || req.url || req.path;
     const blob = Buffer.from(`${req.method} ${urlPart} ${ts} ${nonce}`, 'utf8');
     if (!nacl.sign.detached.verify(blob, Buffer.from(sig, 'base64'), signPub)) return false;
-    // Cap the seen-set: if we'd grow past the hard limit, evict the oldest
-    // entries (they're within the skew window but replay-risk is bounded
-    // because the attacker would still need a fresh sig for a new ts).
+    // Cap the seen-set. Blind-eviction of the oldest 200 was replay-unsafe:
+    // a signing-key owner could flood unique nonces to push a captured one
+    // out of the cache within the skew window. Instead, evict only EXPIRED
+    // entries; if the set is full of still-valid nonces, fail closed — the
+    // attacker no longer gets a free slot.
     if (INBOX_SIG_SEEN.size >= INBOX_SIG_SEEN_MAX) {
-      const it = INBOX_SIG_SEEN.keys();
-      for (let i = 0; i < 200; i++) { const k = it.next().value; if (k === undefined) break; INBOX_SIG_SEEN.delete(k); }
+      const cutoff = Date.now() - SIG_MAX_SKEW_MS;
+      for (const [k, v] of INBOX_SIG_SEEN) if (v < cutoff) INBOX_SIG_SEEN.delete(k);
+      if (INBOX_SIG_SEEN.size >= INBOX_SIG_SEEN_MAX) return false;
     }
     INBOX_SIG_SEEN.set(seenKey, Date.now());
     return true;
@@ -749,7 +795,22 @@ const ROOMS_MAX = Number(process.env.ROOMS_MAX || 5000);
 function getOrCreateRoom(roomId) {
   let room = rooms.get(roomId);
   if (!room) {
-    if (rooms.size >= ROOMS_MAX) return null; // caller must 503
+    // Rooms are uncoordinated global state — a hard 503 at ROOMS_MAX would
+    // let any IP lock out every other user by holding a few thousand idle
+    // rooms open. Instead, when we're full we evict the oldest room that
+    // has no subs and no waiters (pure junk). If nothing is evictable, fail.
+    if (rooms.size >= ROOMS_MAX) {
+      let victimId = null;
+      let oldestActive = Infinity;
+      for (const [rid, r] of rooms) {
+        if (r.subs.size === 0 && r.waiters.size === 0 && r.lastActive < oldestActive) {
+          oldestActive = r.lastActive; victimId = rid;
+        }
+      }
+      if (victimId === null) return null;
+      rooms.delete(victimId);
+      METRICS.rooms_evicted_total += 1;
+    }
     // nextSeq starts at Date.now() rather than 1, so seqs remain monotonically
     // increasing across process restarts. Clients polling with afterSeq=N from
     // before a restart then naturally receive all post-restart messages.
@@ -1059,6 +1120,8 @@ app.get('/api/status', (_req, res) => {
 app.get('/api/rooms/:roomId/events', (req, res) => {
   const { roomId } = req.params;
   if (!/^[A-Za-z0-9_-]{4,64}$/.test(roomId)) return res.status(400).end();
+  const ip = req.ip || '';
+  if (!streamAcquire(ip)) { res.status(429).set('Retry-After', '5').json({ error: 'too many concurrent streams from this IP' }); return; }
   const after = Math.max(0, parseInt(String(req.query.after || '0'), 10) || 0);
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1067,7 +1130,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
   res.flushHeaders();
 
   const room = getOrCreateRoom(roomId);
-  if (!room) { res.write(`data: ${JSON.stringify({ type: 'error', error: 'room cap reached' })}\n\n`); res.end(); return; }
+  if (!room) { streamRelease(ip); res.write(`data: ${JSON.stringify({ type: 'error', error: 'room cap reached' })}\n\n`); res.end(); return; }
   const sub = {
     kind: 'sse',
     send(text) {
@@ -1112,8 +1175,10 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
     }
   }, 15000);
 
+  let released = false;
   const cleanup = () => {
     clearInterval(keepalive);
+    if (!released) { released = true; streamRelease(ip); }
     if (room.subs.delete(sub)) {
       room.lastActive = Date.now();
       broadcast(room, { type: 'presence', size: room.subs.size });
@@ -1312,7 +1377,7 @@ app.post('/api/dm/:handle', (req, res) => {
   const ip = req.ip || '';
   const handle = String(req.params.handle || '').replace(/^@/, '').toLowerCase();
   if (!HANDLE_REGEX.test(handle)) return res.status(400).json({ error: 'invalid handle' });
-  if (!rateLimitOk(ip, `dm:${handle}`)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
+  if (!rateLimitOk(ip, `dm:${handle}`) || !globalRateLimitOk(ip)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
   const rec = identities.get(handle);
   if (!rec) return res.status(404).json({ error: 'no such handle' });
   const { ciphertext, nonce, sender_eph_pub, from_handle } = req.body || {};
@@ -1374,6 +1439,15 @@ app.post('/api/dm/:handle', (req, res) => {
     from_verified,
     ts: Date.now(),
   };
+  // Reject when the global inbox byte pool is full — spread across all
+  // handles, not just this one, so mass-registration can't OOM us.
+  const ctBytes = Math.max(0, b64BytesLen(ciphertext));
+  if (INBOX_GLOBAL_BYTES + ctBytes > INBOX_GLOBAL_MAX_BYTES) {
+    res.set('Retry-After', '60');
+    return res.status(503).json({ error: 'global DM buffer full — try again shortly' });
+  }
+  envelope._bytes = ctBytes;
+  INBOX_GLOBAL_BYTES += ctBytes;
   inbox.push(envelope);
   pruneInbox(handle);
   wakeDmWaiters(handle, [envelope]);
@@ -1438,8 +1512,12 @@ app.delete('/api/dm/:handle/inbox/:id', (req, res) => {
   const inbox = inboxes.get(handle);
   if (!inbox) return res.json({ ok: true, removed: 0 });
   const before = inbox.length;
-  inboxes.set(handle, inbox.filter((m) => m.id !== id));
-  res.json({ ok: true, removed: before - inboxes.get(handle).length });
+  const kept = [];
+  for (const m of inbox) {
+    if (m.id === id) releaseBytes(m); else kept.push(m);
+  }
+  inboxes.set(handle, kept);
+  res.json({ ok: true, removed: before - kept.length });
 });
 
 // Agent POST — accepts ciphertext message, rebroadcasts to all subscribers.
@@ -1448,7 +1526,7 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
   if (!/^[A-Za-z0-9_-]{4,64}$/.test(roomId)) return res.status(400).json({ error: 'bad roomId' });
   if (!validMessage(req.body)) return res.status(400).json({ error: 'bad message' });
   const ip = req.ip || '';
-  if (!rateLimitOk(ip, roomId)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
+  if (!rateLimitOk(ip, roomId) || !globalRateLimitOk(ip)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
   const room = getOrCreateRoom(roomId);
   if (!room) { res.set('Retry-After', '60'); return res.status(503).json({ error: 'room cap reached' }); }
   const msg = {
@@ -1837,7 +1915,11 @@ const server = http.createServer(app);
 server.keepAliveTimeout = 120_000;     // 120s
 server.headersTimeout   = 125_000;     // must be > keepAliveTimeout
 server.requestTimeout   = 0;           // SSE streams have no request timeout
-const wss = new WebSocketServer({ noServer: true });
+// Hard WS frame cap — default `ws` maxPayload is 100 MiB, which lets a single
+// attacker allocate huge buffers. Our real ciphertext ceiling is ~128 KiB,
+// so 256 KiB is more than enough and frames above that are dropped at the
+// protocol layer before they ever reach validMessage.
+const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -1857,8 +1939,12 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 function handleWs(ws, roomId, ip) {
+  if (!streamAcquire(ip)) {
+    try { ws.send(JSON.stringify({ type: 'error', code: 429, error: 'too many concurrent streams from this IP' })); ws.close(); } catch (_) {}
+    return;
+  }
   const room = getOrCreateRoom(roomId);
-  if (!room) { try { ws.send(JSON.stringify({ type: 'error', error: 'room cap reached' })); ws.close(); } catch (_) {} return; }
+  if (!room) { streamRelease(ip); try { ws.send(JSON.stringify({ type: 'error', error: 'room cap reached' })); ws.close(); } catch (_) {} return; }
   const sub = {
     kind: 'ws',
     send(text) { if (ws.readyState === 1) ws.send(text); },
@@ -1901,6 +1987,7 @@ function handleWs(ws, roomId, ip) {
   });
 
   ws.on('close', () => {
+    streamRelease(ip);
     room.subs.delete(sub);
     room.lastActive = Date.now();
     broadcast(room, { type: 'presence', size: room.subs.size });
