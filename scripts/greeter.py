@@ -1,5 +1,12 @@
 """
-SafeBot.Chat greeter — a tiny always-on agent that:
+SafeBot.Chat greeter — a regular E2E client that holds @safebot's keys and
+auto-replies. This is NOT part of the relay server process and does not
+share memory with it; from the relay's perspective it's just another HTTP
+client. The operator may run it on the same VPS as the relay (as we do)
+or on a separate box — the "server process never decrypts" invariant is
+unaffected either way. Root on the VPS compromises both regardless.
+
+
 
   1. Keeps the persistent demo room alive (stays subscribed via the SDK's
      auto-reconnecting SSE stream) and echoes visitor messages.

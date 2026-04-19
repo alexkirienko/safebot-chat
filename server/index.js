@@ -282,6 +282,8 @@ function wakeDmWaiters(handle, msgs) {
 // Per-IP concurrent long-poll waiter cap. An attacker opening thousands of
 // /wait connections would otherwise tie up fd's + timers.
 const WAITER_CAP_PER_IP = Number(process.env.WAITER_CAP_PER_IP || 16);
+const ROOM_WAITERS_MAX = Number(process.env.ROOM_WAITERS_MAX || 256);
+const DM_WAITERS_MAX_PER_HANDLE = Number(process.env.DM_WAITERS_MAX_PER_HANDLE || 64);
 const waitersByIp = new Map();
 function waiterAcquire(ip) {
   // Test BEFORE incrementing — a previous version incremented first and
@@ -301,8 +303,10 @@ function waiterRelease(ip) {
 // Recently-seen inbox-sig nonces. Stored `${handle}|${nonce}` → ts. Pruned
 // opportunistically on access plus every 5 minutes. Bounds skew-window replay:
 // a captured Authorization header cannot be sent a second time while the
-// original ts is still in the acceptable window.
+// original ts is still in the acceptable window. Size-capped so a signing-key
+// owner spamming unique nonces can't OOM the process.
 const INBOX_SIG_SEEN = new Map();
+const INBOX_SIG_SEEN_MAX = Number(process.env.INBOX_SIG_SEEN_MAX || 10_000);
 setInterval(() => {
   const cutoff = Date.now() - SIG_MAX_SKEW_MS;
   for (const [k, v] of INBOX_SIG_SEEN) if (v < cutoff) INBOX_SIG_SEEN.delete(k);
@@ -338,6 +342,13 @@ function verifyInboxSig(req, handle) {
     const urlPart = req.originalUrl || req.url || req.path;
     const blob = Buffer.from(`${req.method} ${urlPart} ${ts} ${nonce}`, 'utf8');
     if (!nacl.sign.detached.verify(blob, Buffer.from(sig, 'base64'), signPub)) return false;
+    // Cap the seen-set: if we'd grow past the hard limit, evict the oldest
+    // entries (they're within the skew window but replay-risk is bounded
+    // because the attacker would still need a fresh sig for a new ts).
+    if (INBOX_SIG_SEEN.size >= INBOX_SIG_SEEN_MAX) {
+      const it = INBOX_SIG_SEEN.keys();
+      for (let i = 0; i < 200; i++) { const k = it.next().value; if (k === undefined) break; INBOX_SIG_SEEN.delete(k); }
+    }
     INBOX_SIG_SEEN.set(seenKey, Date.now());
     return true;
   } catch (_) { return false; }
@@ -695,9 +706,11 @@ const JANITOR_INTERVAL_MS = 15 * 1000;
 // Subscriber = { kind: 'ws'|'sse', send(obj): void, close(): void }
 const rooms = new Map();
 
+const ROOMS_MAX = Number(process.env.ROOMS_MAX || 5000);
 function getOrCreateRoom(roomId) {
   let room = rooms.get(roomId);
   if (!room) {
+    if (rooms.size >= ROOMS_MAX) return null; // caller must 503
     // nextSeq starts at Date.now() rather than 1, so seqs remain monotonically
     // increasing across process restarts. Clients polling with afterSeq=N from
     // before a restart then naturally receive all post-restart messages.
@@ -1009,6 +1022,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
   res.flushHeaders();
 
   const room = getOrCreateRoom(roomId);
+  if (!room) { res.write(`data: ${JSON.stringify({ type: 'error', error: 'room cap reached' })}\n\n`); res.end(); return; }
   const sub = {
     kind: 'sse',
     send(text) {
@@ -1329,6 +1343,11 @@ app.get('/api/dm/:handle/inbox/wait', (req, res) => {
   pruneInbox(handle);
   const queue = (inboxes.get(handle) || []).filter((m) => m.seq > after);
   if (queue.length > 0) return res.json({ messages: queue, last_seq: queue[queue.length - 1].seq });
+  const existingSet = dmWaiters.get(handle);
+  if (existingSet && existingSet.size >= DM_WAITERS_MAX_PER_HANDLE) {
+    res.set('Retry-After', '5');
+    return res.status(429).json({ error: 'too many concurrent waiters for this handle' });
+  }
   const ip = req.ip || '';
   if (!waiterAcquire(ip)) {
     res.set('Retry-After', '5');
@@ -1381,6 +1400,7 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
   const ip = req.ip || '';
   if (!rateLimitOk(ip, roomId)) { res.set('Retry-After', '1'); return res.status(429).json({ error: 'rate limited' }); }
   const room = getOrCreateRoom(roomId);
+  if (!room) { res.set('Retry-After', '60'); return res.status(503).json({ error: 'room cap reached' }); }
   const msg = {
     seq: nextSeq(room),
     id: crypto.randomUUID(),
@@ -1458,6 +1478,10 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
   }
 
   // Otherwise, park the connection until a new message arrives or we time out.
+  if (room.waiters.size >= ROOM_WAITERS_MAX) {
+    res.set('Retry-After', '5');
+    return res.status(429).json({ error: 'too many concurrent waiters for this room' });
+  }
   const ip = req.ip || '';
   if (!waiterAcquire(ip)) {
     res.set('Retry-After', '5');
@@ -1781,6 +1805,7 @@ server.on('upgrade', (req, socket, head) => {
 
 function handleWs(ws, roomId, ip) {
   const room = getOrCreateRoom(roomId);
+  if (!room) { try { ws.send(JSON.stringify({ type: 'error', error: 'room cap reached' })); ws.close(); } catch (_) {} return; }
   const sub = {
     kind: 'ws',
     send(text) { if (ws.readyState === 1) ws.send(text); },
