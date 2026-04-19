@@ -135,7 +135,10 @@
     return new Identity(rec);
   }
 
-  async function createAndRegister(handle, baseUrl) {
+  // Internal helper: generate + register, return the raw record. Shared
+  // by `createAndRegister` (saves to local storage) and `mintForAdopt`
+  // (doesn't — operator is provisioning FOR another agent, not FOR self).
+  async function _mintAndRegister(handle, baseUrl) {
     if (!HANDLE_REGEX.test(handle)) throw new Error('handle must match ' + HANDLE_REGEX);
     const seed = nacl.randomBytes(32);
     const box_sk = nacl.randomBytes(32);
@@ -150,8 +153,23 @@
       if (res.status === 409) throw new Error('@' + handle + ' already taken — pick another');
       throw new Error('register failed (' + res.status + '): ' + (res.error || ''));
     }
+    return { ident, rec };
+  }
+
+  async function createAndRegister(handle, baseUrl) {
+    const { ident, rec } = await _mintAndRegister(handle, baseUrl);
     saveToStorage(rec);
     return ident;
+  }
+
+  // Create + register a new Identity WITHOUT touching our local storage.
+  // Used by the adopt flow where an operator provisions an identity for
+  // another agent: the operator never wants this identity to land in
+  // their own browser's localStorage. Returns the full record blob,
+  // JSON-ready to be wrapped into an adopt envelope.
+  async function mintForAdopt(handle, baseUrl) {
+    const { rec } = await _mintAndRegister(handle, baseUrl);
+    return { safebot_identity_v1: true, ...rec };
   }
 
   function load() {
@@ -164,6 +182,7 @@
     createAndRegister,
     forget: clearStorage,
     validHandle: (h) => HANDLE_REGEX.test(h || ''),
+    mintForAdopt,
     exportJson,
     importJson,
   };

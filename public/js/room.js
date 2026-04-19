@@ -592,10 +592,158 @@ key  share #k=… separately (URL fragment never reaches the server)`;
 
   // --- WebSocket ---------------------------------------------------------
   let ws;
+  // --- Adopt protocol state (Phase 2) -----------------------------------
+  // Ephemeral X25519 keypair for this Room instance. Used as the recipient
+  // keypair for any adopt-envelope directed at us, and as the sender
+  // keypair when WE initiate an adopt toward another participant. Never
+  // persisted — on reconnect a fresh keypair is generated and re-announced.
+  const _myBoxKp = nacl.box.keyPair();
+  const _myBoxPubB64 = SafeBotCrypto.b64urlEncode(_myBoxKp.publicKey);
+  // Map peer display name → their advertised box_pub (base64url). Populated
+  // from `ready` and `presence` events. Used when crafting an outbound
+  // adopt envelope targeted at a specific participant.
+  const peerBoxPubs = new Map();
+  // Dedup set for applied adopt envelopes. An envelope carries adopt_id
+  // (uuid); on IDB/transcript replay the same envelope may surface again —
+  // we must never re-apply it. Backed by localStorage so it survives tab
+  // restarts.
+  const ADOPT_APPLIED_KEY = 'safebot:adopt-applied';
+  function adoptHasApplied(id) {
+    try {
+      const s = JSON.parse(localStorage.getItem(ADOPT_APPLIED_KEY) || '[]');
+      return Array.isArray(s) && s.indexOf(id) >= 0;
+    } catch (_) { return false; }
+  }
+  function adoptRecordApplied(id) {
+    try {
+      const s = JSON.parse(localStorage.getItem(ADOPT_APPLIED_KEY) || '[]');
+      const arr = Array.isArray(s) ? s : [];
+      arr.push(id);
+      // Cap at 200 most recent to keep localStorage bounded.
+      localStorage.setItem(ADOPT_APPLIED_KEY, JSON.stringify(arr.slice(-200)));
+    } catch (_) {}
+  }
   let reconnectAttempt = 0;
   let sendQueue = [];
   const MAX_RECONNECT = 10;
   let stopped = false;
+
+  // --- Adopt envelope handling ------------------------------------------
+  // Inbound: room message whose decrypted plaintext is a JSON envelope
+  // with `safebot_adopt_v1: true`. If target_name matches us and we
+  // haven't seen this adopt_id before, decrypt the inner box payload
+  // with our ephemeral box_sk, prompt the user for consent, import the
+  // contained Identity into localStorage, and announce the rename.
+  //
+  // Fail-closed: anything malformed, not-addressed-to-us, or already-
+  // applied is consumed (returns true → blocks render) without side
+  // effects. Wrong-target adopts never render as garbage in the chat.
+  function tryApplyAdoptEnvelope(msg) {
+    const plaintext = SafeBotCrypto.decrypt(key, msg.ciphertext, msg.nonce);
+    if (plaintext === null) return false; // not for us or wrong key — fall through to normal render (will silently skip)
+    let env;
+    try { env = JSON.parse(plaintext); } catch (_) { return false; }
+    if (!env || env.safebot_adopt_v1 !== true) return false;
+    // Past this point the envelope is definitely an adopt offer — never
+    // render it as a chat bubble even if it isn't for us (keeps keypair
+    // material out of visible history).
+    if (!env.target_name || !env.adopt_id) return true;
+    if (env.target_name !== me) return true;
+    if (adoptHasApplied(env.adopt_id)) return true;
+    if (!env.sender_box_pub || !env.nonce || !env.ciphertext) return true;
+    let inner;
+    try {
+      const senderPub = SafeBotCrypto.b64urlDecode(env.sender_box_pub);
+      const nonce = SafeBotCrypto.b64urlDecode(env.nonce);
+      const ct = SafeBotCrypto.b64urlDecode(env.ciphertext);
+      const opened = nacl.box.open(ct, nonce, senderPub, _myBoxKp.secretKey);
+      if (!opened) { console.warn('[safebot] adopt: decryption failed'); return true; }
+      inner = JSON.parse(nacl.util.encodeUTF8(opened));
+    } catch (e) { console.warn('[safebot] adopt: parse failed', e && e.message); return true; }
+    if (!inner || !inner.handle || !inner.box_sk_b64u || !inner.sign_seed_b64u) return true;
+    // Consent gate — user explicitly accepts or rejects. Operator posted
+    // it, so the user should confirm they want this identity. Message
+    // names the sender and the offered handle so the user can sanity-
+    // check before accepting.
+    const accept = confirm(
+      'You were offered a signed identity @' + inner.handle + ' by ' + (msg.sender || 'an operator') + '.\n\n' +
+      'Accepting will save the keypair in this browser and switch your sender label to @' + inner.handle + '. ' +
+      'This cannot be undone without the identity-forget action.'
+    );
+    if (!accept) return true;
+    // Save + record applied + rename.
+    try {
+      const imported = window.SafeBotIdentity.importJson(JSON.stringify({
+        safebot_identity_v1: true,
+        handle: inner.handle,
+        box_sk_b64u: inner.box_sk_b64u,
+        sign_seed_b64u: inner.sign_seed_b64u,
+      }));
+      adoptRecordApplied(env.adopt_id);
+      // Locally update identity + name + UI.
+      identity = imported;
+      const oldMe = me;
+      me = identity.handle;
+      nameInputEl.value = me;
+      sessionStorage.setItem('safebot:name', me);
+      seenNames.delete(oldMe);
+      seenNames.set(me, Date.now());
+      refreshIdentityUI();
+      renderPeople();
+      try { ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'hello', name: me, box_pub: _myBoxPubB64 })); } catch (_) {}
+      showToast('Adopted as @' + me, true);
+    } catch (e) {
+      console.error('[safebot] adopt import failed', e);
+      alert('Adopt failed: ' + (e.message || e));
+    }
+    return true;
+  }
+
+  // Outbound: operator mints + registers a fresh Identity, encrypts it
+  // for a specific target participant using nacl.box(target box_pub), and
+  // posts the envelope into the room. Everyone sees the room-encrypted
+  // ciphertext; only the target can open the inner payload.
+  async function initiateAdopt(targetName, handle) {
+    const cleanHandle = String(handle || '').trim().toLowerCase().replace(/^@/, '');
+    if (!window.SafeBotIdentity.validHandle(cleanHandle))
+      throw new Error('invalid handle: ' + cleanHandle);
+    const targetPub = peerBoxPubs.get(targetName);
+    if (!targetPub) throw new Error('no box_pub known for ' + targetName + ' — they must declare one via hello first');
+    // 1. Mint identity (does NOT touch our localStorage).
+    const record = await window.SafeBotIdentity.mintForAdopt(cleanHandle, location.origin);
+    // 2. Build inner payload + encrypt with nacl.box.
+    const adoptId = crypto.randomUUID();
+    const innerJson = JSON.stringify({
+      handle: record.handle,
+      box_sk_b64u: record.box_sk_b64u,
+      sign_seed_b64u: record.sign_seed_b64u,
+      adopt_id: adoptId,
+    });
+    const nonce = nacl.randomBytes(24);
+    const targetPubBytes = SafeBotCrypto.b64urlDecode(targetPub);
+    const innerBytes = nacl.util.decodeUTF8(innerJson);
+    const ct = nacl.box(innerBytes, nonce, targetPubBytes, _myBoxKp.secretKey);
+    // 3. Outer envelope (still encrypted by the room key on send).
+    const envelope = {
+      safebot_adopt_v1: true,
+      target_name: targetName,
+      sender_box_pub: _myBoxPubB64,
+      nonce: SafeBotCrypto.b64urlEncode(nonce),
+      ciphertext: SafeBotCrypto.b64urlEncode(ct),
+      adopt_id: adoptId,
+    };
+    // 4. Post via the normal room channel. This uses room-key symmetric
+    //    encryption on top of the box-encrypted inner payload. Target
+    //    receives it, intercepts via tryApplyAdoptEnvelope before
+    //    renderMessage.
+    await send(JSON.stringify(envelope));
+    return { handle: cleanHandle, adoptId };
+  }
+  // Dev hook so we can e2e-test before wiring UI. Usage from console:
+  //   window.safebotAdopt('anon-xyz', 'alice-bot')
+  window.safebotAdopt = (name, handle) => initiateAdopt(name, handle)
+    .then((r) => { console.log('adopt sent', r); showToast('Adopt offer sent to ' + name, true); })
+    .catch((e) => { console.error(e); alert('Adopt failed: ' + (e.message || e)); });
 
   function connect() {
     if (stopped) return;
@@ -608,16 +756,30 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       // in the presence `names` list broadcast to every participant. Without
       // this, a browser visitor who joins but doesn't post doesn't show up
       // in the other sidebar until their first message.
-      try { ws.send(JSON.stringify({ type: 'hello', name: me })); } catch (_) {}
+      try { ws.send(JSON.stringify({ type: 'hello', name: me, box_pub: _myBoxPubB64 })); } catch (_) {}
       for (const q of sendQueue) { try { ws.send(q); } catch (_) {} }
       sendQueue = [];
     });
     ws.addEventListener('message', (ev) => {
       let obj;
       try { obj = JSON.parse(ev.data); } catch (_) { return; }
-      if (obj.type === 'message') renderMessage(obj);
-      else if (obj.type === 'presence' && Array.isArray(obj.names)) {
-        for (const n of obj.names) touchParticipant(n);
+      if (obj.type === 'message') {
+        // Intercept adopt envelopes BEFORE the normal render path so we
+        // never persist keypair material in IDB or replay-apply (guardrail
+        // #3 from codex-qa review). tryApplyAdoptEnvelope returns true
+        // when the message was an adopt handled by us and must not render.
+        if (tryApplyAdoptEnvelope(obj)) return;
+        renderMessage(obj);
+      }
+      else if (obj.type === 'ready' || obj.type === 'presence') {
+        if (Array.isArray(obj.participants)) {
+          for (const p of obj.participants) {
+            if (p && p.name) touchParticipant(p.name);
+            if (p && p.name && p.box_pub) peerBoxPubs.set(p.name, p.box_pub);
+          }
+        } else if (Array.isArray(obj.names)) {
+          for (const n of obj.names) touchParticipant(n);
+        }
       }
       else if (obj.type === 'rename' && obj.from && obj.to && obj.from !== me) {
         // A live participant changed their name. Drop the old alias and
@@ -626,6 +788,12 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         // already updated the local seenNames in the namechip handler).
         seenNames.delete(obj.from);
         seenNames.set(obj.to, Date.now());
+        // Move box_pub mapping along with the name so a subsequent
+        // adopt targeting the new label still finds the right pubkey.
+        if (peerBoxPubs.has(obj.from)) {
+          peerBoxPubs.set(obj.to, peerBoxPubs.get(obj.from));
+          peerBoxPubs.delete(obj.from);
+        }
         renderPeople();
       }
     });
@@ -792,7 +960,9 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       return;
     }
     if (action !== 'create') return;
-    const handle = (prompt('Pick an @handle (1–32 chars, lowercase letters/digits/-/_):') || '').trim().toLowerCase();
+    // Accept an optional leading '@' so users don't stumble on the prompt.
+    const handle = (prompt('Pick an @handle (1–32 chars, lowercase letters/digits/-/_):') || '')
+      .trim().toLowerCase().replace(/^@/, '');
     if (!handle) return;
     if (!window.SafeBotIdentity.validHandle(handle)) { alert('Invalid handle format.'); return; }
     try {
