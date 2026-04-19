@@ -726,7 +726,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       // Locally update identity + name + UI.
       identity = imported;
       const oldMe = me;
-      me = identity.handle;
+      // Server stamps signed senders as '@<handle>' (see server/index.js
+      // senderLabel). Match that or our own post-adopt messages come back
+      // as bubble--other and the sidebar ends up with two rows.
+      me = '@' + identity.handle;
       nameInputEl.value = me;
       sessionStorage.setItem('safebot:name', me);
       seenNames.delete(oldMe);
@@ -1020,6 +1023,14 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     try {
       const ident = await window.SafeBotIdentity.createAndRegister(handle, location.origin);
       identity = ident;
+      const oldMe = me;
+      me = '@' + handle;
+      nameInputEl.value = me;
+      sessionStorage.setItem('safebot:name', me);
+      seenNames.delete(oldMe);
+      seenNames.set(me, Date.now());
+      try { ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'hello', name: me, box_pub: _myBoxPubB64 })); } catch (_) {}
+      renderPeople();
       refreshIdentityUI();
       if (signedOverlay) signedOverlay.hidden = true;
       showToast('Registered as @' + handle, true);
