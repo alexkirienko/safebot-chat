@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SafeBot.Chat — Roadmap board</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+<meta name="theme-color" content="#F6F7FB" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/css/styles.css" />
+<style>
+  .board-head { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin: 16px 0 8px; }
+  .board-head h1 { margin: 0; }
+  .board-meta { color: var(--text-3); font-size: 13.5px; }
+  .board-meta a { color: var(--text-2); }
+  .columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 24px; align-items: start; }
+  @media (max-width: 880px) { .columns { grid-template-columns: 1fr; } }
+  .col { background: var(--surface-2); border-radius: 14px; padding: 16px 14px 18px; border: 1px solid var(--border); min-height: 280px; }
+  .col__head { display: flex; align-items: center; justify-content: space-between; padding: 0 4px 10px; }
+  .col__title { font-weight: 600; font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .col__count { color: var(--text-3); font-size: 12px; font-weight: 500; padding: 2px 9px; background: var(--surface-3); border-radius: 999px; }
+  .col--doing .col__title { color: #2E7D32; }
+  .col--incoming .col__title { color: #1565C0; }
+  .col--done .col__title { color: #6D7CFF; }
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px 12px; margin: 8px 4px; font-size: 13.7px; line-height: 1.45; }
+  .card + .card { margin-top: 10px; }
+  .card__pri { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; margin-right: 8px; vertical-align: 2px; }
+  .card__pri--P0 { background: #FFEBEB; color: #C0392B; }
+  .card__pri--P1 { background: #FFF7E0; color: #B97400; }
+  .card__pri--P2 { background: #E8F0FE; color: #1967D2; }
+  .card__pri--P3 { background: #EEF0F4; color: #5E6A7D; }
+  .card__pri--done { background: #E6F4EA; color: #1E7A38; }
+  .card__body { color: var(--d-text); }
+  .card__body code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; font-size: 0.92em; }
+  .card__meta { color: var(--text-3); font-size: 12.5px; margin-top: 6px; }
+  .card__body a { color: var(--primary-d, #6D7CFF); }
+  .empty { color: var(--text-3); font-style: italic; padding: 8px 10px; }
+  .loading { color: var(--text-3); padding: 16px; }
+  .error { color: #C0392B; padding: 10px 14px; background: #FFEBEB; border-radius: 8px; margin-top: 14px; font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="ic-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 10V7a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+  </defs>
+</svg>
+
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a href="/" class="wordmark">
+      <span class="wordmark__logo"><svg width="16" height="16"><use href="#ic-lock"/></svg></span>
+      <span class="wordmark__name">SafeBot<span style="color:var(--text-3);font-weight:500">.Chat</span></span>
+    </a>
+    <nav class="nav-links">
+      <a class="nav-link" href="/">Home</a>
+      <a class="nav-link" href="/docs">Docs</a>
+      <a class="nav-link" href="/connect">Connect</a>
+      <a class="nav-link" href="/source">Source</a>
+    </nav>
+  </div>
+</header>
+
+<main class="doc-body">
+  <div class="board-head">
+    <h1>Roadmap board</h1>
+    <div class="board-meta">
+      Source: <a href="https://github.com/alexkirienko/safebot-chat/blob/master/docs/BOARD.md" rel="noopener">docs/BOARD.md</a>
+      · rendered live from git · edit via PR to move items between columns
+    </div>
+  </div>
+
+  <div id="columns" class="columns">
+    <div class="loading">Loading board…</div>
+  </div>
+  <div id="err"></div>
+</main>
+
+<script>
+  (async () => {
+    try {
+      const r = await fetch('/docs/BOARD.md', { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const md = await r.text();
+      render(parse(md));
+    } catch (e) {
+      document.getElementById('columns').innerHTML = '';
+      const err = document.createElement('div');
+      err.className = 'error';
+      err.textContent = 'Failed to load /docs/BOARD.md: ' + e.message;
+      document.getElementById('err').appendChild(err);
+    }
+  })();
+
+  // Very small Markdown-section-and-list parser tuned to BOARD.md shape.
+  // Returns {doing:[], incoming:[{pri,body}], done:[{body}]}.
+  function parse(md) {
+    const lines = md.split('\n');
+    const out = { doing: [], incoming: [], done: [] };
+    let section = null;   // 'DOING' | 'INCOMING' | 'DONE' | null
+    let pri = null;       // 'P0'..'P3' inside INCOMING
+    let current = null;   // accumulator for a multi-line item
+    const flush = () => { if (current) { push(current); current = null; } };
+    const push = (item) => {
+      const body = item.body.trim();
+      if (!body) return;
+      if (section === 'DOING') out.doing.push({ body });
+      else if (section === 'INCOMING') out.incoming.push({ body, pri: item.pri || pri || '' });
+      else if (section === 'DONE') out.done.push({ body });
+    };
+
+    for (const raw of lines) {
+      const line = raw.replace(/\s+$/, '');
+      // Top-level column headers.
+      if (/^## DOING\b/.test(line)) { flush(); section = 'DOING'; pri = null; continue; }
+      if (/^## INCOMING\b/.test(line)) { flush(); section = 'INCOMING'; pri = null; continue; }
+      if (/^## DONE\b/.test(line)) { flush(); section = 'DONE'; pri = null; continue; }
+      if (/^## /.test(line)) { flush(); section = null; pri = null; continue; }
+      if (!section) continue;
+
+      // Priority subheaders inside INCOMING.
+      const h3 = line.match(/^###\s+(P[0-3])\b/);
+      if (h3) { flush(); pri = h3[1]; continue; }
+      if (/^### /.test(line)) { flush(); continue; }
+
+      // List items: lines starting with "-", "*", or "<N>.".
+      const bullet = line.match(/^\s*(?:[-*]|\d+\.)\s+(.+)$/);
+      if (bullet) {
+        flush();
+        // Check for **bold title** followed by trailing text.
+        current = { body: bullet[1], pri: pri };
+        continue;
+      }
+
+      // Italic placeholder used for "Nothing active".
+      if (/^_.+_$/.test(line)) { flush(); current = { body: line.replace(/^_|_$/g, ''), pri: null }; flush(); continue; }
+
+      // Continuation lines of a card.
+      if (current && line.trim()) {
+        current.body += ' ' + line.trim();
+      } else {
+        flush();
+      }
+    }
+    flush();
+    return out;
+  }
+
+  function mdInlineToHtml(s) {
+    // Escape, then lift **bold**, `code`, [text](url), and bare SHAs.
+    const esc = (x) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let h = esc(s);
+    h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+    h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" rel="noopener">$1</a>');
+    return h;
+  }
+
+  function render(board) {
+    const cols = [
+      { key: 'doing',    title: 'Doing',    items: board.doing,    cls: 'col--doing',
+        empty: 'Nothing active. Start the next item from Incoming.' },
+      { key: 'incoming', title: 'Incoming', items: board.incoming, cls: 'col--incoming',
+        empty: 'Empty — roadmap is fully shipped.' },
+      { key: 'done',     title: 'Done',     items: board.done.slice().reverse(), cls: 'col--done',
+        empty: 'Nothing shipped yet.' },
+    ];
+    const root = document.getElementById('columns');
+    root.innerHTML = '';
+    for (const c of cols) {
+      const col = document.createElement('section');
+      col.className = 'col ' + c.cls;
+      const head = document.createElement('div');
+      head.className = 'col__head';
+      head.innerHTML = `<span class="col__title">${c.title}</span><span class="col__count">${c.items.length}</span>`;
+      col.appendChild(head);
+      if (c.items.length === 0) {
+        const em = document.createElement('div');
+        em.className = 'empty';
+        em.textContent = c.empty;
+        col.appendChild(em);
+      } else {
+        for (const it of c.items) {
+          const card = document.createElement('div');
+          card.className = 'card';
+          const priClass = it.pri ? `card__pri--${it.pri}` : (c.key === 'done' ? 'card__pri--done' : '');
+          const priLabel = it.pri || (c.key === 'done' ? '✓' : '');
+          const pri = priLabel ? `<span class="card__pri ${priClass}">${priLabel}</span>` : '';
+          card.innerHTML = `<div class="card__body">${pri}${mdInlineToHtml(it.body)}</div>`;
+          col.appendChild(card);
+        }
+      }
+      root.appendChild(col);
+    }
+  }
+</script>
+
+</body>
+</html>

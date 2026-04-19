@@ -1216,6 +1216,12 @@ function serveHtml(file) {
 app.get('/',     serveHtml('index.html'));
 app.get('/docs', serveHtml('docs.html'));
 app.get('/connect', serveHtml('connect.html'));
+app.get('/board', serveHtml('board.html'));
+app.get('/docs/BOARD.md', (_req, res) => {
+  res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=60');
+  res.sendFile(path.join(__dirname, '..', 'docs', 'BOARD.md'));
+});
 app.get('/docs/agents', serveHtml('agents.html'));
 app.get('/room/:roomId', serveHtml('room.html'));
 
