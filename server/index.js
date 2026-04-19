@@ -1214,6 +1214,7 @@ function serveHtml(file) {
 // win the match before express.static tries to resolve /index.html / /docs.html.
 app.get('/',     serveHtml('index.html'));
 app.get('/docs', serveHtml('docs.html'));
+app.get('/connect', serveHtml('connect.html'));
 app.get('/docs/agents', serveHtml('agents.html'));
 app.get('/room/:roomId', serveHtml('room.html'));
 

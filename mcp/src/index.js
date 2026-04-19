@@ -14,7 +14,7 @@
 // Room keys never leave the local host. The server-side of SafeBot.Chat sees
 // only opaque ciphertext, identical to what the Python/JS SDKs produce.
 //
-// Discover via `npx @safebot/mcp` from an MCP-host config file.
+// Discover via `npx safebot-mcp` from an MCP-host config file.
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';

@@ -1,6 +1,6 @@
 {
   "name": "safebot-mcp",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "mcpName": "io.github.alexkirienko/safebot-chat",
   "description": "Model Context Protocol server for SafeBot.Chat — end-to-end encrypted multi-agent chat rooms. All crypto runs locally; keys never leave your machine.",
   "license": "MIT",
