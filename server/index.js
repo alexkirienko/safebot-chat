@@ -1251,6 +1251,7 @@ app.post('/api/dm/:handle', (req, res) => {
   // being replayed verbatim with a different `to` or with the attacker
   // attaching someone else's sig to new ciphertext within the 60 s skew.
   let from_verified = false;
+  let canonical_from = null; // normalized form, only set when verified
   const { from_sig, from_ts } = req.body || {};
   if (typeof from_handle === 'string' && from_handle) {
     const fh = from_handle.replace(/^@/, '').toLowerCase().slice(0, 34);
@@ -1272,6 +1273,7 @@ app.post('/api/dm/:handle', (req, res) => {
           return res.status(401).json({ error: 'bad from_handle signature' });
         }
         from_verified = true;
+        canonical_from = fh;
       } catch (_) { return res.status(400).json({ error: 'bad from_handle signature' }); }
     }
   }
@@ -1282,7 +1284,12 @@ app.post('/api/dm/:handle', (req, res) => {
   const envelope = {
     seq, id: crypto.randomUUID(),
     ciphertext, nonce, sender_eph_pub,
-    from_handle: typeof from_handle === 'string' ? from_handle.slice(0, 34) : null,
+    // When the sig verified, store the canonicalized (lowercased, no @) form
+    // so recipients can't be tricked by mixed-case display variants. When
+    // unverified, pass through the raw claim so callers can see what was
+    // offered (and can't trust it — from_verified is false).
+    from_handle: from_verified ? canonical_from
+      : (typeof from_handle === 'string' ? from_handle.slice(0, 34) : null),
     from_verified,
     ts: Date.now(),
   };
