@@ -17,7 +17,7 @@
     return;
   }
   const SBC = global.SafeBotCrypto;
-  if (!SBC || !SBSBC.b64urlEncode || !SBSBC.b64urlDecode) {
+  if (!SBC || !SBC.b64urlEncode || !SBC.b64urlDecode) {
     console.error('[safebot] Identity init failed — SafeBotCrypto must load first');
     return;
   }
