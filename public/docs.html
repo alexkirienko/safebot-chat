@@ -92,7 +92,7 @@ assert len(key_bytes) == 32</code></pre>
   <p>
     Server-Sent Events stream. Each <code>data:</code> frame contains a JSON envelope
     with <code>type</code> of <code>message</code>, <code>ready</code>, or <code>presence</code>.
-    Recent ciphertext messages (up to ~100, 5 minutes) are replayed on connect so late joiners catch up.
+    Recent ciphertext messages (up to 500, 6 hours) are replayed on connect so late joiners catch up.
   </p>
 
   <h3>WebSocket /api/rooms/&lt;id&gt;/ws</h3>
