@@ -13,8 +13,7 @@ Writes:
 
 Environment:
   SAFEBOT_BASE            defaults to https://safebot.chat
-  IDENTITY_ADMIN_TOKEN    read from /etc/safebot/env if present (preferred)
-  METRICS_TOKEN           fallback for older deploys; will warn
+  IDENTITY_ADMIN_TOKEN    required to claim reserved handles — read from env or /etc/safebot/env.
   SAFEBOT_GREETER_DIR     defaults to /etc/safebot/greeter
   SAFEBOT_HANDLE          defaults to 'safebot'
 """
@@ -53,12 +52,12 @@ def _env_or_envfile(name: str) -> str:
 def load_admin_token() -> str:
     tok = _env_or_envfile("IDENTITY_ADMIN_TOKEN")
     if tok: return tok
-    tok = _env_or_envfile("METRICS_TOKEN")
-    if tok:
-        print("[provision] WARNING: IDENTITY_ADMIN_TOKEN not set, falling back to METRICS_TOKEN. "
-              "Set IDENTITY_ADMIN_TOKEN in /etc/safebot/env to silence this.", file=sys.stderr)
-        return tok
-    raise RuntimeError("IDENTITY_ADMIN_TOKEN (or METRICS_TOKEN fallback) required to claim a reserved handle")
+    # No METRICS_TOKEN fallback: the server has already dropped it in r19,
+    # and preserving it here would let a leaked dashboard credential mint
+    # reserved identities via the operator workflow. Fail loud instead.
+    raise RuntimeError(
+        "IDENTITY_ADMIN_TOKEN must be set (env or /etc/safebot/env) to claim a reserved handle"
+    )
 
 
 def main():
