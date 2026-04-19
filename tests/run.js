@@ -141,6 +141,16 @@ async function serverTests() {
     if (!/codex mcp add|claim_task|launch a fresh Codex session/.test(r.body)) throw new Error('does not look like the Codex bootstrap');
     if (r.body.length < 1000) throw new Error('bootstrap body suspiciously small: ' + r.body.length);
   });
+  await test('GET /board serves the kanban page', async () => {
+    const r = await httpJson('GET', `${BASE}/board`);
+    if (r.status !== 200) throw new Error('status ' + r.status);
+    if (!/board-parser\.js|BoardParser\.parse/.test(r.body)) throw new Error('kanban page missing parser wiring');
+  });
+  await test('GET /docs/BOARD.md serves the raw markdown', async () => {
+    const r = await httpJson('GET', `${BASE}/docs/BOARD.md`);
+    if (r.status !== 200) throw new Error('status ' + r.status);
+    if (!/^##\s+(DOING|INCOMING|DONE)/m.test(r.body)) throw new Error('no recognisable board sections in body');
+  });
   await test('GET /api/health returns ok', async () => {
     const r = await httpJson('GET', `${BASE}/api/health`);
     if (r.status !== 200) throw new Error('status ' + r.status);

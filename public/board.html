@@ -79,13 +79,14 @@
   <div id="err"></div>
 </main>
 
+<script src="/js/board-parser.js"></script>
 <script>
   (async () => {
     try {
       const r = await fetch('/docs/BOARD.md', { cache: 'no-store' });
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const md = await r.text();
-      render(parse(md), md);
+      render(BoardParser.parse(md), md);
     } catch (e) {
       document.getElementById('columns').innerHTML = '';
       const err = document.createElement('div');
@@ -95,78 +96,8 @@
     }
   })();
 
-  // Very small Markdown-section-and-list parser tuned to BOARD.md shape.
-  // Returns {doing:[], incoming:[{pri,body}], done:[{body}]}.
-  function parse(md) {
-    const lines = md.split('\n');
-    const out = { doing: [], incoming: [], done: [] };
-    let section = null;   // 'DOING' | 'INCOMING' | 'DONE' | null
-    let pri = null;       // 'P0'..'P3' inside INCOMING
-    let current = null;   // accumulator for a multi-line item
-    const flush = () => { if (current) { push(current); current = null; } };
-    const push = (item) => {
-      const body = item.body.trim();
-      if (!body) return;
-      if (section === 'DOING') out.doing.push({ body });
-      else if (section === 'INCOMING') out.incoming.push({ body, pri: item.pri || pri || '' });
-      else if (section === 'DONE') out.done.push({ body });
-    };
-
-    for (const raw of lines) {
-      const line = raw.replace(/\s+$/, '');
-      // Top-level column headers.
-      if (/^## DOING\b/.test(line)) { flush(); section = 'DOING'; pri = null; continue; }
-      if (/^## INCOMING\b/.test(line)) { flush(); section = 'INCOMING'; pri = null; continue; }
-      if (/^## DONE\b/.test(line)) { flush(); section = 'DONE'; pri = null; continue; }
-      if (/^## /.test(line)) { flush(); section = null; pri = null; continue; }
-      if (!section) continue;
-
-      // Priority subheaders inside INCOMING.
-      const h3 = line.match(/^###\s+(P[0-3])\b/);
-      if (h3) { flush(); pri = h3[1]; continue; }
-      if (/^### /.test(line)) { flush(); continue; }
-
-      // List items: lines starting with "-", "*", or "<N>.".
-      const bullet = line.match(/^\s*(?:[-*]|\d+\.)\s+(.+)$/);
-      if (bullet) {
-        flush();
-        // Check for **bold title** followed by trailing text.
-        current = { body: bullet[1], pri: pri };
-        continue;
-      }
-
-      // Italic placeholder used for "Nothing active".
-      if (/^_.+_$/.test(line)) { flush(); current = { body: line.replace(/^_|_$/g, ''), pri: null }; flush(); continue; }
-
-      // Continuation lines of a card.
-      if (current && line.trim()) {
-        current.body += ' ' + line.trim();
-      } else {
-        flush();
-      }
-    }
-    flush();
-    return out;
-  }
-
-  function mdInlineToHtml(s) {
-    // Escape everything first, then lift **bold**, `code`, and a very
-    // narrow [text](url) — whitelist http/https/relative only so a
-    // malicious BOARD.md can't slip a javascript: URL through.
-    const esc = (x) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    let h = esc(s);
-    h = h.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
-    h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, txt, url) => {
-      // Accept https://, http://, or site-relative "/". Drop anything else
-      // (javascript:, data:, mailto:, etc.) and render as plain text so we
-      // can never inject an href attribute we didn't vet.
-      if (!/^(https?:\/\/|\/)/.test(url)) return txt;
-      return `<a href="${url}" rel="noopener">${txt}</a>`;
-    });
-    return h;
-  }
-
+  // parse() and mdInlineToHtml() are loaded from /js/board-parser.js so
+  // tests/board_parser.js can exercise them outside the browser.
   function render(board, rawMd) {
     const cols = [
       { key: 'doing',    title: 'Doing',    items: board.doing,    cls: 'col--doing',
@@ -211,7 +142,7 @@
           const priClass = it.pri ? `card__pri--${it.pri}` : (c.key === 'done' ? 'card__pri--done' : '');
           const priLabel = it.pri || (c.key === 'done' ? '✓' : '');
           const pri = priLabel ? `<span class="card__pri ${priClass}">${priLabel}</span>` : '';
-          card.innerHTML = `<div class="card__body">${pri}${mdInlineToHtml(it.body)}</div>`;
+          card.innerHTML = `<div class="card__body">${pri}${BoardParser.mdInlineToHtml(it.body)}</div>`;
           col.appendChild(card);
         }
       }
