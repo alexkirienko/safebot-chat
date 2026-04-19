@@ -221,7 +221,109 @@ const TOOLS = [
       properties: { url: { type: 'string' } },
     },
   },
+  {
+    name: 'next_task',
+    description:
+      'Paved-road "give me the next message, at-least-once" primitive for turn-based agents (Codex, Claude Code, Cursor). ' +
+      'Blocks up to `timeout_seconds` waiting for a foreign message, returns exactly one decrypted message, and automatically ACKs the server cursor so the next call gets the NEXT message. ' +
+      'Loop pattern: call repeatedly in your host — each call is one turn worth of work. If your message returns `(no new messages)`, immediately call again. ' +
+      'On first use, the tool auto-generates a persistent @handle saved at ~/.config/safebot/mcp_identity.key and registers it on the server; set SAFEBOT_MCP_HANDLE to pick a specific handle. ' +
+      'If the task cannot be processed (you raise before the next tool call), the server treats the claim as expired after 60s and re-delivers — this is the at-least-once guarantee. ' +
+      'This is the RECOMMENDED primitive for every turn-based host; prefer it over wait_for_messages when you have an @handle.',
+    inputSchema: {
+      type: 'object',
+      required: ['url'],
+      properties: {
+        url:             { type: 'string' },
+        timeout_seconds: { type: 'integer', description: 'Max seconds to block (1–90). Default 60.', minimum: 1, maximum: 90 },
+      },
+    },
+  },
 ];
+
+// ---- Persistent Identity (for next_task) --------------------------------
+//
+// The MCP server auto-provisions one Identity per user-install at
+// ~/.config/safebot/mcp_identity.key (64 bytes: 32 box_sk | 32 sign_sk).
+// Handle is derived at creation and saved as JSON alongside. Registered
+// once with the live server on first use; idempotent 409 = already have
+// it, so re-runs are cheap.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+const IDENTITY_DIR = path.join(os.homedir(), '.config', 'safebot');
+const IDENTITY_KEY_PATH = path.join(IDENTITY_DIR, 'mcp_identity.key');
+const IDENTITY_META_PATH = path.join(IDENTITY_DIR, 'mcp_identity.json');
+
+let CACHED_IDENTITY = null;
+
+async function loadOrCreateIdentity(base) {
+  if (CACHED_IDENTITY && CACHED_IDENTITY.base === base) return CACHED_IDENTITY;
+  fs.mkdirSync(IDENTITY_DIR, { recursive: true, mode: 0o700 });
+  let handle, box_sk, sign_kp, meta;
+  if (fs.existsSync(IDENTITY_KEY_PATH) && fs.existsSync(IDENTITY_META_PATH)) {
+    const raw = fs.readFileSync(IDENTITY_KEY_PATH);
+    if (raw.length !== 64) throw new Error(`mcp_identity.key: expected 64 bytes, got ${raw.length}`);
+    box_sk = raw.subarray(0, 32);
+    const sign_seed = raw.subarray(32, 64);
+    sign_kp = nacl.sign.keyPair.fromSeed(sign_seed);
+    meta = JSON.parse(fs.readFileSync(IDENTITY_META_PATH, 'utf8'));
+    handle = meta.handle;
+  } else {
+    // Generate fresh identity. Handle: "mcp-<6-hex>" — stable for the life
+    // of this install unless the user deletes the file or overrides via env.
+    const envHandle = (process.env.SAFEBOT_MCP_HANDLE || '').toLowerCase();
+    handle = envHandle && /^[a-z0-9_-]{1,32}$/.test(envHandle)
+      ? envHandle
+      : 'mcp-' + Buffer.from(nacl.randomBytes(3)).toString('hex');
+    box_sk = nacl.randomBytes(32);
+    const sign_seed = nacl.randomBytes(32);
+    sign_kp = nacl.sign.keyPair.fromSeed(sign_seed);
+    const combined = Buffer.concat([Buffer.from(box_sk), Buffer.from(sign_seed)]);
+    fs.writeFileSync(IDENTITY_KEY_PATH, combined, { mode: 0o600 });
+    meta = { handle, created: Date.now() };
+    fs.writeFileSync(IDENTITY_META_PATH, JSON.stringify(meta), { mode: 0o600 });
+  }
+  // Compute box_pub from box_sk.
+  const box_kp = nacl.box.keyPair.fromSecretKey(box_sk);
+  const box_pub_b64 = b64Encode(box_kp.publicKey);
+  const sign_pub_b64 = b64Encode(sign_kp.publicKey);
+  // Register on server — idempotent; 409 means already taken by us, ok.
+  const ts = Date.now();
+  const blob = naclUtil.decodeUTF8(`register ${handle} ${ts} ${box_pub_b64} ${sign_pub_b64}`);
+  const sig = nacl.sign.detached(blob, sign_kp.secretKey);
+  try {
+    const r = await fetch(`${base}/api/identity/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+      body: JSON.stringify({
+        handle, box_pub: box_pub_b64, sign_pub: sign_pub_b64,
+        register_ts: ts, register_sig: b64Encode(sig),
+        meta: { bio: 'Auto-provisioned SafeBot MCP client.' },
+      }),
+    });
+    if (r.status !== 201 && r.status !== 409) {
+      const body = await r.text().catch(() => '');
+      throw new Error(`register failed: ${r.status} ${body}`);
+    }
+  } catch (e) {
+    // Network error is survivable — subsequent /claim will fail cleanly and
+    // the user can retry. Don't crash the whole MCP server.
+    console.error(`[safebot-mcp] identity register warning: ${e.message}`);
+  }
+  CACHED_IDENTITY = { handle, box_sk, sign_sk: sign_kp.secretKey, box_pub_b64, sign_pub_b64, base };
+  return CACHED_IDENTITY;
+}
+
+function authHeader(ident, method, pathAndQuery) {
+  const ts = Date.now();
+  const nonce = b64urlEncode(nacl.randomBytes(18));
+  const blob = naclUtil.decodeUTF8(`${method} ${pathAndQuery} ${ts} ${nonce}`);
+  const sig = nacl.sign.detached(blob, ident.sign_sk);
+  return `SafeBot ts=${ts},n=${nonce},sig=${b64Encode(sig)}`;
+}
 
 // ---- Tool implementations ----------------------------------------------
 
@@ -332,12 +434,68 @@ async function tool_room_status({ url }) {
   };
 }
 
+async function tool_next_task({ url, timeout_seconds = 60 }) {
+  const { roomId, key, base } = parseRoomUrl(url);
+  const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 60));
+  const ident = await loadOrCreateIdentity(base);
+  // /claim — Identity-signed long-poll.
+  const claimPath = `/api/rooms/${roomId}/claim?timeout=${t}`;
+  const claimRes = await fetch(`${base}${claimPath}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': USER_AGENT,
+      'Authorization': authHeader(ident, 'POST', claimPath),
+    },
+    body: JSON.stringify({ handle: ident.handle, exclude_senders: [] }),
+  });
+  if (!claimRes.ok) {
+    const body = await claimRes.text().catch(() => '');
+    throw new Error(`claim failed: ${claimRes.status} ${body}`);
+  }
+  const claim = await claimRes.json();
+  if (claim.empty || !claim.message) {
+    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as @${ident.handle}, cursor=${claim.cursor || 0}; call next_task again to keep listening)` }] };
+  }
+  const m = claim.message;
+  const text = decrypt(key, m.ciphertext, m.nonce);
+  // /ack — advance cursor. If this fails the claim will expire and re-deliver;
+  // that's fine for at-least-once, just surface a warning.
+  const ackPath = `/api/rooms/${roomId}/ack`;
+  let ackWarn = '';
+  try {
+    const ackRes = await fetch(`${base}${ackPath}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': USER_AGENT,
+        'Authorization': authHeader(ident, 'POST', ackPath),
+      },
+      body: JSON.stringify({ handle: ident.handle, claim_id: claim.claim_id, seq: m.seq }),
+    });
+    if (!ackRes.ok) ackWarn = `\n(warning: ack returned ${ackRes.status}; this message will be re-delivered on next call)`;
+  } catch (e) {
+    ackWarn = `\n(warning: ack failed: ${e.message}; message will be re-delivered)`;
+  }
+  const verified = m.sender_verified ? ' ✓' : '';
+  return {
+    content: [{
+      type: 'text',
+      text:
+        `[seq=${m.seq}] ${m.sender}${verified}: ${text == null ? '[undecryptable — wrong room key]' : text}` +
+        `\n\n(listening as @${ident.handle}; call next_task again to block for the next message)` +
+        ackWarn,
+    }],
+  };
+}
+
 const DISPATCH = {
   create_room:       tool_create_room,
   send_message:      tool_send_message,
   wait_for_messages: tool_wait_for_messages,
   get_transcript:    tool_get_transcript,
   room_status:       tool_room_status,
+  next_task:         tool_next_task,
 };
 
 // ---- MCP wiring --------------------------------------------------------

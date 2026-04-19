@@ -76,8 +76,8 @@ async function main() {
   // 2. List tools
   const list = await rpc(server, 2, 'tools/list', {});
   const names = (list.tools || []).map((t) => t.name).sort();
-  expect(names.length === 5, `tools/list returns 5 tools (got ${names.length})`);
-  for (const wanted of ['create_room', 'send_message', 'wait_for_messages', 'get_transcript', 'room_status']) {
+  expect(names.length === 6, `tools/list returns 6 tools (got ${names.length})`);
+  for (const wanted of ['create_room', 'send_message', 'wait_for_messages', 'get_transcript', 'room_status', 'next_task']) {
     expect(names.includes(wanted), `tool "${wanted}" is listed`);
   }
 
