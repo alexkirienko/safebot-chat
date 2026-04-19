@@ -1419,6 +1419,15 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
     },
     close() { try { res.end(); } catch (_) {} },
   };
+  // SSE has no upstream frames — subs declare name + box_pub via query
+  // params on connect instead. Matches the WS hello semantics so the SDK
+  // path participates in the adopt flow without a new transport.
+  {
+    const qName = typeof req.query.name === 'string' ? req.query.name.slice(0, 64) : '';
+    if (/^[A-Za-z0-9@._\-\u00A0-\uFFFF]{1,64}$/.test(qName)) sub.name = qName;
+    const qBox = typeof req.query.box_pub === 'string' ? req.query.box_pub : '';
+    if (qBox && isValidBoxPub(qBox)) sub.box_pub = qBox;
+  }
 
   // Replay the recent buffer above `after` so resumable clients only see new
   // ones. If after=0 (or absent) we send everything in the buffer.
@@ -1426,11 +1435,19 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
   for (const m of room.recent) {
     if (m.seq > after) sub.send(JSON.stringify({ type: 'message', ...m }));
   }
-  sub.send(JSON.stringify({ type: 'ready', roomId, size: room.subs.size + 1, last_seq: roomLastSeq(room) }));
+  sub.send(JSON.stringify({
+    type: 'ready', roomId, size: room.subs.size + 1, last_seq: roomLastSeq(room),
+    participants: collectSubParticipants(room),
+  }));
 
   room.subs.add(sub);
   room.lastActive = Date.now();
-  broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
+  broadcast(room, {
+    type: 'presence',
+    size: room.subs.size,
+    names: collectSubNames(room),
+    participants: collectSubParticipants(room),
+  });
   METRICS.sse_connects_total += 1;
 
   const keepalive = setInterval(() => {
@@ -1442,7 +1459,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
       clearInterval(keepalive);
       if (room.subs.delete(sub)) {
         room.lastActive = Date.now();
-        broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
+        broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room), participants: collectSubParticipants(room) });
       }
       return;
     }
@@ -1451,7 +1468,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
       clearInterval(keepalive);
       if (room.subs.delete(sub)) {
         room.lastActive = Date.now();
-        broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
+        broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room), participants: collectSubParticipants(room) });
       }
     }
   }, 15000);
@@ -1461,7 +1478,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
     releaseOnce();
     if (room.subs.delete(sub)) {
       room.lastActive = Date.now();
-      broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
+      broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room), participants: collectSubParticipants(room) });
     }
   };
   // Chain the sub-aware cleanup on TOP of the upstream releaseOnce — same
@@ -2619,9 +2636,9 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 // Presence-names helper: collect every sub that has declared a name via
-// the hello frame. Subs that never sent hello (legacy browsers, SSE
-// readers, bots) are simply absent from the list — they'll show up in
-// the sidebar as soon as they post, via the renderMessage path.
+// the hello frame (or SSE query params). Subs that never declared a name
+// are simply absent from the list — they'll show up in the sidebar as
+// soon as they post, via the renderMessage path.
 function collectSubNames(room) {
   const out = [];
   const seen = new Set();
@@ -2632,6 +2649,36 @@ function collectSubNames(room) {
     }
   }
   return out;
+}
+
+// Participants helper: returns richer per-sub metadata — name plus the
+// X25519 box_pub each sub advertised. Needed for the cross-process
+// "adopt" flow: an operator can encrypt an identity handoff envelope
+// targeted at a specific anon participant using nacl.box(their box_pub)
+// so no other participant in the room can read the keypair.
+// Shape: [{name, box_pub}] — box_pub omitted if the sub didn't send one.
+function collectSubParticipants(room) {
+  const out = [];
+  const seenNames = new Set();
+  for (const sub of room.subs) {
+    if (!sub || !sub.name || seenNames.has(sub.name)) continue;
+    const entry = { name: sub.name };
+    if (sub.box_pub) entry.box_pub = sub.box_pub;
+    out.push(entry);
+    seenNames.add(sub.name);
+  }
+  return out;
+}
+
+// Validate a base64-encoded 32-byte X25519 public key advertised by a
+// sub. Tolerant of either standard or url-safe base64; rejects anything
+// that doesn't decode to exactly 32 bytes.
+function isValidBoxPub(s) {
+  if (typeof s !== 'string' || s.length < 40 || s.length > 64) return false;
+  try {
+    const buf = Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+    return buf.length === 32;
+  } catch (_) { return false; }
 }
 
 function handleWs(ws, roomId, ip) {
@@ -2649,11 +2696,14 @@ function handleWs(ws, roomId, ip) {
 
   pruneRecent(room);
   for (const m of room.recent) sub.send(JSON.stringify({ type: 'message', ...m }));
-  sub.send(JSON.stringify({ type: 'ready', roomId, size: room.subs.size + 1 }));
+  sub.send(JSON.stringify({
+    type: 'ready', roomId, size: room.subs.size + 1,
+    participants: collectSubParticipants(room),
+  }));
 
   room.subs.add(sub);
   room.lastActive = Date.now();
-  broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
+  broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room), participants: collectSubParticipants(room) });
   METRICS.ws_connects_total += 1;
 
   ws.on('message', (data) => {
@@ -2677,7 +2727,30 @@ function handleWs(ws, roomId, ip) {
         if (prev && prev !== name) {
           broadcast(room, { type: 'rename', from: prev, to: name });
         }
-        broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
+        // Optional per-sub X25519 box_pub for the cross-process adopt
+        // flow. Lets an operator send a nacl.box-encrypted identity
+        // handoff envelope that only THIS sub can decrypt. Validated
+        // strictly (32 bytes base64) and silently ignored otherwise.
+        //
+        // Hello semantics (guardrail #2 from codex-qa review):
+        //   hello(name)                 → keep the existing box_pub
+        //                                 (no field set = no opinion)
+        //   hello(name, box_pub)        → set/replace
+        //   hello(name, box_pub: null)  → explicit clear
+        //   hello(name, box_pub:"junk") → silently dropped (not invalidated,
+        //                                 to avoid an attacker rename
+        //                                 clearing legitimate state via
+        //                                 bad input)
+        if ('box_pub' in msg) {
+          if (msg.box_pub === null) delete sub.box_pub;
+          else if (isValidBoxPub(msg.box_pub)) sub.box_pub = String(msg.box_pub);
+        }
+        broadcast(room, {
+          type: 'presence',
+          size: room.subs.size,
+          names: collectSubNames(room),
+          participants: collectSubParticipants(room),
+        });
       }
       return;
     }
@@ -2739,7 +2812,7 @@ function handleWs(ws, roomId, ip) {
     streamRelease(ip);
     room.subs.delete(sub);
     room.lastActive = Date.now();
-    broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room) });
+    broadcast(room, { type: 'presence', size: room.subs.size, names: collectSubNames(room), participants: collectSubParticipants(room) });
     METRICS.ws_disconnects_total += 1;
   });
   ws.on('error', () => { try { ws.close(); } catch (_) {} });
