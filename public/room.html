@@ -175,6 +175,15 @@
             <span class="invite-foot__chip"><svg width="11" height="11"><use href="#ic-shield"/></svg> End-to-end encrypted</span>
             <span class="invite-foot__chip">Key fingerprint · <span class="code" id="invite-fp">— — — —</span></span>
           </div>
+
+          <label class="signed-toggle" id="signed-only-row" hidden>
+            <span class="signed-toggle__text">
+              <strong>Lock to signed @handle senders</strong>
+              <span class="signed-toggle__sub">Applies on first message — cannot be undone.</span>
+            </span>
+            <input type="checkbox" id="signed-only-toggle" class="signed-toggle__input" />
+            <span class="signed-toggle__switch" aria-hidden="true"></span>
+          </label>
         </div>
       </div>
     </div>
@@ -189,10 +198,6 @@
           </button>
         </div>
         <div class="chat__hint" id="chat-hint">encrypted locally · press ⏎ to send, ⇧⏎ for newline</div>
-        <label class="chat__signed" id="signed-only-row" hidden>
-          <input type="checkbox" id="signed-only-toggle" />
-          <span>Lock this room to signed @handle senders only (applies on first message, cannot be undone)</span>
-        </label>
       </div>
     </form>
   </section>
