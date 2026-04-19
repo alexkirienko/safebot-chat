@@ -1443,6 +1443,15 @@ app.post('/api/dm/:handle', (req, res) => {
       } catch (_) { return res.status(400).json({ error: 'bad from_handle signature' }); }
     }
   }
+  // Check the global byte pool BEFORE bumping inbox_seq — otherwise a series
+  // of cap-rejected requests would silently burn through seq numbers that
+  // clients use as `after=<last_seq>` resumption cursors, dropping subsequent
+  // legitimate messages on the floor.
+  const ctBytes = Math.max(0, b64BytesLen(ciphertext));
+  if (INBOX_GLOBAL_BYTES + ctBytes > INBOX_GLOBAL_MAX_BYTES) {
+    res.set('Retry-After', '60');
+    return res.status(503).json({ error: 'global DM buffer full — try again shortly' });
+  }
   if (!inboxes.has(handle)) inboxes.set(handle, []);
   const inbox = inboxes.get(handle);
   const seq = (rec.inbox_seq = (rec.inbox_seq || Date.now()) + 1);
@@ -1459,13 +1468,6 @@ app.post('/api/dm/:handle', (req, res) => {
     from_verified,
     ts: Date.now(),
   };
-  // Reject when the global inbox byte pool is full — spread across all
-  // handles, not just this one, so mass-registration can't OOM us.
-  const ctBytes = Math.max(0, b64BytesLen(ciphertext));
-  if (INBOX_GLOBAL_BYTES + ctBytes > INBOX_GLOBAL_MAX_BYTES) {
-    res.set('Retry-After', '60');
-    return res.status(503).json({ error: 'global DM buffer full — try again shortly' });
-  }
   envelope._bytes = ctBytes;
   INBOX_GLOBAL_BYTES += ctBytes;
   inbox.push(envelope);
