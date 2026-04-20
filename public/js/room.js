@@ -1646,6 +1646,13 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     // dominates hist-summary merge AND live react envelopes, so the
     // state must go too (not just the DOM).
     reactionsByMsgId.delete(targetId);
+    // Active-composer convergence (codex-qa major on b46fdd1): if the
+    // user is currently composing a reply to the just-deleted message,
+    // clear the composer so their next submit doesn't attach a dead
+    // reply_to id.
+    if (replyingTo && replyingTo.id === targetId) {
+      try { setReplyingTo(null); } catch (_) {}
+    }
     // Converge any live reply-ref pointing at this id on the
     // "deleted message" placeholder so a child reply can't keep
     // showing cached plaintext.

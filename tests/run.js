@@ -511,6 +511,32 @@ async function e2eReplyConvergence() {
     if (s.previewText) throw new Error('dead ref must drop cached preview: ' + s.previewText);
     pass('reply-ref: parent delete → "deleted message" placeholder, no cached text');
 
+    // Case 4 — deleting the parent while the user is actively composing
+    // a reply to it must clear the composer so the next submit doesn't
+    // attach a dead reply_to id (codex-qa major on b46fdd1).
+    const liveParentId = crypto.randomUUID();
+    await page.evaluate((id) => {
+      window.__safebotTest.renderMessage({ id, seq: 999, sender: 'alice', ts: Date.now(), text: 'arm me for reply then die' });
+      // Arm the composer by clicking the Reply button.
+      const rep = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__reply-btn`);
+      rep.click();
+    }, liveParentId);
+    const armed = await page.evaluate(() => {
+      const pill = document.getElementById('replying-pill');
+      return { hidden: pill ? pill.hidden : null, empty: pill ? pill.children.length === 0 : null };
+    });
+    if (armed.hidden !== false) throw new Error('precondition: composer should be armed before delete');
+    await page.evaluate((id) => window.__safebotTest.applyDelete(id, 999), liveParentId);
+    const cleared = await page.evaluate(() => {
+      const pill = document.getElementById('replying-pill');
+      const cs = window.getComputedStyle(pill);
+      return { hidden: pill.hidden, display: cs.display, childCount: pill.children.length };
+    });
+    if (!cleared.hidden) throw new Error('composer reply pill did not clear on parent delete: ' + JSON.stringify(cleared));
+    if (cleared.display !== 'none') throw new Error('composer reply pill still visible after delete: ' + JSON.stringify(cleared));
+    if (cleared.childCount !== 0) throw new Error('composer reply pill retained stale children: ' + JSON.stringify(cleared));
+    pass('reply-ref: deleting the parent while composing a reply clears the composer pill');
+
     await browser.close();
   } catch (e) {
     await browser.close();
