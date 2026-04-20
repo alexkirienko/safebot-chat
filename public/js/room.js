@@ -618,19 +618,22 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     bubble.appendChild(body);
     if (mentionedMe) notifyMention(m.sender, plaintext);
 
-    // Delete affordance on own bubbles: hover-shown × that broadcasts a
-    // delete envelope. Only shown for isSelf to avoid encouraging cross-
-    // user deletions (any participant CAN post a delete for any id, since
-    // the room key is shared — but UI-gating keeps it honest).
-    if (isSelf && m.id) {
+    // Delete affordance on every bubble: in a shared-key room any
+    // participant can post a delete for any id, so we expose the × on
+    // all messages. Confirm dialog labels the sender so cross-deletes
+    // aren't accidental.
+    if (m.id) {
       const del = document.createElement('button');
       del.className = 'bubble__del';
       del.type = 'button';
-      del.title = 'Delete for everyone';
+      del.title = isSelf ? 'Delete for everyone' : `Delete ${m.sender || 'message'} for everyone`;
       del.textContent = '×';
       del.addEventListener('click', (ev) => {
         ev.preventDefault();
-        if (!confirm('Delete this message for everyone?')) return;
+        const prompt = isSelf
+          ? 'Delete this message for everyone?'
+          : `Delete this message from ${m.sender || 'agent'} for everyone?`;
+        if (!confirm(prompt)) return;
         initiateDelete({ id: m.id, seq: m.seq });
       });
       bubble.appendChild(del);
@@ -886,6 +889,8 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     const env = { safebot_delete_v1: true, target_id: target.id, target_seq: target.seq };
     try { postProtocol(JSON.stringify(env)); } catch (e) { console.warn('[safebot delete] post failed', e); }
   }
+  // Console escape hatch for deleting by id (or by raw CSS-selector search).
+  window.safebotDelete = (id, seq) => initiateDelete({ id, seq });
 
   const histReqsHandled = new Set();     // req_ids we've already answered (as responder)
   const histReqsPending = new Map();     // req_id -> {resolved:false} for requests we sent
