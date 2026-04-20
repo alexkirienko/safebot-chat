@@ -117,7 +117,8 @@
           const p = JSON.parse(t);
           if (p && (p.safebot_adopt_v1 === true
                  || p.safebot_hist_req_v1 === true
-                 || p.safebot_hist_resp_v1 === true)) continue;
+                 || p.safebot_hist_resp_v1 === true
+                 || p.safebot_delete_v1 === true)) continue;
         } catch (_) { /* not JSON */ }
       }
       const item = {

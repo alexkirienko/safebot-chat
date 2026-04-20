@@ -556,12 +556,20 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         const probe = JSON.parse(plaintext);
         if (probe && (probe.safebot_adopt_v1 === true
                    || probe.safebot_hist_req_v1 === true
-                   || probe.safebot_hist_resp_v1 === true)) {
+                   || probe.safebot_hist_resp_v1 === true
+                   || probe.safebot_delete_v1 === true)) {
           // Evict a prior stale cache entry if present.
           try { window.SafeBotHistory && window.SafeBotHistory.evict && window.SafeBotHistory.evict(roomId, m.seq); } catch (_) {}
           return;
         }
       } catch (_) { /* not JSON, fall through */ }
+    }
+
+    // Delete-tombstone: if the message id was previously deleted in this
+    // room, drop it + purge the IDB copy so replay never resurfaces it.
+    if (deletedIds.has(m.id)) {
+      try { window.SafeBotHistory && window.SafeBotHistory.evict && window.SafeBotHistory.evict(roomId, m.seq); } catch (_) {}
+      return;
     }
 
     anyMessages = true;
@@ -570,6 +578,8 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     const isSelf = m.sender === me;
     const bubble = document.createElement('div');
     bubble.className = `bubble ${isSelf ? 'bubble--self' : 'bubble--other'}`;
+    bubble.dataset.msgId = m.id || '';
+    if (typeof m.seq === 'number') bubble.dataset.msgSeq = String(m.seq);
 
     const d = new Date(m.ts || Date.now());
     const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -607,6 +617,24 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (idx < plaintext.length) body.appendChild(document.createTextNode(plaintext.slice(idx)));
     bubble.appendChild(body);
     if (mentionedMe) notifyMention(m.sender, plaintext);
+
+    // Delete affordance on own bubbles: hover-shown × that broadcasts a
+    // delete envelope. Only shown for isSelf to avoid encouraging cross-
+    // user deletions (any participant CAN post a delete for any id, since
+    // the room key is shared — but UI-gating keeps it honest).
+    if (isSelf && m.id) {
+      const del = document.createElement('button');
+      del.className = 'bubble__del';
+      del.type = 'button';
+      del.title = 'Delete for everyone';
+      del.textContent = '×';
+      del.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        if (!confirm('Delete this message for everyone?')) return;
+        initiateDelete({ id: m.id, seq: m.seq });
+      });
+      bubble.appendChild(del);
+    }
 
     chatListEl.appendChild(bubble);
     // Auto-scroll on every new bubble. If the user scrolled up to read
@@ -823,6 +851,42 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   // they ride on the shared room key, so only room members can read them.
   // Intercept BEFORE renderMessage so protocol envelopes never surface as
   // chat bubbles or get persisted as chat entries.
+  // --- Delete-for-everyone -----------------------------------------------
+  // Small protocol on top of the room key: any participant can post a
+  // delete envelope referencing a target message id + seq. All clients
+  // evict the matching bubble from DOM + IDB and remember the id so late-
+  // joined transcript replay (server's 24h recent) can't resurface it.
+  const DEL_KEY = `safebot:deleted:${roomId}`;
+  const deletedIds = new Set();
+  try {
+    const persisted = JSON.parse(localStorage.getItem(DEL_KEY) || '[]');
+    if (Array.isArray(persisted)) for (const id of persisted) deletedIds.add(String(id));
+  } catch (_) {}
+  function persistDeleted() {
+    try {
+      const arr = Array.from(deletedIds).slice(-500);
+      localStorage.setItem(DEL_KEY, JSON.stringify(arr));
+    } catch (_) {}
+  }
+  function applyDelete(targetId, targetSeq) {
+    if (!targetId || deletedIds.has(targetId)) return;
+    deletedIds.add(targetId);
+    persistDeleted();
+    // Evict DOM bubble.
+    const el = chatListEl.querySelector(`.bubble[data-msg-id="${CSS.escape(targetId)}"]`);
+    if (el) el.remove();
+    // Evict IDB entry by seq.
+    if (typeof targetSeq === 'number' && window.SafeBotHistory && window.SafeBotHistory.evict) {
+      window.SafeBotHistory.evict(roomId, targetSeq);
+    }
+  }
+  async function initiateDelete(target) {
+    if (!target || !target.id) return;
+    applyDelete(target.id, target.seq);
+    const env = { safebot_delete_v1: true, target_id: target.id, target_seq: target.seq };
+    try { postProtocol(JSON.stringify(env)); } catch (e) { console.warn('[safebot delete] post failed', e); }
+  }
+
   const histReqsHandled = new Set();     // req_ids we've already answered (as responder)
   const histReqsPending = new Map();     // req_id -> {resolved:false} for requests we sent
   const histResponsesSeen = new Set();   // req_ids a response was observed for (by anyone)
@@ -865,6 +929,17 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       if (p && !p.resolved) console.log('[safebot hist] no peer answered req', reqId);
       histReqsPending.delete(reqId);
     }, 8000);
+  }
+
+  function tryApplyDeleteEnvelope(msg) {
+    const plaintext = C.decrypt(key, msg.ciphertext, msg.nonce);
+    if (plaintext === null) return false;
+    if (!plaintext.startsWith('{')) return false;
+    let env;
+    try { env = JSON.parse(plaintext); } catch (_) { return false; }
+    if (!env || env.safebot_delete_v1 !== true) return false;
+    applyDelete(String(env.target_id || ''), typeof env.target_seq === 'number' ? env.target_seq : undefined);
+    return true;
   }
 
   function tryApplyHistEnvelope(msg) {
@@ -970,6 +1045,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         // #3 from codex-qa review). tryApplyAdoptEnvelope returns true
         // when the message was an adopt handled by us and must not render.
         if (tryApplyAdoptEnvelope(obj)) return;
+        if (tryApplyDeleteEnvelope(obj)) return;
         if (tryApplyHistEnvelope(obj)) return;
         renderMessage(obj);
       }
