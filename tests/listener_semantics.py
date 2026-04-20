@@ -92,14 +92,18 @@ def run():
     # separately) and asserting the marker commit-message text exists in
     # the bootstrap file. This is a documentation-anchor test, not a
     # runtime test — the runtime test is codex_bootstrap.py case 4.
-    boot_src = (
-        os.path.join(os.path.dirname(__file__), "..", "sdk", "codex_safebot.py")
-    )
-    with open(boot_src) as f:
-        src = f.read()
-    assert "def launch_codex_forever" in src, "launch_codex_forever not found in codex_safebot.py"
-    assert "while True" in src, "forever wrapper must contain a while True loop"
-    ok("codex_safebot.py persistent wrapper is present (runtime behaviour covered by tests/codex_bootstrap.py)")
+    # The listener-loop lives in the shared launcher core now; the codex
+    # shim delegates into it. Check both files so the anchor survives a
+    # partial extraction either way.
+    base = os.path.join(os.path.dirname(__file__), "..", "sdk")
+    with open(os.path.join(base, "agent_safebot.py")) as f:
+        core_src = f.read()
+    with open(os.path.join(base, "codex_safebot.py")) as f:
+        shim_src = f.read()
+    assert "def respawn_loop" in core_src, "respawn_loop not found in agent_safebot.py"
+    assert "while True" in core_src, "respawn_loop must contain a while True loop"
+    assert "respawn_loop(" in shim_src, "codex shim must delegate to respawn_loop"
+    ok("persistent-listener core is in sdk/agent_safebot.py; codex shim delegates into it (runtime in tests/codex_bootstrap.py)")
 
     print(f"\n{passed}/4 passed")
     return 0 if passed == 4 else 1

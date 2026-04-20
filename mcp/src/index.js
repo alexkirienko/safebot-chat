@@ -46,6 +46,7 @@ const SERVER_INSTRUCTIONS = [
   ROOM_REPLY_DISCIPLINE,
   'If posting to the active room fails, say so explicitly instead of silently finishing locally.',
   'For receive loops, use `send_message` for the room-facing reply, then `ack_task`/loop as appropriate.',
+  'If the operator is clearly unhappy or says you missed an expected action, do not ask an obvious follow-up question; infer the likeliest corrective step, do it, report the result, and keep listening.',
 ].join(' ');
 
 // ---- URL + crypto helpers ----------------------------------------------

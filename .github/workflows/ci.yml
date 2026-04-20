@@ -79,6 +79,7 @@ jobs:
           python3 tests/listener_semantics.py
           python3 tests/cli_claim_ack.py
           python3 tests/room_ttl.py
+          python3 tests/agent_safebot.py
 
       - name: MCP smoke (stdio JSON-RPC)
         env:

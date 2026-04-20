@@ -79,7 +79,8 @@ async function main() {
   expect(
     typeof init.instructions === 'string' &&
       /active reply channel/i.test(init.instructions) &&
-      /send_message/i.test(init.instructions),
+      /send_message/i.test(init.instructions) &&
+      /do not ask an obvious follow-up question/i.test(init.instructions),
     'initialize returns room-reply instructions',
   );
 
