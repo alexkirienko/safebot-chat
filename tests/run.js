@@ -442,6 +442,82 @@ function noLogsAudit() {
   pass('server source passes no-logs audit');
 }
 
+async function e2eReplyConvergence() {
+  log('E2E: reply-ref child-before-parent convergence');
+  const browser = await chromium.launch();
+  try {
+    const page = await (await browser.newContext()).newPage();
+    const crypto = require('node:crypto');
+    const rid = 'RPLCONV' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
+    await page.goto(`${BASE}/room/${rid}#k=${key}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => !!(window.__safebotTest && window.__safebotTest.renderMessage), null, { timeout: 10000 });
+
+    const ghost = crypto.randomUUID();
+    const childId = crypto.randomUUID();
+
+    // Case 1 — child first, parent unknown.
+    await page.evaluate(({ childId, ghost }) => {
+      window.__safebotTest.renderMessage({
+        id: childId, seq: 1001, sender: 'bob', ts: Date.now(),
+        text: 'replied before parent known', reply_to: ghost,
+      });
+    }, { childId, ghost });
+    let s = await page.evaluate((childId) => {
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(childId)}"] .bubble__reply-ref`);
+      return {
+        isDead: el ? el.classList.contains('is-dead') : null,
+        label: el && el.querySelector('.bubble__reply-ref__label') ? el.querySelector('.bubble__reply-ref__label').textContent : null,
+        previewText: el && el.querySelector('.bubble__reply-ref__preview') ? el.querySelector('.bubble__reply-ref__preview').textContent : null,
+      };
+    }, childId);
+    if (s.isDead) throw new Error('unknown-parent ref must not be marked dead');
+    if (!/earlier message/i.test(s.label || '')) throw new Error('unknown-parent label: ' + JSON.stringify(s));
+    if (s.previewText) throw new Error('unknown-parent ref leaked cached text: ' + s.previewText);
+    pass('reply-ref: unknown parent → generic placeholder, no cached text');
+
+    // Case 2 — parent becomes known, ref upgrades.
+    await page.evaluate((ghost) => {
+      window.__safebotTest.rememberMessage(
+        { id: ghost, seq: 1000, sender: 'alice', ts: Date.now() - 1000 },
+        'the original parent message text',
+      );
+    }, ghost);
+    s = await page.evaluate((childId) => {
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(childId)}"] .bubble__reply-ref`);
+      return {
+        label: el && el.querySelector('.bubble__reply-ref__label') ? el.querySelector('.bubble__reply-ref__label').textContent : null,
+        previewText: el && el.querySelector('.bubble__reply-ref__preview') ? el.querySelector('.bubble__reply-ref__preview').textContent : null,
+        isDead: el ? el.classList.contains('is-dead') : null,
+      };
+    }, childId);
+    if (s.isDead) throw new Error('upgraded ref must not be marked dead');
+    if (!/alice/i.test(s.label || '')) throw new Error('upgraded ref missing parent sender: ' + JSON.stringify(s));
+    if (!/original parent message/.test(s.previewText || '')) throw new Error('upgraded ref missing snippet: ' + JSON.stringify(s));
+    pass('reply-ref: parent becomes known → upgrade to sender + snippet');
+
+    // Case 3 — parent deleted, ref converges to deleted placeholder.
+    await page.evaluate((ghost) => window.__safebotTest.applyDelete(ghost, 1000), ghost);
+    s = await page.evaluate((childId) => {
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(childId)}"] .bubble__reply-ref`);
+      return {
+        label: el && el.querySelector('.bubble__reply-ref__label') ? el.querySelector('.bubble__reply-ref__label').textContent : null,
+        previewText: el && el.querySelector('.bubble__reply-ref__preview') ? el.querySelector('.bubble__reply-ref__preview').textContent : null,
+        isDead: el ? el.classList.contains('is-dead') : null,
+      };
+    }, childId);
+    if (!s.isDead) throw new Error('ref must be marked dead after parent delete');
+    if (!/deleted/i.test(s.label || '')) throw new Error('dead label: ' + JSON.stringify(s));
+    if (s.previewText) throw new Error('dead ref must drop cached preview: ' + s.previewText);
+    pass('reply-ref: parent delete → "deleted message" placeholder, no cached text');
+
+    await browser.close();
+  } catch (e) {
+    await browser.close();
+    throw e;
+  }
+}
+
 async function main() {
   await startServer();
   try {
@@ -449,6 +525,7 @@ async function main() {
     await serverTests();
     await e2eTests();
     await e2eRoomUIChecks();
+    await e2eReplyConvergence();
     await pythonSdkTest();
     noLogsAudit();
   } finally {
