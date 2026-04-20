@@ -762,6 +762,83 @@ async function e2eReactionsAdversarial() {
   }
 }
 
+async function e2eReactionsV2() {
+  log('E2E: reactions v2 — custom emoji + formatted actor tooltip');
+  const browser = await chromium.launch();
+  const crypto = require('node:crypto');
+  try {
+    const page = await (await browser.newContext()).newPage();
+    const rid = 'RXV2' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
+    await page.goto(`${BASE}/room/${rid}#k=${key}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => !!window.__safebotTest_reactions, null, { timeout: 10000 });
+
+    const id = crypto.randomUUID();
+    await page.evaluate((id) => {
+      window.__safebotTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'target' });
+    }, id);
+
+    // 1. Custom (non-preset) emoji aggregates like any other and orders
+    //    after presets.
+    await page.evaluate((id) => {
+      const R = window.__safebotTest_reactions;
+      R.applyReact(id, '👍', 'add', 'alice');
+      R.applyReact(id, '🎉', 'add', 'bob');       // not in REACTION_PRESETS
+      R.applyReact(id, '🎉', 'add', 'carol');
+      R.applyReact(id, 'ship', 'add', 'dave');   // plain text reaction
+    }, id);
+    const pills = await page.evaluate((id) => {
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+      return Array.from(el.querySelectorAll('.bubble__react-pill')).map((p) => ({
+        emoji: (p.querySelector('.bubble__react-emoji') || {}).textContent,
+        count: (p.querySelector('.bubble__react-count') || {}).textContent,
+        title: p.title,
+      }));
+    }, id);
+    if (pills.length !== 3) throw new Error('expected 3 pills, got: ' + JSON.stringify(pills));
+    // Preset (👍) must come before extras; extras sorted alphabetically
+    // by unicode codepoint → "ship" (s) before "🎉" (emoji).
+    if (pills[0].emoji !== '👍') throw new Error('preset order broken: ' + JSON.stringify(pills));
+    const extraEmojis = pills.slice(1).map((p) => p.emoji);
+    if (JSON.stringify(extraEmojis) !== JSON.stringify(['ship', '🎉'])) {
+      throw new Error('custom emoji sort order broken: ' + JSON.stringify(extraEmojis));
+    }
+    pass('reactions v2: custom emoji + text react aggregate + stable order (presets first, extras alpha)');
+
+    // 2. Actor tooltip formatting: singleton, small list, "N more" path.
+    const tooltipId = crypto.randomUUID();
+    await page.evaluate((id) => {
+      window.__safebotTest.renderMessage({ id, seq: 2, sender: 'alice', ts: Date.now(), text: 'tooltip' });
+      const R = window.__safebotTest_reactions;
+      // Singleton.
+      R.applyReact(id, '🔥', 'add', 'solo');
+      // Small list (3 names).
+      R.applyReact(id, '😂', 'add', 'alice');
+      R.applyReact(id, '😂', 'add', 'bob');
+      R.applyReact(id, '😂', 'add', 'carol');
+      // Big list (7 names → "alice, bob, carol, dave and 3 more").
+      for (const n of ['a','b','c','d','e','f','g']) R.applyReact(id, '😮', 'add', n);
+    }, tooltipId);
+    const titles = await page.evaluate((id) => {
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+      const out = {};
+      for (const p of el.querySelectorAll('.bubble__react-pill')) {
+        out[(p.querySelector('.bubble__react-emoji') || {}).textContent] = p.title;
+      }
+      return out;
+    }, tooltipId);
+    if (!/^solo reacted with 🔥$/.test(titles['🔥'] || '')) throw new Error('singleton tooltip: ' + titles['🔥']);
+    if (!/^alice, bob, carol reacted with 😂$/.test(titles['😂'] || '')) throw new Error('small-list tooltip: ' + titles['😂']);
+    if (!/^a, b, c, d and 3 more reacted with 😮$/.test(titles['😮'] || '')) throw new Error('N-more tooltip: ' + titles['😮']);
+    pass('reactions v2: actor tooltip formats singleton / small list / "N more" correctly');
+
+    await browser.close();
+  } catch (e) {
+    await browser.close();
+    throw e;
+  }
+}
+
 async function main() {
   await startServer();
   try {
@@ -772,6 +849,7 @@ async function main() {
     await e2eReplyConvergence();
     await e2eReactionsV1();
     await e2eReactionsAdversarial();
+    await e2eReactionsV2();
     await pythonSdkTest();
     noLogsAudit();
   } finally {

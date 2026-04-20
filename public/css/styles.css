@@ -775,6 +775,12 @@ section { padding: 80px 0; position: relative; }
   cursor: pointer;
 }
 .bubble__react-pick:hover { background: var(--d-surface-3, rgba(255,255,255,0.08)); }
+.bubble__react-pick--custom {
+  font-size: 15px; font-weight: 700;
+  color: var(--d-text-3);
+  border-left: 1px solid var(--d-border); margin-left: 2px;
+}
+.bubble__react-pick--custom:hover { color: var(--d-text-1); }
 
 .bubble__reactions {
   display: flex; flex-wrap: wrap; gap: 4px;

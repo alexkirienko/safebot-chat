@@ -1153,7 +1153,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       pill.type = 'button';
       pill.className = 'bubble__react-pill' + (mine.has(emoji) ? ' is-mine' : '');
       pill.innerHTML = `<span class="bubble__react-emoji">${emoji}</span><span class="bubble__react-count">${m.get(emoji).size}</span>`;
-      pill.title = Array.from(m.get(emoji)).join(', ');
+      pill.title = _formatActorTooltip(emoji, m.get(emoji));
       pill.addEventListener('click', (ev) => {
         ev.preventDefault(); ev.stopPropagation();
         toggleOwnReaction(targetId, emoji);
@@ -1196,6 +1196,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (_openPicker && _openPicker.parentNode) _openPicker.parentNode.removeChild(_openPicker);
     const pick = document.createElement('div');
     pick.className = 'bubble__react-picker';
+    const closePicker = () => {
+      if (pick.parentNode) pick.parentNode.removeChild(pick);
+      if (_openPicker === pick) _openPicker = null;
+    };
     for (const emoji of REACTION_PRESETS) {
       const b = document.createElement('button');
       b.type = 'button';
@@ -1206,24 +1210,50 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         ev.preventDefault();
         ev.stopPropagation();
         toggleOwnReaction(targetId, emoji);
-        if (pick.parentNode) pick.parentNode.removeChild(pick);
-        if (_openPicker === pick) _openPicker = null;
+        closePicker();
       });
       pick.appendChild(b);
     }
+    // "+" custom-emoji button: prompt for any string (skin-tone
+    // variant, zwj sequence, single letter, anything). No server-side
+    // normalization — the emoji ID is literal text, so identical input
+    // → identical aggregation key across clients.
+    const plus = document.createElement('button');
+    plus.type = 'button';
+    plus.className = 'bubble__react-pick bubble__react-pick--custom';
+    plus.textContent = '+';
+    plus.title = 'Custom reaction';
+    plus.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const raw = (prompt('Custom emoji (paste any unicode character or short text, e.g. 🎉 or ship):') || '').trim();
+      if (!raw) { closePicker(); return; }
+      if (raw.length > 24) { alert('Keep custom reactions short — 24 chars max.'); return; }
+      toggleOwnReaction(targetId, raw);
+      closePicker();
+    });
+    pick.appendChild(plus);
     bubble.appendChild(pick);
     _openPicker = pick;
     setTimeout(() => {
       const onDoc = (e) => {
         if (!_openPicker) { document.removeEventListener('click', onDoc, true); return; }
         if (!_openPicker.contains(e.target)) {
-          if (_openPicker.parentNode) _openPicker.parentNode.removeChild(_openPicker);
-          _openPicker = null;
+          closePicker();
           document.removeEventListener('click', onDoc, true);
         }
       };
       document.addEventListener('click', onDoc, true);
     }, 0);
+  }
+
+  function _formatActorTooltip(emoji, actors) {
+    const arr = Array.from(actors || []);
+    if (arr.length === 0) return emoji;
+    if (arr.length === 1) return `${arr[0]} reacted with ${emoji}`;
+    if (arr.length <= 5) return `${arr.join(', ')} reacted with ${emoji}`;
+    const head = arr.slice(0, 4).join(', ');
+    return `${head} and ${arr.length - 4} more reacted with ${emoji}`;
   }
 
   function tryApplyReactEnvelope(msg) {
