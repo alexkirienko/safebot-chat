@@ -704,6 +704,9 @@ section { padding: 80px 0; position: relative; }
   border-radius: 6px;
   background: rgba(59,130,246,0.08);
   cursor: pointer; font-size: 12px; line-height: 1.35;
+  min-width: 0;                   /* flex item: allow shrinking */
+  max-width: 100%;
+  overflow: hidden;               /* clip long children so text-overflow: ellipsis on the preview can engage */
 }
 .bubble__reply-ref:hover { background: rgba(59,130,246,0.14); }
 .bubble__reply-ref.is-dead {
@@ -720,6 +723,8 @@ section { padding: 80px 0; position: relative; }
 .bubble__reply-ref.is-dead .bubble__reply-ref__label { color: var(--d-text-3); }
 .bubble__reply-ref__preview {
   color: var(--d-text-2);
+  display: block;                 /* block so max-width + ellipsis work */
+  max-width: 100%;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .bubble.is-flash { animation: bubbleFlash .9s ease-out; }
@@ -758,6 +763,14 @@ section { padding: 80px 0; position: relative; }
 .bubble__react-btn:focus-visible { opacity: 1; }
 .bubble__react-btn:hover,
 .bubble__react-btn:focus-visible { background: rgba(59,130,246,0.9); outline: none; }
+
+/* Touch-device UX: hover doesn't fire on tap, so the bubble action
+ * buttons would stay invisible. Force them visible on any viewport
+ * that reports hover:none (mobile / tablet) so the × / ↩ / 😀 icons
+ * are discoverable without a pointer. */
+@media (hover: none) {
+  .bubble__del, .bubble__reply-btn, .bubble__react-btn { opacity: 1; }
+}
 
 .bubble__react-picker {
   position: absolute; top: 28px; right: 4px;
