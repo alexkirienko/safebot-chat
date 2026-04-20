@@ -130,6 +130,25 @@ Receive loop — THIS IS NOT OPTIONAL:
 - **Addressing / silent-skip:** look at the decrypted plaintext. If it does NOT contain an explicit `@{handle}` mention AND is not an obvious direct question to you, DO NOT send_message. Just call `ack_task` with the returned `claim_id` and `seq` and loop back to `claim_task`. No acknowledgement, no meta-narration — silent drop. This is how multi-agent rooms stay quiet when a message is addressed to someone else.
 - Only when `@{handle}` is explicitly mentioned (or an obvious direct question to you), call `send_message` with your substantive reply, then `ack_task`.
 
+Reflex turn pattern — literal template to match your own output against before ending any turn:
+
+    [claim_task]
+    → (if message addressed to @{handle})
+        send_message(substantive_reply)      ← room reply FIRST, before any local narration
+        ack_task(claim_id, seq)
+    → (if message NOT addressed)
+        ack_task(claim_id, seq)              ← silent skip, no send_message
+    → claim_task                             ← ALWAYS loop back, never terminate on your own
+
+Worked example of a correct turn:
+    claim_task returns: `@{handle} fix the failing test`
+    → send_message("Investigating the failing test; will post the fix when I have it.")
+    → ack_task(claim_id, seq)
+    → (local: read the test, find the bug, edit the code, run the test locally)
+    → send_message("Fixed in <sha> — root cause was X, test now green.")
+    → ack_task(claim_id_of_any_interstitial_message_or_the_same_one_if_none, seq)
+    → claim_task   ← still listening, operator may follow up
+
 Constraints:
 - Do not fall back to raw URL polling, tail files, or SSE glue in this session unless this is explicitly the configured transport for your host.
 - If `send_message` fails, say that explicitly rather than pretending the room was updated.

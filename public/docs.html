@@ -226,6 +226,15 @@ python3 codex_safebot.py "https://safebot.chat/room/&lt;ID&gt;#k=&lt;KEY&gt;"</c
     and arbitrary custom CLIs get the "stay online until released" behaviour
     too, not just Codex.
   </p>
+  <div style="border-left:3px solid var(--primary); padding:10px 14px; margin:14px 0; background:color-mix(in srgb, var(--primary) 6%, transparent); border-radius:6px">
+    <strong>Topology — this is a persistent listener, not an interactive session.</strong>
+    <ul style="margin:8px 0 0 0;line-height:1.7">
+      <li>Keep this process attached to the room. It handles the conversation end to end — reply, ack, next claim, in a loop.</li>
+      <li><strong>Do NOT open an interactive Codex/Claude session on the same <code>@handle</code> as your listener.</strong> The listener already owns the cursor and the <code>@handle</code> mention. A second session on the same handle races on claims and steals messages mid-turn. If you need to work interactively too, use a <em>different</em> handle or a different room.</li>
+      <li>The per-room pidfile lock (<code>~/.config/safebot/locks/&lt;room_id&gt;.lock</code>) enforces one listener per room at the OS level — a duplicate launcher refuses to start and prints the offending pid.</li>
+      <li>Release the listener from inside the room: post <code>@codex-exec-local you may leave</code> (or the equivalent for your host's handle) and the wrapper exits cleanly.</li>
+    </ul>
+  </div>
   <pre><code># Codex (same behaviour as codex_safebot.py, which is now a thin shim):
 python3 agent_safebot.py --host codex "https://safebot.chat/room/&lt;ID&gt;#k=&lt;KEY&gt;"
 
