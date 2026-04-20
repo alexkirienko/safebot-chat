@@ -219,6 +219,65 @@ def case_custom_sentinel_honoured() -> None:
         ok("custom --release-sentinel round-trips through template AND stops respawn loop")
 
 
+def case_lock_refuses_second_listener() -> None:
+    """Per-room pidfile lock: second launcher on the same room must refuse
+    to start and print the first launcher's pid so the operator can kill it.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        log = Path(td) / "log"
+        bindir = Path(td) / "bin"
+        bindir.mkdir()
+        make_exec(bindir / "fake-host", FAKE_HOST)
+        env = {
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "TEST_LOG": str(log),
+        }
+        # Use a unique room id per test run so we don't collide with
+        # other test rooms or stale locks from developer machines.
+        import secrets
+        room = "LOCK" + secrets.token_hex(3).upper()
+        url = f"https://safebot.chat/room/{room}#k=xyz"
+        # First launcher: runs fake-host which hangs until we kill it.
+        # Easiest: use TEST_HOST_COUNT so it exits with rc=0 after 1
+        # invocation, then keeps respawning every 2s. Spawn and wait
+        # until we see the ownership banner on stderr (Popen's stderr
+        # is captured by subprocess).
+        env1 = {**env, "TEST_HOST_COUNT": str(Path(td) / "c1"), "TEST_HOST_MAX": "9999",
+                "TEST_HOST_EXIT_RC": "0"}
+        first_env = os.environ.copy(); first_env.update(env1)
+        first = subprocess.Popen(
+            [sys.executable, str(SCRIPT), "--host", "custom", "--cmd", "fake-host", url],
+            cwd=ROOT, env=first_env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            # Wait for banner line to appear on stderr (up to 5 s).
+            import time as _t
+            deadline = _t.time() + 5
+            banner = ""
+            while _t.time() < deadline:
+                line = first.stderr.readline()
+                if not line: _t.sleep(0.05); continue
+                banner += line
+                if "ONLY listener" in line:
+                    break
+            assert "ONLY listener" in banner, f"first launcher did not print banner: {banner!r}"
+            # Second launcher: should refuse with the first's pid.
+            second = subprocess.run(
+                [sys.executable, str(SCRIPT), "--host", "custom", "--cmd", "fake-host",
+                 "--once", url],
+                cwd=ROOT, env=first_env, text=True, capture_output=True, timeout=10,
+            )
+            assert second.returncode != 0, (second.returncode, second.stderr)
+            assert "already attached" in second.stderr, second.stderr
+            assert str(first.pid) in second.stderr, \
+                f"refusal msg should carry first.pid={first.pid}: {second.stderr!r}"
+        finally:
+            try: first.terminate(); first.wait(timeout=5)
+            except Exception: first.kill()
+        ok("room-scoped lock refuses a second listener and names the offending pid")
+
+
 def main() -> int:
     case_custom_once()
     case_release_sentinel()
@@ -226,6 +285,7 @@ def main() -> int:
     case_print_prompt()
     case_claude_code_addendum()
     case_fast_fail_cap()
+    case_lock_refuses_second_listener()
     return 0
 
 

@@ -34,6 +34,8 @@ from agent_safebot import (  # noqa: E402
     DEFAULT_MCP_NAME,
     DEFAULT_RELEASE_SENTINEL,
     CodexAdapter,
+    RoomLock,
+    _room_id_from_url,
     build_prompt,
     respawn_loop,
 )
@@ -58,10 +60,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true", help="Single-shot mode: launch Codex once and let it exit normally after that turn.")
     mode.add_argument("--forever", action="store_true", help="Backward-compatible alias for the default persistent listener mode.")
-    p.add_argument("codex_args", nargs=argparse.REMAINDER, help="Extra arguments passed to `codex` after `--`.")
-    ns = p.parse_args(argv)
-    if ns.codex_args and ns.codex_args[0] == "--":
-        ns.codex_args = ns.codex_args[1:]
+    # Pre-split host extras at the first explicit `--` (see the matching
+    # comment in agent_safebot.py). This stops the "wrapper flags AFTER
+    # room_url get swallowed by REMAINDER" footgun.
+    try:
+        sep = argv.index("--")
+        wrapper_argv, codex_extras = list(argv[:sep]), list(argv[sep + 1:])
+    except ValueError:
+        wrapper_argv, codex_extras = list(argv), []
+    ns = p.parse_args(wrapper_argv)
+    ns.codex_args = codex_extras
     if not ns.install_only and not ns.room_url:
         p.error("room_url is required unless --install-only is used")
     return ns
@@ -81,11 +89,28 @@ def main(argv: list[str] | None = None) -> int:
     host.ensure_ready(base=args.base, mcp_name=args.mcp_name, force=args.force)
     if args.install_only:
         return 0
+    # Share the same pidfile-lock guardrail as agent_safebot.py so the
+    # "one listener per room" invariant holds regardless of which
+    # wrapper the user invoked.
+    lock = None
+    room_id = _room_id_from_url(args.room_url)
+    if os.environ.get("SAFEBOT_SKIP_LOCK") != "1":
+        lock = RoomLock(room_id)
+        lock.acquire()
     prompt = build_prompt(host, args.room_url, release_sentinel=DEFAULT_RELEASE_SENTINEL)
+    print(
+        f"[codex_safebot] PID={os.getpid()} is the ONLY listener for room "
+        f"{room_id} (handle=@{host.handle}). "
+        f"Any other Codex/Claude/Gemini session MUST NOT claim_task this handle.",
+        file=sys.stderr,
+    )
     extras = list(args.codex_args)
     def _argv():
         return host.build_argv(args.room_url, prompt, extras)
-    return respawn_loop(_argv, release_sentinel=DEFAULT_RELEASE_SENTINEL, once=args.once)
+    try:
+        return respawn_loop(_argv, release_sentinel=DEFAULT_RELEASE_SENTINEL, once=args.once)
+    finally:
+        if lock is not None: lock.release()
 
 
 if __name__ == "__main__":

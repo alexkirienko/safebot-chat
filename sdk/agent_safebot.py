@@ -47,6 +47,60 @@ def fail(msg: str, code: int = 1) -> "NoReturn":
     raise SystemExit(code)
 
 
+def _room_id_from_url(url: str) -> str:
+    """Extract the opaque room id from a SafeBot URL for pidfile naming.
+    Tolerant — unknown/malformed forms return a sha1-ish digest so the
+    lock still works without crashing the caller early.
+    """
+    import re, hashlib
+    m = re.match(r"^https?://[^/]+/room/([A-Za-z0-9_-]{4,64})", url or "")
+    if m: return m.group(1)
+    return "unknown-" + hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:10]
+
+
+class RoomLock:
+    """Per-room OS file lock. Refuses to start if another launcher is
+    already holding the lock for the same room. Auto-released when the
+    process dies (fcntl semantics) — no cleanup cron, no stale-pid races.
+    Second-launcher case gets a concrete pid so the operator knows what
+    to kill.
+    """
+
+    def __init__(self, room_id: str):
+        self.room_id = room_id
+        self.path = os.path.join(os.path.expanduser("~"), ".config", "safebot", "locks", f"{room_id}.lock")
+        self._fd: int | None = None
+
+    def acquire(self) -> None:
+        import fcntl
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self._fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Another launcher holds the lock — read the pid it wrote for
+            # a useful error message.
+            try:
+                other = os.read(self._fd, 32).decode("ascii", "replace").strip()
+            except Exception:
+                other = "unknown"
+            os.close(self._fd); self._fd = None
+            fail(
+                f"refusing to start: another agent_safebot listener is already attached to room {self.room_id} (pid={other}). "
+                f"Kill it first: `kill {other}` (or use `ps aux | grep agent_safebot` to confirm)."
+            )
+        # Write our pid so the next attempt can surface it.
+        os.ftruncate(self._fd, 0)
+        os.lseek(self._fd, 0, os.SEEK_SET)
+        os.write(self._fd, f"{os.getpid()}\n".encode("ascii"))
+
+    def release(self) -> None:
+        if self._fd is None: return
+        try: os.close(self._fd)
+        except Exception: pass
+        self._fd = None
+
+
 def require_cmd(name: str, hint: str = "") -> str:
     path = shutil.which(name)
     if path:
@@ -371,10 +425,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--release-sentinel", default=DEFAULT_RELEASE_SENTINEL, help=f"Sentinel string that tells the wrapper to stop. Default: {DEFAULT_RELEASE_SENTINEL}")
     p.add_argument("--print-prompt", action="store_true", help="Print the rendered prompt and exit; do not launch the host.")
     p.add_argument("--once", action="store_true", help="Single-shot mode: launch the host once and exit with its rc.")
-    p.add_argument("host_args", nargs=argparse.REMAINDER, help="Extra arguments passed to the host binary after `--`.")
-    ns = p.parse_args(argv)
-    if ns.host_args and ns.host_args[0] == "--":
-        ns.host_args = ns.host_args[1:]
+    # Pre-split host extras at the first explicit `--` so wrapper flags
+    # placed AFTER the room_url aren't swallowed into REMAINDER. argparse
+    # REMAINDER was the source of a footgun where e.g.
+    #   agent_safebot.py URL --handle qa-bot
+    # treated `--handle qa-bot` as host passthrough instead of a wrapper
+    # flag. Requiring `--` as the host-args boundary is the explicit,
+    # order-independent contract.
+    try:
+        sep = argv.index("--")
+        wrapper_argv, host_extras = list(argv[:sep]), list(argv[sep + 1:])
+    except ValueError:
+        wrapper_argv, host_extras = list(argv), []
+    ns = p.parse_args(wrapper_argv)
+    ns.host_args = host_extras
     if not ns.install_only and not ns.print_prompt and not ns.room_url:
         p.error("room_url is required unless --install-only or --print-prompt is used")
     return ns
@@ -395,10 +459,30 @@ def main(argv: list[str] | None = None) -> int:
     host.ensure_ready(base=args.base, mcp_name=args.mcp_name, force=args.force)
     if args.install_only:
         return 0
+    # Room-scoped pidfile lock: exactly one listener per room. Another
+    # launcher attached to the same room gets a concrete pid and exits.
+    # Skippable via SAFEBOT_SKIP_LOCK=1 for power-users who intentionally
+    # run multiple agents with different @handles on the same room.
+    lock: "RoomLock | None" = None
+    room_id = _room_id_from_url(args.room_url)
+    if os.environ.get("SAFEBOT_SKIP_LOCK") != "1":
+        lock = RoomLock(room_id)
+        lock.acquire()
     prompt = build_prompt(host, args.room_url or "", release_sentinel=args.release_sentinel)
+    # Ownership banner — first line so `ps aux` / journalctl review
+    # immediately shows who owns the room.
+    print(
+        f"[agent_safebot] PID={os.getpid()} is the ONLY listener for room "
+        f"{room_id} (handle=@{host.handle}). "
+        f"Any other Codex/Claude/Gemini session MUST NOT claim_task this handle.",
+        file=sys.stderr,
+    )
     def _argv():
         return host.build_argv(args.room_url, prompt, list(args.host_args))
-    return respawn_loop(_argv, release_sentinel=args.release_sentinel, once=args.once)
+    try:
+        return respawn_loop(_argv, release_sentinel=args.release_sentinel, once=args.once)
+    finally:
+        if lock is not None: lock.release()
 
 
 if __name__ == "__main__":
