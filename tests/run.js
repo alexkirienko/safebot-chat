@@ -1152,9 +1152,7 @@ async function e2ePermalink() {
     ];
     for (const { bad, expectFragment } of hostileLinks) {
       await page4.goto(bad, { waitUntil: 'domcontentloaded' });
-      await page4.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
-      // Wait a beat so any wrongly-armed observer would kick.
-      await page4.waitForTimeout(300);
+      await page4.waitForFunction(() => !!(window.__safebotTest && window.__safebotTest.pendingJumpId), null, { timeout: 10000 });
       const state = await page4.evaluate(() => ({
         hash: location.hash,
         flashed: !!document.querySelector('.bubble.is-flash'),
@@ -1162,14 +1160,24 @@ async function e2ePermalink() {
           const t = document.getElementById('toast');
           return t && (t.textContent || '').includes('not in the loaded history');
         })(),
+        // The real distinguishing observable: did the regex accept the
+        // string at all? If pendingJumpId is empty right after room.js
+        // initialisation finishes, the jump machinery never armed and
+        // there's nothing to time out on later. If it's non-empty, the
+        // regex MIS-accepted and the test should fail even if the 6 s
+        // miss timer hasn't fired yet.
+        pending: window.__safebotTest.pendingJumpId(),
       }));
+      if (state.pending) {
+        throw new Error(`malformed m= armed the jump machinery (pendingJumpId=${JSON.stringify(state.pending)}); regex accepted it: ${bad}`);
+      }
       if (!state.hash.includes(expectFragment)) {
         throw new Error(`malformed m= was mutated by the client; expected fragment to still contain ${JSON.stringify(expectFragment)}, got hash=${state.hash}`);
       }
       if (state.toast) throw new Error('malformed m= should not surface missing-target toast: ' + bad);
       if (state.flashed) throw new Error('malformed m= should not flash any bubble: ' + bad);
     }
-    pass('permalink: malformed m= fragments silently dropped by regex gate (URL untouched, no flash, no toast)');
+    pass('permalink: malformed m= fragments silently dropped by regex gate (pendingJumpId empty, URL untouched, no flash, no toast)');
 
     await ctx4.close();
   } finally {

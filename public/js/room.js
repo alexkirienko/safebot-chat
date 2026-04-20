@@ -1675,6 +1675,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     rememberMessage: (m, text) => rememberMessage(m, text),
     applyDelete: (id, seq) => applyDelete(id, seq),
     buildMessageLink,
+    // Whether the jump machinery armed a pending target on this load.
+    // Lets the test distinguish "regex rejected the malformed m=" (no
+    // arm) from "armed but still waiting for the 6 s miss timeout".
+    pendingJumpId: () => pendingJumpId,
     knownMessages,
     deletedIds,
   };
