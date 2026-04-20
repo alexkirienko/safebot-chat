@@ -50,7 +50,7 @@
       const db = await open();
       await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE, 'readwrite');
-        tx.objectStore(STORE).put({
+        const rec = {
           roomId,
           seq: msg.seq,
           id: msg.id,
@@ -58,7 +58,9 @@
           sender_verified: !!msg.sender_verified,
           ts: msg.ts || Date.now(),
           text: typeof msg.text === 'string' ? msg.text : '',
-        });
+        };
+        if (typeof msg.ttl_ms === 'number' && msg.ttl_ms > 0) rec.ttl_ms = msg.ttl_ms;
+        tx.objectStore(STORE).put(rec);
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
         tx.onabort = () => reject(tx.error || new Error('tx aborted'));
@@ -107,11 +109,15 @@
     const maxItems = (opts && opts.maxItems) || 200;
     const maxBytes = (opts && opts.maxBytes) || 80 * 1024;
     const all = await loadAll(roomId);
+    const nowTs = Date.now();
     const out = [];
     let bytes = 0;
     let seen = 0;
     for (const m of all) {
       if (m.seq <= after) continue;
+      // Skip disappearing-messages that have already expired — no point
+      // shipping a dead message to a peer joining later.
+      if (m.ttl_ms && (m.ts + m.ttl_ms) <= nowTs) continue;
       // Skip protocol envelopes that older clients may have cached.
       const t = m.text || '';
       if (t && t.charCodeAt(0) === 123 /* '{' */) {
@@ -125,11 +131,14 @@
       }
       seen += 1;
       if (seen <= skip) continue;
+      // carry ttl_ms along so the recipient can continue scheduling
+      // expiry from ts + ttl_ms using the same clock.
       const item = {
         seq: m.seq, id: m.id, sender: m.sender || '',
         sender_verified: !!m.sender_verified,
         ts: m.ts || 0, text: m.text || '',
       };
+      if (m.ttl_ms) item.ttl_ms = m.ttl_ms;
       const approx = (item.text || '').length + (item.sender || '').length + 80;
       if (bytes + approx > maxBytes) break;
       bytes += approx;
@@ -150,6 +159,31 @@
       added += 1;
     }
     return added;
+  }
+
+  // Delete every cached item for a room whose ts+ttl_ms <= now. Called
+  // once at room open and periodically while the tab stays open so
+  // disappearing-messages don't linger in IDB after expiry.
+  async function sweepExpired(roomId) {
+    const now = Date.now();
+    try {
+      const db = await open();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        const store = tx.objectStore(STORE);
+        const range = IDBKeyRange.bound([roomId, 0], [roomId, Number.MAX_SAFE_INTEGER]);
+        const req = store.openCursor(range);
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (!cur) return;
+          const v = cur.value;
+          if (v && v.ttl_ms && (v.ts + v.ttl_ms) <= now) cur.delete();
+          cur.continue();
+        };
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (_) { /* best-effort */ }
   }
 
   // Remove a single cached item (by seq) — used to evict stale protocol
@@ -192,5 +226,5 @@
     }
   }
 
-  global.SafeBotHistory = { save, loadAll, lastSeq, clear, serialize, mergeAll, evict };
+  global.SafeBotHistory = { save, loadAll, lastSeq, clear, serialize, mergeAll, evict, sweepExpired };
 }(typeof window !== 'undefined' ? window : globalThis));

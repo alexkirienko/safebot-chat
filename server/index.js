@@ -579,7 +579,9 @@ function buildExcludeSet(handle, extra) {
   return s;
 }
 function buildClaimEnvelope(m) {
-  return { seq: m.seq, id: m.id, sender: m.sender, ciphertext: m.ciphertext, nonce: m.nonce, ts: m.ts, sender_verified: !!m.sender_verified };
+  const e = { seq: m.seq, id: m.id, sender: m.sender, ciphertext: m.ciphertext, nonce: m.nonce, ts: m.ts, sender_verified: !!m.sender_verified };
+  if (m.ttl_ms) e.ttl_ms = m.ttl_ms;
+  return e;
 }
 
 // Verify a room message carries a valid signed-sender envelope. Blob is
@@ -1069,8 +1071,21 @@ function getOrCreateRoom(roomId) {
 
 function releaseRoomBytes(msg) { if (msg && msg._bytes) ROOM_GLOBAL_BYTES = Math.max(0, ROOM_GLOBAL_BYTES - msg._bytes); }
 function pruneRecent(room) {
-  const cutoff = Date.now() - RECENT_TTL_MS;
+  const now = Date.now();
+  const cutoff = now - RECENT_TTL_MS;
   while (room.recent.length && room.recent[0].ts < cutoff) releaseRoomBytes(room.recent.shift());
+  // Disappearing-messages: drop any msg whose per-message ttl has elapsed.
+  // Walks the whole buffer (small, <=2000) so TTL'd messages from the
+  // middle get evicted, not just the oldest. Soft optimisation — clients
+  // also schedule their own expiry; this keeps late joiners from seeing
+  // an already-dead message if the server has been idle.
+  for (let i = room.recent.length - 1; i >= 0; i--) {
+    const m = room.recent[i];
+    if (m.ttl_ms && (m.ts + m.ttl_ms) <= now) {
+      releaseRoomBytes(m);
+      room.recent.splice(i, 1);
+    }
+  }
   while (room.recent.length > RECENT_MAX) releaseRoomBytes(room.recent.shift());
 }
 
@@ -1127,6 +1142,11 @@ function validMessage(msg) {
   if (!isCanonicalBase64(msg.nonce, 24)) return false;
   try { if (Buffer.from(msg.ciphertext, 'base64').length > MAX_MSG_BYTES) return false; } catch (_) { return false; }
   if (msg.sender != null && (typeof msg.sender !== 'string' || msg.sender.length > 64)) return false;
+  if (msg.ttl_ms != null) {
+    if (typeof msg.ttl_ms !== 'number' || !Number.isFinite(msg.ttl_ms)) return false;
+    // 0 = no expiry (same as unset). Otherwise clamp to [30 s, 1 year].
+    if (msg.ttl_ms !== 0 && (msg.ttl_ms < 30_000 || msg.ttl_ms > 366 * 24 * 3600 * 1000)) return false;
+  }
   return true;
 }
 
@@ -2031,6 +2051,7 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
     ts: Date.now(),
     _bytes: ctBytes,
   };
+  if (typeof req.body.ttl_ms === 'number' && req.body.ttl_ms > 0) msg.ttl_ms = req.body.ttl_ms;
   ROOM_GLOBAL_BYTES += ctBytes;
   room.recent.push(msg);
   pruneRecent(room);
@@ -2821,6 +2842,7 @@ function handleWs(ws, roomId, ip) {
       ts: Date.now(),
       _bytes: ctBytes,
     };
+    if (typeof msg.ttl_ms === 'number' && msg.ttl_ms > 0) out.ttl_ms = msg.ttl_ms;
     ROOM_GLOBAL_BYTES += ctBytes;
     room.recent.push(out);
     pruneRecent(room);

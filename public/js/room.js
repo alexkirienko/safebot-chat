@@ -639,6 +639,35 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       bubble.appendChild(del);
     }
 
+    // Disappearing-messages badge + expiry schedule. If the message
+    // already expired by the time we render (e.g., late IDB replay of a
+    // stale entry), route through applyDelete so it's treated like a
+    // tombstone — never draws the bubble.
+    const ttlMs = Number(m.ttl_ms) || 0;
+    if (ttlMs > 0 && m.ts) {
+      const expiresAt = m.ts + ttlMs;
+      const remaining = expiresAt - Date.now();
+      if (remaining <= 0) {
+        // Expired before render — evict and skip.
+        applyDelete(m.id, m.seq);
+        return;
+      }
+      const badge = document.createElement('span');
+      badge.className = 'bubble__ttl';
+      badge.title = 'Auto-deletes in ' + ttlLabel(ttlMs);
+      badge.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>' + ttlLabel(ttlMs);
+      bubble.appendChild(badge);
+      // setTimeout can't be trusted past ~24.8 days (int32 overflow in
+      // older browsers). Cap the per-fire at 1h and re-arm if needed —
+      // simpler than polling a timer wheel.
+      const tick = () => {
+        const rem = expiresAt - Date.now();
+        if (rem <= 0) { applyDelete(m.id, m.seq); return; }
+        setTimeout(tick, Math.min(rem, 60 * 60 * 1000));
+      };
+      setTimeout(tick, Math.min(remaining, 60 * 60 * 1000));
+    }
+
     chatListEl.appendChild(bubble);
     // Auto-scroll on every new bubble. If the user scrolled up to read
     // history and doesn't want to be yanked, use the page scroll (most
@@ -654,6 +683,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       window.SafeBotHistory.save(roomId, {
         id: m.id, seq: m.seq, sender: m.sender,
         sender_verified: m.sender_verified, ts: m.ts, text: plaintext,
+        ttl_ms: ttlMs || undefined,
       });
     }
   }
@@ -854,6 +884,105 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   // they ride on the shared room key, so only room members can read them.
   // Intercept BEFORE renderMessage so protocol envelopes never surface as
   // chat bubbles or get persisted as chat entries.
+  // --- Disappearing messages --------------------------------------------
+  // Per-room TTL: new messages carry `ttl_ms` at the server-envelope level
+  // (outside ciphertext). Server soft-evicts from room.recent in
+  // pruneRecent; clients schedule setTimeout + reuse applyDelete on fire.
+  const TTL_KEY = `safebot:ttl:${roomId}`;
+  const TTL_PRESETS = [
+    { label: 'Off',     ms: 0 },
+    { label: '30s',     ms: 30 * 1000 },
+    { label: '5m',      ms: 5 * 60 * 1000 },
+    { label: '1h',      ms: 60 * 60 * 1000 },
+    { label: '8h',      ms: 8 * 60 * 60 * 1000 },
+    { label: '1d',      ms: 24 * 60 * 60 * 1000 },
+    { label: '1w',      ms: 7 * 24 * 60 * 60 * 1000 },
+    { label: '1mo',     ms: 30 * 24 * 60 * 60 * 1000 },
+  ];
+  let currentTtlMs = Math.max(0, Number(localStorage.getItem(TTL_KEY) || 0) || 0);
+  function ttlLabel(ms) {
+    if (!ms) return 'Off';
+    const preset = TTL_PRESETS.find((p) => p.ms === ms);
+    if (preset) return preset.label;
+    // Custom — render as the shortest sensible unit.
+    const s = Math.round(ms / 1000);
+    if (s < 60) return s + 's';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + 'm';
+    const h = Math.round(m / 60);
+    if (h < 24) return h + 'h';
+    return Math.round(h / 24) + 'd';
+  }
+  function saveTtl(ms) {
+    currentTtlMs = Math.max(0, Number(ms) || 0);
+    try { localStorage.setItem(TTL_KEY, String(currentTtlMs)); } catch (_) {}
+    const lbl = document.getElementById('ttl-picker-label');
+    if (lbl) lbl.textContent = ttlLabel(currentTtlMs);
+    const btn = document.getElementById('ttl-picker');
+    if (btn) btn.classList.toggle('is-active', currentTtlMs > 0);
+  }
+  function parseCustomTtl(raw) {
+    const s = String(raw || '').trim().toLowerCase();
+    const m = s.match(/^(\d+(?:\.\d+)?)\s*(s|sec|m|min|h|hr|d|day|w|wk|mo)$/);
+    if (!m) return null;
+    const n = Number(m[1]);
+    const unit = m[2];
+    const mult = unit.startsWith('s') ? 1000
+               : unit.startsWith('min') || unit === 'm' ? 60 * 1000
+               : unit.startsWith('h') ? 60 * 60 * 1000
+               : unit.startsWith('d') ? 24 * 60 * 60 * 1000
+               : unit.startsWith('w') ? 7 * 24 * 60 * 60 * 1000
+               : 30 * 24 * 60 * 60 * 1000;
+    const ms = Math.round(n * mult);
+    // Server clamps to [1 min, 1 year]. Accept local 30s too (server
+    // accepts 0 as "no ttl" and >=60s as ttl; <60s gets rejected
+    // server-side — warn user here).
+    if (ms < 30_000) { alert('Minimum TTL is 30 seconds.'); return null; }
+    if (ms > 366 * 24 * 3600 * 1000) { alert('Maximum TTL is 1 year.'); return null; }
+    return ms;
+  }
+  (function wireTtlPicker() {
+    const btn = document.getElementById('ttl-picker');
+    if (!btn) return;
+    saveTtl(currentTtlMs);
+    let pop = null;
+    function closePop() { if (pop && pop.parentNode) pop.parentNode.removeChild(pop); pop = null; }
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      if (pop) { closePop(); return; }
+      pop = document.createElement('div');
+      pop.className = 'ttl-pop';
+      for (const p of TTL_PRESETS) {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'ttl-pop__row' + (p.ms === currentTtlMs ? ' is-active' : '');
+        row.textContent = p.label === 'Off' ? 'Off (keep forever)' : 'Auto-delete after ' + p.label;
+        row.addEventListener('click', () => { saveTtl(p.ms); closePop(); });
+        pop.appendChild(row);
+      }
+      const custom = document.createElement('button');
+      custom.type = 'button';
+      custom.className = 'ttl-pop__row ttl-pop__row--custom';
+      custom.textContent = 'Custom…';
+      custom.addEventListener('click', () => {
+        const raw = prompt('Custom TTL — e.g. 45s, 10m, 2h, 3d, 2w, 6mo (min 1 min):');
+        if (!raw) { closePop(); return; }
+        const ms = parseCustomTtl(raw);
+        if (ms !== null) saveTtl(ms);
+        closePop();
+      });
+      pop.appendChild(custom);
+      const r = btn.getBoundingClientRect();
+      pop.style.left = r.left + 'px';
+      pop.style.top = (r.bottom + 4) + 'px';
+      document.body.appendChild(pop);
+      setTimeout(() => {
+        const onDoc = (e) => { if (pop && !pop.contains(e.target) && e.target !== btn) { closePop(); document.removeEventListener('click', onDoc, true); } };
+        document.addEventListener('click', onDoc, true);
+      }, 0);
+    });
+  })();
+
   // --- Delete-for-everyone -----------------------------------------------
   // Small protocol on top of the room key: any participant can post a
   // delete envelope referencing a target message id + seq. All clients
@@ -1150,9 +1279,16 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   (async () => {
     if (window.SafeBotHistory) {
       try {
+        // Evict expired disappearing-messages BEFORE replay so we don't
+        // flash-render then immediately tombstone them.
+        if (window.SafeBotHistory.sweepExpired) await window.SafeBotHistory.sweepExpired(roomId);
         const cached = await window.SafeBotHistory.loadAll(roomId);
         for (const c of cached) renderMessage(c);
       } catch (_) {}
+      // Periodic sweep so long-lived tabs don't accumulate stale entries.
+      setInterval(() => {
+        try { window.SafeBotHistory.sweepExpired && window.SafeBotHistory.sweepExpired(roomId); } catch (_) {}
+      }, 60 * 1000);
     }
     connect();
   })();
@@ -1201,6 +1337,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       body.signed_only = true;
     }
     firstMessageSent = true;
+    // Disappearing-messages TTL: server clamps, client schedules expiry on
+    // echo via renderMessage. Only attach if > 0 so the wire stays clean
+    // for the common "Off" case.
+    if (currentTtlMs > 0) body.ttl_ms = currentTtlMs;
     const payload = JSON.stringify(body);
     if (ws && ws.readyState === 1) ws.send(payload);
     else sendQueue.push(payload);
