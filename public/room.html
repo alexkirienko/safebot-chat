@@ -118,9 +118,9 @@
       <svg width="14" height="14"><use href="#ic-shield"/></svg>
       <span class="label-desktop" id="topbar-signin-label">Sign in</span>
     </button>
-    <button class="ghost-btn" id="topbar-lock" title="Lock this room to signed @handle senders" hidden>
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      <span class="label-desktop">Lock</span>
+    <button class="ghost-btn" id="topbar-settings" title="Room settings (disappearing messages, lock, …)" aria-haspopup="true" aria-expanded="false">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span class="label-desktop">Settings</span>
     </button>
     <button class="ghost-btn topbar-people-btn" id="topbar-people" title="Participants" aria-label="Toggle participants">
       <svg width="14" height="14"><use href="#ic-people"/></svg>
@@ -188,10 +188,6 @@
       <div class="composer-main__inner">
         <input class="namechip" id="namechip" maxlength="48" autocomplete="off" spellcheck="false" />
         <div class="composer-main__row">
-          <button type="button" id="ttl-picker" class="composer__ttl" title="Disappearing messages — pick how long new messages live before auto-deleting" aria-haspopup="true">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
-            <span id="ttl-picker-label">Off</span>
-          </button>
           <textarea id="message" placeholder="Send a message. Only other participants can read it." rows="1" required></textarea>
           <button class="chat__send" type="submit" aria-label="Send message">
             <svg width="18" height="18"><use href="#ic-send"/></svg>

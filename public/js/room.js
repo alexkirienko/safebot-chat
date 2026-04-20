@@ -916,10 +916,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   function saveTtl(ms) {
     currentTtlMs = Math.max(0, Number(ms) || 0);
     try { localStorage.setItem(TTL_KEY, String(currentTtlMs)); } catch (_) {}
-    const lbl = document.getElementById('ttl-picker-label');
-    if (lbl) lbl.textContent = ttlLabel(currentTtlMs);
-    const btn = document.getElementById('ttl-picker');
-    if (btn) btn.classList.toggle('is-active', currentTtlMs > 0);
+    refreshSettingsBadge();
   }
   function parseCustomTtl(raw) {
     const s = String(raw || '').trim().toLowerCase();
@@ -941,47 +938,15 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (ms > 366 * 24 * 3600 * 1000) { alert('Maximum TTL is 1 year.'); return null; }
     return ms;
   }
-  (function wireTtlPicker() {
-    const btn = document.getElementById('ttl-picker');
+  // Badge on the gear button when any non-default setting is active
+  // (TTL on, or Lock armed/applied). Helps users see "something's set"
+  // without opening the pop.
+  function refreshSettingsBadge() {
+    const btn = document.getElementById('topbar-settings');
     if (!btn) return;
-    saveTtl(currentTtlMs);
-    let pop = null;
-    function closePop() { if (pop && pop.parentNode) pop.parentNode.removeChild(pop); pop = null; }
-    btn.addEventListener('click', (ev) => {
-      ev.preventDefault();
-      if (pop) { closePop(); return; }
-      pop = document.createElement('div');
-      pop.className = 'ttl-pop';
-      for (const p of TTL_PRESETS) {
-        const row = document.createElement('button');
-        row.type = 'button';
-        row.className = 'ttl-pop__row' + (p.ms === currentTtlMs ? ' is-active' : '');
-        row.textContent = p.label === 'Off' ? 'Off (keep forever)' : 'Auto-delete after ' + p.label;
-        row.addEventListener('click', () => { saveTtl(p.ms); closePop(); });
-        pop.appendChild(row);
-      }
-      const custom = document.createElement('button');
-      custom.type = 'button';
-      custom.className = 'ttl-pop__row ttl-pop__row--custom';
-      custom.textContent = 'Custom…';
-      custom.addEventListener('click', () => {
-        const raw = prompt('Custom TTL — e.g. 45s, 10m, 2h, 3d, 2w, 6mo (min 1 min):');
-        if (!raw) { closePop(); return; }
-        const ms = parseCustomTtl(raw);
-        if (ms !== null) saveTtl(ms);
-        closePop();
-      });
-      pop.appendChild(custom);
-      const r = btn.getBoundingClientRect();
-      pop.style.left = r.left + 'px';
-      pop.style.top = (r.bottom + 4) + 'px';
-      document.body.appendChild(pop);
-      setTimeout(() => {
-        const onDoc = (e) => { if (pop && !pop.contains(e.target) && e.target !== btn) { closePop(); document.removeEventListener('click', onDoc, true); } };
-        document.addEventListener('click', onDoc, true);
-      }, 0);
-    });
-  })();
+    const active = currentTtlMs > 0 || roomSignedOnly || pendingSignedOnlyLock;
+    btn.classList.toggle('is-active', active);
+  }
 
   // --- Delete-for-everyone -----------------------------------------------
   // Small protocol on top of the room key: any participant can post a
@@ -1249,7 +1214,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       else if (obj.type === 'locked') {
         roomSignedOnly = true;
         pendingSignedOnlyLock = false;
-        refreshLockUI();
+        refreshSettingsBadge(); if (settingsPop) renderSettingsPop();
         if (!identity && signedOverlay) signedOverlay.hidden = false;
       }
       else if (obj.type === 'rename' && obj.from && obj.to && obj.from !== me) {
@@ -1345,7 +1310,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       // Optimistic local flip — server confirms on ack. If it rejects
       // we'll re-discover via /status on next probe.
       roomSignedOnly = true;
-      refreshLockUI();
+      refreshSettingsBadge(); if (settingsPop) renderSettingsPop();
     }
     firstMessageSent = true;
     // Disappearing-messages TTL: server clamps, client schedules expiry on
@@ -1403,13 +1368,9 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   const signinLabel = document.getElementById('topbar-signin-label');
   const signedOverlay = document.getElementById('signed-overlay');
   const overlaySigninBtn = document.getElementById('signed-overlay-signin');
-  const lockBtn = document.getElementById('topbar-lock');
 
-  // Lock state: the room's current signedOnly flag (from /status +
-  // first-post acks). The Lock button is only shown when the user is
-  // signed-in AND the room isn't already locked.
   let roomSignedOnly = false;
-  let pendingSignedOnlyLock = false; // armed by Lock button, consumed by next send()
+  let pendingSignedOnlyLock = false;
   function refreshIdentityUI() {
     if (identity) {
       if (signinLabel) signinLabel.textContent = '@' + identity.handle;
@@ -1418,44 +1379,115 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       if (signinLabel) signinLabel.textContent = 'Sign in';
       if (signinBtn) signinBtn.title = 'Sign in as @handle to enable verified-sender mode';
     }
-    refreshLockUI();
+    if (settingsPop) renderSettingsPop(); // keep open popover in sync
+    refreshSettingsBadge();
   }
-  function refreshLockUI() {
-    if (!lockBtn) return;
+
+  // --- Settings popover (gear icon): TTL + Lock ------------------------
+  let settingsPop = null;
+  function closeSettingsPop() {
+    if (settingsPop && settingsPop.parentNode) settingsPop.parentNode.removeChild(settingsPop);
+    settingsPop = null;
+    const btn = document.getElementById('topbar-settings');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+  function renderSettingsPop() {
+    if (!settingsPop) return;
+    settingsPop.innerHTML = '';
+    // Section 1: Disappearing messages
+    const h1 = document.createElement('div');
+    h1.className = 'settings-pop__head';
+    h1.textContent = 'Disappearing messages';
+    settingsPop.appendChild(h1);
+    const sub1 = document.createElement('div');
+    sub1.className = 'settings-pop__sub';
+    sub1.textContent = 'Auto-delete your new messages after:';
+    settingsPop.appendChild(sub1);
+    for (const p of TTL_PRESETS) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'settings-pop__row' + (p.ms === currentTtlMs ? ' is-active' : '');
+      row.textContent = p.label === 'Off' ? 'Off (keep forever)' : p.label;
+      row.addEventListener('click', () => { saveTtl(p.ms); renderSettingsPop(); });
+      settingsPop.appendChild(row);
+    }
+    const custom = document.createElement('button');
+    custom.type = 'button';
+    custom.className = 'settings-pop__row settings-pop__row--alt';
+    custom.textContent = 'Custom…';
+    custom.addEventListener('click', () => {
+      const raw = prompt('Custom TTL — e.g. 45s, 10m, 2h, 3d, 2w, 6mo (min 30s):');
+      if (!raw) return;
+      const ms = parseCustomTtl(raw);
+      if (ms !== null) { saveTtl(ms); renderSettingsPop(); }
+    });
+    settingsPop.appendChild(custom);
+
+    // Section 2: Lock (only when signed in; shows state regardless).
+    const sep = document.createElement('div');
+    sep.className = 'settings-pop__sep';
+    settingsPop.appendChild(sep);
+    const h2 = document.createElement('div');
+    h2.className = 'settings-pop__head';
+    h2.textContent = 'Room lock';
+    settingsPop.appendChild(h2);
+    const sub2 = document.createElement('div');
+    sub2.className = 'settings-pop__sub';
     if (roomSignedOnly) {
-      lockBtn.hidden = false;
-      lockBtn.disabled = true;
-      lockBtn.title = 'Room is locked to signed @handle senders.';
-      lockBtn.classList.add('is-locked');
-      const lbl = lockBtn.querySelector('.label-desktop');
-      if (lbl) lbl.textContent = 'Locked';
+      sub2.textContent = 'This room is locked to signed @handle senders.';
+      settingsPop.appendChild(sub2);
     } else if (!identity) {
-      lockBtn.hidden = true;
+      sub2.textContent = 'Sign in with an @handle to lock this room.';
+      settingsPop.appendChild(sub2);
     } else {
-      lockBtn.hidden = false;
-      lockBtn.disabled = false;
-      lockBtn.classList.remove('is-locked');
-      lockBtn.title = pendingSignedOnlyLock
-        ? 'Lock armed — will apply with your next message. Click to cancel.'
-        : 'Lock this room to signed @handle senders. Applies with your next message.';
-      const lbl = lockBtn.querySelector('.label-desktop');
-      if (lbl) lbl.textContent = pendingSignedOnlyLock ? 'Lock armed' : 'Lock';
-      lockBtn.classList.toggle('is-armed', pendingSignedOnlyLock);
+      sub2.textContent = pendingSignedOnlyLock
+        ? 'Armed — will lock with your next message. Click to cancel.'
+        : 'Applies with your next message. Cannot be undone.';
+      settingsPop.appendChild(sub2);
+      const lockRow = document.createElement('button');
+      lockRow.type = 'button';
+      lockRow.className = 'settings-pop__row settings-pop__row--alt' + (pendingSignedOnlyLock ? ' is-active' : '');
+      lockRow.textContent = pendingSignedOnlyLock ? 'Cancel lock' : 'Lock to signed @handle senders';
+      lockRow.addEventListener('click', () => {
+        if (pendingSignedOnlyLock) {
+          pendingSignedOnlyLock = false;
+        } else {
+          if (!confirm('Lock this room so only signed @handle participants can post? Applies with your next message and cannot be undone.')) return;
+          pendingSignedOnlyLock = true;
+        }
+        refreshSettingsBadge();
+        renderSettingsPop();
+      });
+      settingsPop.appendChild(lockRow);
     }
   }
-  if (lockBtn) {
-    lockBtn.addEventListener('click', (ev) => {
+  (function wireSettingsBtn() {
+    const btn = document.getElementById('topbar-settings');
+    if (!btn) return;
+    refreshSettingsBadge();
+    btn.addEventListener('click', (ev) => {
       ev.preventDefault();
-      if (roomSignedOnly || !identity) return;
-      if (!pendingSignedOnlyLock) {
-        if (!confirm('Lock this room so only signed @handle participants can post? This applies with your next message and cannot be undone.')) return;
-        pendingSignedOnlyLock = true;
-      } else {
-        pendingSignedOnlyLock = false;
-      }
-      refreshLockUI();
+      if (settingsPop) { closeSettingsPop(); return; }
+      settingsPop = document.createElement('div');
+      settingsPop.className = 'settings-pop';
+      document.body.appendChild(settingsPop);
+      renderSettingsPop();
+      const r = btn.getBoundingClientRect();
+      settingsPop.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+      settingsPop.style.top = (r.bottom + 4) + 'px';
+      btn.setAttribute('aria-expanded', 'true');
+      setTimeout(() => {
+        const onDoc = (e) => {
+          if (!settingsPop) { document.removeEventListener('click', onDoc, true); return; }
+          if (!settingsPop.contains(e.target) && !btn.contains(e.target)) {
+            closeSettingsPop();
+            document.removeEventListener('click', onDoc, true);
+          }
+        };
+        document.addEventListener('click', onDoc, true);
+      }, 0);
     });
-  }
+  })();
   refreshIdentityUI();
 
   async function doSignIn() {
@@ -1548,7 +1580,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       if (s && s.signed_only) {
         roomSignedOnly = true;
         if (!identity && signedOverlay) signedOverlay.hidden = false;
-        refreshLockUI();
+        refreshSettingsBadge(); if (settingsPop) renderSettingsPop();
       }
     } catch (_) {}
   })();
