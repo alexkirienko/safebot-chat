@@ -1147,6 +1147,26 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   // hasn't signed in. When present, every outgoing message is signed so the
   // server can stamp `@handle` + sender_verified:true on the envelope.
   let identity = window.SafeBotIdentity && window.SafeBotIdentity.load();
+  // Heal the server<->browser identity mismatch on load. If we carry a
+  // local keypair for @handle, make sure the server still knows this
+  // exact sign_pub (it may have been wiped, or a different browser may
+  // have taken the handle). Idempotent on the happy path; on a genuine
+  // collision we clear the stale local keypair so later signed sends
+  // don't silently 401.
+  (async () => {
+    if (!identity) return;
+    try {
+      const res = await identity.register(location.origin);
+      if (!res.ok && res.status === 409) {
+        const staleHandle = identity.handle;
+        console.warn('[safebot identity] local @' + staleHandle + ' is stale — someone else owns it. Clearing local keypair.');
+        window.SafeBotIdentity.forget();
+        identity = null;
+        if (typeof refreshIdentityUI === 'function') refreshIdentityUI();
+        showToast('Local @' + staleHandle + ' identity was stale — cleared, you are anonymous now.', true);
+      }
+    } catch (_) { /* network hiccup; ignore */ }
+  })();
   let firstMessageSent = false;
   async function send(plaintext) {
     plaintext = (plaintext || '').trim();
