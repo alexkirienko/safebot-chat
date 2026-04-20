@@ -898,25 +898,31 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   let histRequestedThisSession = false;  // fire request exactly once per tab open
 
   function postProtocol(plaintext) {
-    // Minimal ciphertext post that bypasses the signed_only first-message
-    // toggle. Used by the history-sync protocol so our protocol frames
-    // don't accidentally flip the room into signed-only mode or eat the
-    // user's explicit signed-only first-post.
+    // Protocol envelopes (hist_req / hist_resp / delete) go over HTTP POST
+    // rather than WS. Empirically Cloudflare tunnel drops signed WS
+    // frames somewhere above ~20KB silently; the HTTP path accepts up
+    // to the 128KB ciphertext cap. Bonus: bypasses the signed_only
+    // first-message toggle the same way WS already did.
     const { ciphertext, nonce } = C.encrypt(key, plaintext);
     const body = { sender: me, ciphertext, nonce };
-    function actuallySend() {
+    function doPost() {
       const payload = JSON.stringify(body);
-      const rs = ws && ws.readyState;
-      console.log('[safebot hist] postProtocol send: ws.readyState=', rs, 'payload.len=', payload.length, 'signed=', 'sender_handle' in body);
-      if (rs === 1) ws.send(payload); else { sendQueue.push(payload); console.warn('[safebot hist] ws not open, queued'); }
+      console.log('[safebot hist] postProtocol POST: payload.len=', payload.length, 'signed=', 'sender_handle' in body);
+      fetch(`/api/rooms/${roomId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      }).then((r) => {
+        if (!r.ok) console.warn('[safebot hist] POST failed:', r.status);
+      }).catch((e) => console.warn('[safebot hist] POST err', e));
     }
     if (identity) {
       identity.signRoomMessage(roomId, ciphertext)
-        .then((sigFields) => { Object.assign(body, sigFields); actuallySend(); })
-        .catch((e) => { console.warn('[safebot hist] sign failed', e); actuallySend(); });
+        .then((sigFields) => { Object.assign(body, sigFields); doPost(); })
+        .catch((e) => { console.warn('[safebot hist] sign failed', e); doPost(); });
       return;
     }
-    actuallySend();
+    doPost();
   }
 
   async function requestHistoryFromPeers() {
