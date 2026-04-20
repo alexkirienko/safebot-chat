@@ -1152,7 +1152,21 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       const pill = document.createElement('button');
       pill.type = 'button';
       pill.className = 'bubble__react-pill' + (mine.has(emoji) ? ' is-mine' : '');
-      pill.innerHTML = `<span class="bubble__react-emoji">${emoji}</span><span class="bubble__react-count">${m.get(emoji).size}</span>`;
+      // DOM-build the pill with textContent / createElement instead of
+      // template-string innerHTML. Custom reactions accept arbitrary
+      // short text, which means a malicious room participant could send
+      // `<img src=x onerror=alert(1)>` or similar and innerHTML would
+      // execute it (codex-qa blocker on 5bded3e). textContent is
+      // HTML-safe by construction; both emoji and actor-tooltip paths
+      // now flow through it.
+      const emojiEl = document.createElement('span');
+      emojiEl.className = 'bubble__react-emoji';
+      emojiEl.textContent = String(emoji);
+      const countEl = document.createElement('span');
+      countEl.className = 'bubble__react-count';
+      countEl.textContent = String(m.get(emoji).size);
+      pill.appendChild(emojiEl);
+      pill.appendChild(countEl);
       pill.title = _formatActorTooltip(emoji, m.get(emoji));
       pill.addEventListener('click', (ev) => {
         ev.preventDefault(); ev.stopPropagation();

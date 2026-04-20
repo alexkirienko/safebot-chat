@@ -832,6 +832,37 @@ async function e2eReactionsV2() {
     if (!/^a, b, c, d and 3 more reacted with 😮$/.test(titles['😮'] || '')) throw new Error('N-more tooltip: ' + titles['😮']);
     pass('reactions v2: actor tooltip formats singleton / small list / "N more" correctly');
 
+    // 3. Hostile-input regression: a malicious room participant sends
+    //    an HTML-looking string as a custom reaction. The pill must
+    //    render the literal text — NOT inject <img>/<script> into the
+    //    DOM. Covers the blocker from codex-qa on 5bded3e.
+    const hostileId = crypto.randomUUID();
+    const hostile = '<img src=x onerror=window.__xss=1>';
+    const hostileSibling = '<script>window.__xss2=1</script>';
+    await page.evaluate(({ id, hostile, hostileSibling }) => {
+      window.__safebotTest.renderMessage({ id, seq: 3, sender: 'alice', ts: Date.now(), text: 'xss-probe' });
+      const R = window.__safebotTest_reactions;
+      R.applyReact(id, hostile, 'add', 'mallory');
+      R.applyReact(id, hostileSibling, 'add', 'mallory');
+    }, { id: hostileId, hostile, hostileSibling });
+    const xssState = await page.evaluate((id) => {
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+      const pills = Array.from(el.querySelectorAll('.bubble__react-pill'));
+      return {
+        xssFired: !!window.__xss || !!window.__xss2,
+        injectedImg: el.querySelector('img[src="x"]') !== null,
+        injectedScript: el.querySelector('script') !== null,
+        pillTexts: pills.map((p) => (p.querySelector('.bubble__react-emoji') || {}).textContent),
+      };
+    }, hostileId);
+    if (xssState.xssFired) throw new Error('XSS payload fired — renderer injected raw HTML');
+    if (xssState.injectedImg) throw new Error('reaction emoji was parsed as <img> element');
+    if (xssState.injectedScript) throw new Error('reaction emoji was parsed as <script> element');
+    // Literal text must appear as-is inside the .bubble__react-emoji span.
+    if (!xssState.pillTexts.includes(hostile)) throw new Error('literal hostile text not present as textContent: ' + JSON.stringify(xssState.pillTexts));
+    if (!xssState.pillTexts.includes(hostileSibling)) throw new Error('literal script text not present as textContent: ' + JSON.stringify(xssState.pillTexts));
+    pass('reactions v2: hostile HTML in custom reaction renders as literal text, NOT injected HTML');
+
     await browser.close();
   } catch (e) {
     await browser.close();
