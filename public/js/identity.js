@@ -102,8 +102,12 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (r.status === 201 || r.status === 409) return { ok: true, status: r.status };
+      if (r.status === 201) return { ok: true, status: 201 };
       const txt = await r.text().catch(() => '');
+      // 409 means the handle exists with SOMEONE ELSE'S sign_pub — our
+      // freshly-minted keypair won't match, and every signed message
+      // we post will fail verifyRoomSenderSig with 401. Surface this as
+      // an error instead of silently keeping a doomed keypair.
       return { ok: false, status: r.status, error: txt };
     }
   }
