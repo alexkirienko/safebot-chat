@@ -2031,9 +2031,14 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
   if (hasSignedFields && !verifyRoomSenderSig(req.body, roomId)) {
     return res.status(401).json({ error: 'bad sender_sig' });
   }
-  if (!room.signedOnly && req.body.signed_only === true && room.recent.length === 0) {
-    if (!hasSignedFields) return res.status(400).json({ error: 'signed_only requires sender_sig on first message' });
+  // signed_only can be flipped at any point by a signed poster (previously
+  // required room.recent.length === 0, which broke the natural "invite
+  // unsigned agents → promote → THEN lock" flow). Requires a valid
+  // sender_sig so only a registered @handle can lock the room.
+  if (!room.signedOnly && req.body.signed_only === true) {
+    if (!hasSignedFields) return res.status(400).json({ error: 'signed_only requires sender_sig' });
     room.signedOnly = true;
+    broadcast(room, { type: 'locked' });
   }
   if (room.signedOnly && !hasSignedFields) {
     return res.status(403).json({ error: 'signed_only: this room requires sender_sig from a registered @handle' });
@@ -2814,16 +2819,13 @@ function handleWs(ws, roomId, ip) {
       try { ws.send(JSON.stringify({ type: 'error', code: 401, error: 'bad sender_sig' })); } catch (_) {}
       return;
     }
-    if (!room.signedOnly && msg.signed_only === true && room.recent.length === 0) {
+    if (!room.signedOnly && msg.signed_only === true) {
       if (!wsHasSig) {
-        // Parity with HTTP: asking to lock a room without a sig is a 400,
-        // not a silent downgrade to an ordinary message. Previously this
-        // branch required `wsHasSig` and fell through, accepting the frame
-        // as unsigned — which was a transport-dependent room-locking bug.
-        try { ws.send(JSON.stringify({ type: 'error', code: 400, error: 'signed_only requires sender_sig on first message' })); } catch (_) {}
+        try { ws.send(JSON.stringify({ type: 'error', code: 400, error: 'signed_only requires sender_sig' })); } catch (_) {}
         return;
       }
       room.signedOnly = true;
+      broadcast(room, { type: 'locked' });
     }
     if (room.signedOnly && !wsHasSig) {
       try { ws.send(JSON.stringify({ type: 'error', code: 403, error: 'signed_only' })); } catch (_) {}

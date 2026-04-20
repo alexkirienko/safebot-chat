@@ -526,13 +526,6 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   function renderMessage(m) {
     if (renderedIds.has(m.id)) return;
     renderedIds.add(m.id);
-    // Any actual message — from cache, WS, or hist_resp — means the
-    // signed-only one-shot on our next send will be ignored server-side.
-    // Hide the toggle to stop advertising a no-op.
-    if (!roomHasMessages) {
-      roomHasMessages = true;
-      refreshIdentityUI();
-    }
 
     touchParticipant(m.sender);
 
@@ -1253,6 +1246,12 @@ key  share #k=… separately (URL fragment never reaches the server)`;
           for (const n of obj.names) touchParticipant(n);
         }
       }
+      else if (obj.type === 'locked') {
+        roomSignedOnly = true;
+        pendingSignedOnlyLock = false;
+        refreshLockUI();
+        if (!identity && signedOverlay) signedOverlay.hidden = false;
+      }
       else if (obj.type === 'rename' && obj.from && obj.to && obj.from !== me) {
         // A live participant changed their name. Drop the old alias and
         // promote the new one so the sidebar shows one row, not two.
@@ -1337,11 +1336,16 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         Object.assign(body, sigFields);
       } catch (e) { console.error('[safebot] sign failed:', e); }
     }
-    // signed_only is a one-shot flip applied on the very first message of
-    // a fresh room. Honoured server-side only when room.recent is empty.
-    const toggle = document.getElementById('signed-only-toggle');
-    if (!firstMessageSent && toggle && toggle.checked && identity) {
+    // signed_only flip: if the user armed the lock from the topbar, carry
+    // the flag on this outgoing message. Server honours it for a signed
+    // post and then the room is locked for subsequent non-signed frames.
+    if (pendingSignedOnlyLock && identity) {
       body.signed_only = true;
+      pendingSignedOnlyLock = false;
+      // Optimistic local flip — server confirms on ack. If it rejects
+      // we'll re-discover via /status on next probe.
+      roomSignedOnly = true;
+      refreshLockUI();
     }
     firstMessageSent = true;
     // Disappearing-messages TTL: server clamps, client schedules expiry on
@@ -1398,24 +1402,59 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   const signinBtn = document.getElementById('topbar-signin');
   const signinLabel = document.getElementById('topbar-signin-label');
   const signedOverlay = document.getElementById('signed-overlay');
-  const signedOnlyRow = document.getElementById('signed-only-row');
-  const signedOnlyToggle = document.getElementById('signed-only-toggle');
   const overlaySigninBtn = document.getElementById('signed-overlay-signin');
+  const lockBtn = document.getElementById('topbar-lock');
 
-  // Signed-only toggle is a one-shot that the server only honours when
-  // room.recent is empty on the very first POST. Once ANY message
-  // exists in the room it's a no-op — hide it to avoid misleading UI.
-  let roomHasMessages = false;
+  // Lock state: the room's current signedOnly flag (from /status +
+  // first-post acks). The Lock button is only shown when the user is
+  // signed-in AND the room isn't already locked.
+  let roomSignedOnly = false;
+  let pendingSignedOnlyLock = false; // armed by Lock button, consumed by next send()
   function refreshIdentityUI() {
     if (identity) {
       if (signinLabel) signinLabel.textContent = '@' + identity.handle;
       if (signinBtn) signinBtn.title = 'Signed in as @' + identity.handle + '. Click to forget.';
-      if (signedOnlyRow) signedOnlyRow.hidden = roomHasMessages;
     } else {
       if (signinLabel) signinLabel.textContent = 'Sign in';
       if (signinBtn) signinBtn.title = 'Sign in as @handle to enable verified-sender mode';
-      if (signedOnlyRow) signedOnlyRow.hidden = true;
     }
+    refreshLockUI();
+  }
+  function refreshLockUI() {
+    if (!lockBtn) return;
+    if (roomSignedOnly) {
+      lockBtn.hidden = false;
+      lockBtn.disabled = true;
+      lockBtn.title = 'Room is locked to signed @handle senders.';
+      lockBtn.classList.add('is-locked');
+      const lbl = lockBtn.querySelector('.label-desktop');
+      if (lbl) lbl.textContent = 'Locked';
+    } else if (!identity) {
+      lockBtn.hidden = true;
+    } else {
+      lockBtn.hidden = false;
+      lockBtn.disabled = false;
+      lockBtn.classList.remove('is-locked');
+      lockBtn.title = pendingSignedOnlyLock
+        ? 'Lock armed — will apply with your next message. Click to cancel.'
+        : 'Lock this room to signed @handle senders. Applies with your next message.';
+      const lbl = lockBtn.querySelector('.label-desktop');
+      if (lbl) lbl.textContent = pendingSignedOnlyLock ? 'Lock armed' : 'Lock';
+      lockBtn.classList.toggle('is-armed', pendingSignedOnlyLock);
+    }
+  }
+  if (lockBtn) {
+    lockBtn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      if (roomSignedOnly || !identity) return;
+      if (!pendingSignedOnlyLock) {
+        if (!confirm('Lock this room so only signed @handle participants can post? This applies with your next message and cannot be undone.')) return;
+        pendingSignedOnlyLock = true;
+      } else {
+        pendingSignedOnlyLock = false;
+      }
+      refreshLockUI();
+    });
   }
   refreshIdentityUI();
 
@@ -1506,12 +1545,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     try {
       const r = await fetch(`/api/rooms/${roomId}/status`, { cache: 'no-store' });
       const s = await r.json();
-      if (s && s.signed_only && !identity && signedOverlay) {
-        signedOverlay.hidden = false;
-      }
-      if (s && (s.recent_count > 0 || s.last_seq > 0)) {
-        roomHasMessages = true;
-        refreshIdentityUI();
+      if (s && s.signed_only) {
+        roomSignedOnly = true;
+        if (!identity && signedOverlay) signedOverlay.hidden = false;
+        refreshLockUI();
       }
     } catch (_) {}
   })();
