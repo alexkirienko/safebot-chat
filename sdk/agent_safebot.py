@@ -39,7 +39,15 @@ DEFAULT_RELEASE_SENTINEL = "SAFEBOT_RELEASED_BY_ROOM"
 # at 1 s, capped at 30 s; hard-stop after 10 consecutive failures with
 # rc != 0 within 10 s of each launch.
 FAST_FAIL_WINDOW_SEC = 10
+# Persistent-listener contract: the wrapper must NEVER exit on its own,
+# even under a crashing host. The historical MAX_CONSECUTIVE_FAST_FAILS
+# hard-stop has been replaced by an exponential backoff that plateaus
+# at FAST_FAIL_PLATEAU_SEC between respawn attempts — the listener keeps
+# trying forever so the room-presence guarantee holds. MAX_CONSECUTIVE_
+# FAST_FAILS is retained only for log breadcrumb / env knob compat; the
+# value is no longer a terminal cap.
 MAX_CONSECUTIVE_FAST_FAILS = int(os.environ.get("SAFEBOT_MAX_FAST_FAILS", "10"))
+FAST_FAIL_PLATEAU_SEC = float(os.environ.get("SAFEBOT_FAST_FAIL_PLATEAU_SEC", "300"))
 
 
 def fail(msg: str, code: int = 1) -> "NoReturn":
@@ -395,22 +403,23 @@ def respawn_loop(
         is_fast_fail = rc != 0 and elapsed < FAST_FAIL_WINDOW_SEC
         if is_fast_fail:
             consecutive_fast_fails += 1
-            if consecutive_fast_fails >= MAX_CONSECUTIVE_FAST_FAILS:
-                print(
-                    f"[agent_safebot] host exited rc={rc} within {FAST_FAIL_WINDOW_SEC}s "
-                    f"{consecutive_fast_fails} times in a row — giving up.",
-                    file=sys.stderr,
-                )
-                return rc
-            sleep_for = min(30.0, delay)
+            # No terminal exit from a crash-loop: the listener is
+            # persistent and must never leave the room on its own (per
+            # operator room-presence rule). Instead we ride an
+            # exponential backoff that plateaus at FAST_FAIL_PLATEAU_SEC
+            # so the host can recover on its own (config fix, binary
+            # reinstall, network return) without requiring manual
+            # wrapper restart. The previous `return rc` hard-stop has
+            # been removed.
+            sleep_for = min(FAST_FAIL_PLATEAU_SEC, delay)
             stamp = time.strftime("%H:%M:%S UTC", time.gmtime())
             print(
                 f"[agent_safebot {stamp}] host rc={rc} after {elapsed:.1f}s; "
-                f"fast-fail #{consecutive_fast_fails}, backoff {sleep_for:.1f}s",
+                f"fast-fail #{consecutive_fast_fails}, backoff {sleep_for:.1f}s (will keep retrying)",
                 file=sys.stderr,
             )
             time.sleep(sleep_for)
-            delay = min(30.0, delay * 2)
+            delay = min(FAST_FAIL_PLATEAU_SEC, delay * 2)
         else:
             consecutive_fast_fails = 0
             delay = 1.0

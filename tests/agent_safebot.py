@@ -125,52 +125,97 @@ def case_release_sentinel() -> None:
 
 
 def case_embedded_sentinel_does_not_release() -> None:
+    """Under the persistent-listener contract the wrapper never exits
+    by itself — so `embedded sentinel does not release` means the
+    wrapper must keep relaunching under the fake host (not that we
+    reach any terminal rc). We prove it by letting the subprocess
+    time out with a living wrapper + multiple observed invocations.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        log = Path(td) / "log"
+        bindir = Path(td) / "bin"
+        lockhome = Path(td) / "home"; lockhome.mkdir()
+        bindir.mkdir()
+        make_exec(bindir / "fake-host", FAKE_HOST)
+        env = os.environ.copy()
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        env["HOME"] = str(lockhome)
+        env["TEST_LOG"] = str(log)
+        env["TEST_HOST_EMBED_RELEASE"] = "1"         # print sentinel *embedded* in a longer line
+        env["TEST_HOST_EXIT_RC"] = "9"
+        env["SAFEBOT_FAST_FAIL_PLATEAU_SEC"] = "1"   # keep CI fast
+        timed_out = False
+        try:
+            subprocess.run(
+                [sys.executable, str(SCRIPT), "--host", "custom", "--cmd", "fake-host",
+                 "https://safebot.chat/room/ABC#k=xyz"],
+                cwd=ROOT, env=env, text=True, capture_output=True, timeout=12,
+            )
+            raise AssertionError("wrapper exited on its own after seeing an embedded sentinel string")
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        assert timed_out
+        lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+        # Embedded sentinel text is NOT the exact-line sentinel, so the
+        # wrapper must keep relaunching the host. We should have
+        # significantly more than a single invocation by the timeout.
+        assert len(lines) >= 3, f"wrapper did not keep relaunching on embedded sentinel text, got {len(lines)}"
+        ok(f"embedded sentinel text does not trigger release; wrapper kept relaunching ({len(lines)} invocations)")
+
+
+def case_fast_fail_plateau_never_exits() -> None:
+    """Persistent-listener contract: under a host that keeps crashing
+    fast, the wrapper must NEVER exit on its own — it only slows down
+    via exponential backoff that plateaus at FAST_FAIL_PLATEAU_SEC.
+    Previously we had a terminal hard-stop after N consecutive fast
+    failures; that auto-exit path is explicitly removed because the
+    listener must stay in the room until explicit release.
+    """
     with tempfile.TemporaryDirectory() as td:
         log = Path(td) / "log"
         bindir = Path(td) / "bin"
         bindir.mkdir()
+        # Isolate the pidfile lock directory to this tmpdir so a
+        # concurrent listener on the same URL on the developer's
+        # machine can't collide with the fake room used here.
+        lockhome = Path(td) / "home"; lockhome.mkdir()
         make_exec(bindir / "fake-host", FAKE_HOST)
-        env = {
-            "PATH": f"{bindir}:{os.environ['PATH']}",
-            "TEST_LOG": str(log),
-            "TEST_HOST_EMBED_RELEASE": "1",
-            "TEST_HOST_EXIT_RC": "9",
-            "SAFEBOT_MAX_FAST_FAILS": "3",
-        }
-        proc = run([
-            "--host", "custom",
-            "--cmd", "fake-host",
-            "https://safebot.chat/room/ABC#k=xyz",
-        ], env, timeout=30)
-        assert proc.returncode == 9, f"embedded sentinel text must not stop wrapper: {(proc.returncode, proc.stderr)}"
-        assert "giving up" in proc.stderr, proc.stderr
+        env = os.environ.copy()
+        env["PATH"] = f"{bindir}:{env['PATH']}"
+        env["HOME"] = str(lockhome)
+        env["TEST_LOG"] = str(log)
+        env["TEST_HOST_EXIT_RC"] = "7"           # immediate non-zero exit each time
+        env["SAFEBOT_MAX_FAST_FAILS"] = "3"      # old cap value — must be IGNORED now
+        env["SAFEBOT_FAST_FAIL_PLATEAU_SEC"] = "1"  # keep CI fast (≤1s plateau)
+        timed_out = False
+        stderr_text = ""
+        try:
+            # With the old hard-stop the wrapper would have returned rc=7
+            # within ~3s (cap=3 × sub-second crashloop). The persistent
+            # contract requires it to keep retrying — so subprocess.run
+            # MUST hit our TimeoutExpired guard instead of returning.
+            subprocess.run(
+                [sys.executable, str(SCRIPT), "--host", "custom", "--cmd", "fake-host",
+                 "https://safebot.chat/room/ABC#k=xyz"],
+                cwd=ROOT, env=env, text=True, capture_output=True, timeout=12,
+            )
+            raise AssertionError("wrapper exited on its own — persistent contract violated")
+        except subprocess.TimeoutExpired as e:
+            timed_out = True
+            # .stderr on TimeoutExpired is whatever was buffered at
+            # timeout. With text=True it's str, without it's bytes —
+            # normalise defensively.
+            raw = getattr(e, "stderr", None) or b""
+            if isinstance(raw, bytes):
+                stderr_text = raw.decode("utf-8", errors="replace")
+            else:
+                stderr_text = raw
+        assert timed_out, "subprocess should have been timed out, not returned"
         lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
-        assert len(lines) == 3, f"wrapper should keep relaunching on embedded sentinel text, got {len(lines)}"
-        ok("embedded sentinel text does not trigger release")
-
-
-def case_fast_fail_cap() -> None:
-    with tempfile.TemporaryDirectory() as td:
-        log = Path(td) / "log"
-        bindir = Path(td) / "bin"
-        bindir.mkdir()
-        make_exec(bindir / "fake-host", FAKE_HOST)
-        env = {
-            "PATH": f"{bindir}:{os.environ['PATH']}",
-            "TEST_LOG": str(log),
-            "TEST_HOST_EXIT_RC": "7",  # immediate non-zero exit
-            "SAFEBOT_MAX_FAST_FAILS": "3",  # keep CI fast
-        }
-        proc = run([
-            "--host", "custom",
-            "--cmd", "fake-host",
-            "https://safebot.chat/room/ABC#k=xyz",
-        ], env, timeout=30)
-        assert proc.returncode == 7, f"expected host rc propagated after hard stop, got {proc.returncode}: {proc.stderr}"
-        assert "giving up" in proc.stderr, proc.stderr
-        lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
-        assert len(lines) == 3, f"expected 3 invocations before hard stop, got {len(lines)}"
-        ok(f"respawn loop hard-stops after {len(lines)} consecutive fast-fails")
+        assert len(lines) >= 4, f"expected wrapper to keep respawning past old cap=3; got {len(lines)}"
+        assert "giving up" not in stderr_text, \
+            f"wrapper logged 'giving up' — hard-stop path must be fully removed: {stderr_text!r}"
+        ok(f"respawn loop NEVER exits on crashloop; kept restarting past old cap ({len(lines)} invocations observed)")
 
 
 def case_print_prompt() -> None:
@@ -314,7 +359,7 @@ def main() -> int:
     case_custom_sentinel_honoured()
     case_print_prompt()
     case_claude_code_addendum()
-    case_fast_fail_cap()
+    case_fast_fail_plateau_never_exits()
     case_lock_refuses_second_listener()
     return 0
 
