@@ -988,6 +988,72 @@ async function e2eReplyReactionsEdgeCases() {
     if (aria !== 'true') throw new Error('self-react pill should be aria-pressed=true, got ' + aria);
     pass('reactions: pill aria-pressed reflects is-mine state (false → true on toggle)');
 
+    // --- 5. Picker keyboard a11y: arrow keys move focus, Escape closes + refocuses trigger ---
+    const kbdId = crypto.randomUUID();
+    await page.evaluate((id) => {
+      window.__safebotTest.renderMessage({ id, seq: 40, sender: 'alice', ts: Date.now(), text: 'kbd-target' });
+    }, kbdId);
+    // Open the picker by clicking the trigger.
+    await page.evaluate((id) => {
+      const trigger = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__react-btn`);
+      trigger.click();
+    }, kbdId);
+    // First option should be focused.
+    await page.waitForFunction((id) => {
+      const picker = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__react-picker`);
+      return !!(picker && picker.querySelector('button') && document.activeElement === picker.querySelector('button'));
+    }, kbdId, { timeout: 2000 });
+    const firstEmoji = await page.evaluate(() => document.activeElement && document.activeElement.textContent);
+    // ArrowRight → next option focused.
+    await page.keyboard.press('ArrowRight');
+    const secondEmoji = await page.evaluate(() => document.activeElement && document.activeElement.textContent);
+    if (secondEmoji === firstEmoji) throw new Error('ArrowRight did not move focus in picker');
+    // ArrowLeft → back to first.
+    await page.keyboard.press('ArrowLeft');
+    const backEmoji = await page.evaluate(() => document.activeElement && document.activeElement.textContent);
+    if (backEmoji !== firstEmoji) throw new Error('ArrowLeft did not return focus to first option');
+    // Escape → closes picker, returns focus to the trigger button.
+    await page.keyboard.press('Escape');
+    await page.waitForFunction((id) => {
+      const picker = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__react-picker`);
+      return !picker;
+    }, kbdId, { timeout: 2000 });
+    const focusedAfter = await page.evaluate((id) => {
+      const trigger = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__react-btn`);
+      return document.activeElement === trigger;
+    }, kbdId);
+    if (!focusedAfter) throw new Error('Escape did not return focus to the trigger');
+    pass('reactions: picker keyboard — Arrow moves focus, Escape closes + refocuses trigger');
+
+    // --- 6. Picker viewport reposition: bubble pinned to top of
+    //        viewport forces the picker to flip below-the-bubble. ---
+    const flipId = crypto.randomUUID();
+    await page.evaluate((id) => {
+      window.__safebotTest.renderMessage({ id, seq: 50, sender: 'alice', ts: Date.now(), text: 'flip-target' });
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+      // Force the bubble above the viewport so the picker's default
+      // top:28px anchor is BELOW viewport top = 4 (i.e., picker's
+      // viewport-relative r.top < 4), which triggers the reposition.
+      el.style.position = 'fixed';
+      el.style.top = '-100px';
+      el.style.left = '100px';
+      el.style.zIndex = '9999';
+    }, flipId);
+    // Open the picker.
+    await page.evaluate((id) => {
+      document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__react-btn`).click();
+    }, flipId);
+    // Give the reposition rAF a frame to run.
+    await page.waitForFunction((id) => {
+      const pick = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__react-picker`);
+      if (!pick) return false;
+      // We expect the inline `top` style to have been reassigned to
+      // push the picker below the bubble (> default 28px). The
+      // reposition logic writes `(b.height + 4) + 'px'`.
+      return pick.style.top && parseFloat(pick.style.top) > 28;
+    }, flipId, { timeout: 2000 });
+    pass('reactions: picker repositions below-the-bubble when clipped by viewport top edge');
+
     await browser.close();
   } catch (e) {
     await browser.close();
