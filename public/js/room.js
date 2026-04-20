@@ -962,13 +962,15 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (env.safebot_hist_resp_v1 === true) {
       console.log('[safebot hist] got response for req', env.req_id, 'items=', (env.items || []).length);
       if (!env.req_id) return true;
-      // First-responder-wins per req_id, even if the request wasn't ours.
-      // That lets us still suppress redundant responders if we see a
-      // response in-flight before our own reply fires (see req path below).
-      const firstForReq = !histResponsesSeen.has(env.req_id);
+      // Merge every response, not just the first — different peers hold
+      // different slices of the history (one browser might have 14
+      // cached messages while another has only 1). IDB's [roomId,seq]
+      // key dedups, so merging additional responses costs nothing but
+      // strictly gains coverage. We still mark histResponsesSeen to
+      // suppress redundant responders in the room (see req path below).
       histResponsesSeen.add(env.req_id);
       const pend = histReqsPending.get(env.req_id);
-      if (!pend || pend.resolved || !firstForReq) return true;
+      if (!pend) return true;
       pend.resolved = true;
       const items = Array.isArray(env.items) ? env.items : [];
       (async () => {
@@ -1003,14 +1005,16 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       const delay = Math.floor(Math.random() * 1200);
       console.log('[safebot hist] peer asked for history after=', after, 'req=', env.req_id, 'delay=', delay);
       setTimeout(async () => {
-        if (histResponsesSeen.has(env.req_id)) { console.log('[safebot hist] suppressed — already answered'); return; }
+        // Note: no self-suppression based on histResponsesSeen. Different
+        // peers hold different slices of the history, so every peer with
+        // any cached items should contribute — the requester's IDB
+        // dedups by [roomId, seq]. Bandwidth cost: O(peers) responses
+        // per request, each capped at 200 items / 80KB.
         if (!window.SafeBotHistory) return;
         let items = [];
         try { items = await window.SafeBotHistory.serialize(roomId, { after }); } catch (e) { console.warn('[safebot hist] serialize failed', e); }
         console.log('[safebot hist] serialized items=', items.length);
         if (!items.length) return;
-        if (histResponsesSeen.has(env.req_id)) return; // last check before we post
-        histResponsesSeen.add(env.req_id);
         const resp = { safebot_hist_resp_v1: true, req_id: env.req_id, items };
         try { postProtocol(JSON.stringify(resp)); console.log('[safebot hist] posted response', items.length, 'items'); } catch (e) { console.warn('[safebot hist] resp post failed', e); }
       }, delay);
