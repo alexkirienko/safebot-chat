@@ -30,6 +30,7 @@ FAKE_HOST = r"""#!/usr/bin/env python3
 # Fake AI host CLI. Records argv to TEST_LOG and behaves per env:
 #   TEST_HOST_EXIT_RC  -> exit with this code (default 0)
 #   TEST_HOST_RELEASE  -> if "1", print release sentinel on stdout then exit 0
+#   TEST_HOST_EMBED_RELEASE -> if "1", mention release sentinel inside a longer line
 #   TEST_HOST_COUNT    -> path to counter file; increments each invocation
 #   TEST_HOST_MAX      -> after N invocations, exit rc=0 (useful to bound tests)
 import json, os, sys
@@ -39,6 +40,9 @@ with open(log, "a", encoding="utf-8") as f:
 if os.environ.get("TEST_HOST_RELEASE") == "1":
     print(os.environ.get("TEST_RELEASE_SENTINEL", "SAFEBOT_RELEASED_BY_ROOM"))
     sys.exit(0)
+if os.environ.get("TEST_HOST_EMBED_RELEASE") == "1":
+    print(f"summary contains {os.environ.get('TEST_RELEASE_SENTINEL', 'SAFEBOT_RELEASED_BY_ROOM')} but is not a release")
+    sys.exit(int(os.environ.get("TEST_HOST_EXIT_RC", "0")))
 cf = os.environ.get("TEST_HOST_COUNT")
 if cf:
     n = 0
@@ -118,6 +122,31 @@ def case_release_sentinel() -> None:
         # Fake-host printed the sentinel on its first run; wrapper stops.
         assert len(lines) == 1, f"wrapper relaunched after release sentinel: {lines!r}"
         ok("release sentinel stops the respawn loop after one invocation")
+
+
+def case_embedded_sentinel_does_not_release() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        log = Path(td) / "log"
+        bindir = Path(td) / "bin"
+        bindir.mkdir()
+        make_exec(bindir / "fake-host", FAKE_HOST)
+        env = {
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "TEST_LOG": str(log),
+            "TEST_HOST_EMBED_RELEASE": "1",
+            "TEST_HOST_EXIT_RC": "9",
+            "SAFEBOT_MAX_FAST_FAILS": "3",
+        }
+        proc = run([
+            "--host", "custom",
+            "--cmd", "fake-host",
+            "https://safebot.chat/room/ABC#k=xyz",
+        ], env, timeout=30)
+        assert proc.returncode == 9, f"embedded sentinel text must not stop wrapper: {(proc.returncode, proc.stderr)}"
+        assert "giving up" in proc.stderr, proc.stderr
+        lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+        assert len(lines) == 3, f"wrapper should keep relaunching on embedded sentinel text, got {len(lines)}"
+        ok("embedded sentinel text does not trigger release")
 
 
 def case_fast_fail_cap() -> None:
@@ -281,6 +310,7 @@ def case_lock_refuses_second_listener() -> None:
 def main() -> int:
     case_custom_once()
     case_release_sentinel()
+    case_embedded_sentinel_does_not_release()
     case_custom_sentinel_honoured()
     case_print_prompt()
     case_claude_code_addendum()

@@ -195,7 +195,7 @@ def case_never_interrupts_never_ctrl_c() -> None:
     ok("notifier never sends C-c / interpreted control keys as tmux keys")
 
 
-def case_uses_current_tmux_pane_when_omitted() -> None:
+def case_refuses_current_tmux_pane_without_explicit_opt_in() -> None:
     import json
     with tempfile.TemporaryDirectory() as td:
         rc, _out, err, calls = run_with_fake_tmux(
@@ -207,10 +207,28 @@ def case_uses_current_tmux_pane_when_omitted() -> None:
                 "TMUX_PANE": "%77",
             },
         )
+        assert rc == 2, (rc, err)
+        assert not calls, calls
+        assert "--pane is required" in err, err
+    ok("current tmux pane is refused by default without explicit opt-in")
+
+
+def case_uses_current_tmux_pane_with_explicit_opt_in() -> None:
+    import json
+    with tempfile.TemporaryDirectory() as td:
+        rc, _out, err, calls = run_with_fake_tmux(
+            Path(td),
+            ["--allow-current-pane", "--mention", "@alex",
+             "https://safebot.chat/room/FAKE#k=" + "a" * 43],
+            {
+                "FAKE_STREAM_JSON": json.dumps(FAKE_MSGS),
+                "TMUX_PANE": "%77",
+            },
+        )
         assert rc == 0, (rc, err)
         assert calls, "expected tmux calls"
         assert all("%77" in c for c in calls), calls
-    ok("when --pane is omitted, notifier targets TMUX_PANE from the current tmux environment")
+    ok("with explicit opt-in, notifier may target TMUX_PANE from the current tmux environment")
 
 
 def case_from_now_skips_buffer_replay_by_default() -> None:
@@ -238,7 +256,8 @@ def main() -> int:
     case_only_direct_mentions()
     case_literal_mode_and_enter_commit()
     case_never_interrupts_never_ctrl_c()
-    case_uses_current_tmux_pane_when_omitted()
+    case_refuses_current_tmux_pane_without_explicit_opt_in()
+    case_uses_current_tmux_pane_with_explicit_opt_in()
     case_from_now_skips_buffer_replay_by_default()
     return 0
 

@@ -303,7 +303,9 @@ def build_prompt(host: HostAdapter, room_url: str, *, release_sentinel: str = DE
 def _pump_stream(src, dst, *, release_sentinel: str, state: dict) -> None:
     try:
         for line in src:
-            if release_sentinel in line:
+            # Only a standalone sentinel line should stop the wrapper.
+            # Prompt echoes / summaries may legitimately mention the token.
+            if line.strip() == release_sentinel:
                 state["released"] = True
             dst.write(line)
             dst.flush()

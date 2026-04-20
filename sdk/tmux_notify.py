@@ -9,16 +9,18 @@ mentions to surface as operator input without me pulling the inbox."
 Usage:
     tmux new-session -s codex 'codex'
     python3 sdk/tmux_notify.py \\
+        --pane codex:0.0 \\
         --mention @alex \\
         'https://safebot.chat/room/<ID>#k=<KEY>'
 
-If run from inside a tmux-managed environment, `--pane` may be omitted:
-`TMUX_PANE` is used automatically, so the helper can target the current
-interactive pane without making the operator look up `session:window.pane`
-by hand.
+If you intentionally want to target the CURRENT tmux pane, pass
+`--allow-current-pane`. This is dangerous because it injects text into
+the same interactive input line the operator is typing into.
 
 Guardrails (day-1):
   - Explicit opt-in only — you must pass --pane AND --mention.
+  - Targeting the CURRENT tmux pane is extra-dangerous and requires
+    `--allow-current-pane`; safe default is an explicit separate pane.
   - Only direct @mention matches (word-boundary regex). No broad
     substring wakeups.
   - `tmux send-keys -l` (literal mode) so shell metacharacters and
@@ -52,21 +54,23 @@ def _require_tmux() -> str:
     return path
 
 
-def _resolve_pane(pane: str | None) -> str:
+def _resolve_pane(pane: str | None, *, allow_current: bool) -> str:
     """Resolve the target pane.
 
-    Explicit `--pane` wins. Otherwise fall back to the tmux-provided
-    `TMUX_PANE` env var so a helper launched from an existing tmux-hosted
-    Codex/Claude/Gemini session can push directly into the current pane.
+    Safe default: require an explicit target pane. Falling back to the
+    tmux-provided `TMUX_PANE` env var is only allowed behind
+    `--allow-current-pane`, because injecting text into the operator's
+    current interactive line is invasive and can corrupt local input.
     """
     raw = (pane or "").strip()
     if raw and raw.lower() != "current":
         return raw
-    current = os.environ.get("TMUX_PANE", "").strip()
-    if current:
-        return current
+    if allow_current:
+        current = os.environ.get("TMUX_PANE", "").strip()
+        if current:
+            return current
     print(
-        "--pane is required unless TMUX_PANE is set (launch from inside tmux or pass an explicit pane target).",
+        "--pane is required. To target the current tmux pane instead, pass --allow-current-pane and run from inside tmux.",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -148,7 +152,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         )
     )
     p.add_argument("room_url", help="Full SafeBot room URL including #k=...")
-    p.add_argument("--pane", default=None, help="tmux target-pane identifier (e.g. codex:0.0, mysession:1.2, or %% pane-id). Optional when TMUX_PANE is set; use `current` to force auto-detect.")
+    p.add_argument("--pane", default=None, help="tmux target-pane identifier (e.g. codex:0.0, mysession:1.2, or %% pane-id).")
+    p.add_argument("--allow-current-pane", action="store_true", help="Allow targeting the current tmux pane via `--pane current` or TMUX_PANE auto-detect. Dangerous: injects text into the operator's active input line.")
     p.add_argument("--mention", required=True, help="@handle to match (word-boundary, case-insensitive). Only matches forward.")
     p.add_argument("--include-buffer", action="store_true", help="Also forward already-buffered room messages on startup. Default is from-now-only to avoid replaying history into the pane.")
     return p.parse_args(argv)
@@ -157,7 +162,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     tmux_bin = _require_tmux()
-    pane = _resolve_pane(args.pane)
+    pane = _resolve_pane(args.pane, allow_current=args.allow_current_pane)
     try:
         _mention_regex(args.mention)
     except ValueError as e:

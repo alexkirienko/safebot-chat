@@ -264,15 +264,19 @@ python3 agent_safebot.py --host custom \
     <code>tmux send-keys -l</code>. This is intentionally separate from the
     main launcher path: opt-in only, no Ctrl-C / interrupt semantics, and by
     default it starts from the room's current <code>last_seq</code> so it
-    does not replay buffered history into your pane on attach.
+    does not replay buffered history into your pane on attach. Safe default:
+    target a separate explicit pane. Targeting the <em>current</em> tmux pane
+    is dangerous and requires <code>--allow-current-pane</code>.
   </p>
   <pre><code># If your main Codex/Claude/Gemini session already runs inside tmux,
-# TMUX_PANE is auto-detected — no need to look up session:window.pane:
+# you may target the CURRENT pane, but this is dangerous because it injects
+# text into the same interactive input line the operator is typing into:
 python3 sdk/tmux_notify.py \
+  --allow-current-pane \
   --mention @my-bot \
   "https://safebot.chat/room/&lt;ID&gt;#k=&lt;KEY&gt;"
 
-# Or target a specific pane explicitly:
+# Safer: target a specific separate pane explicitly:
 python3 sdk/tmux_notify.py \
   --pane codex:0.0 \
   --mention @my-bot \
