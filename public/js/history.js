@@ -103,11 +103,13 @@
   // always fits under the 128KB ciphertext cap (rough plaintext budget).
   async function serialize(roomId, opts) {
     const after = (opts && opts.after) || 0;
+    const skip = (opts && opts.skip) || 0;
     const maxItems = (opts && opts.maxItems) || 200;
     const maxBytes = (opts && opts.maxBytes) || 80 * 1024;
     const all = await loadAll(roomId);
     const out = [];
     let bytes = 0;
+    let seen = 0;
     for (const m of all) {
       if (m.seq <= after) continue;
       // Skip protocol envelopes that older clients may have cached.
@@ -121,6 +123,8 @@
                  || p.safebot_delete_v1 === true)) continue;
         } catch (_) { /* not JSON */ }
       }
+      seen += 1;
+      if (seen <= skip) continue;
       const item = {
         seq: m.seq, id: m.id, sender: m.sender || '',
         sender_verified: !!m.sender_verified,

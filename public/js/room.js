@@ -1011,12 +1011,28 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         // dedups by [roomId, seq]. Bandwidth cost: O(peers) responses
         // per request, each capped at 200 items / 80KB.
         if (!window.SafeBotHistory) return;
-        let items = [];
-        try { items = await window.SafeBotHistory.serialize(roomId, { after }); } catch (e) { console.warn('[safebot hist] serialize failed', e); }
-        console.log('[safebot hist] serialized items=', items.length);
-        if (!items.length) return;
-        const resp = { safebot_hist_resp_v1: true, req_id: env.req_id, items };
-        try { postProtocol(JSON.stringify(resp)); console.log('[safebot hist] posted response', items.length, 'items'); } catch (e) { console.warn('[safebot hist] resp post failed', e); }
+        // Chunked response: Cloudflare tunnel appears to drop large WS
+        // frames silently somewhere around 30-50KB, so we cap each
+        // chunk at ~15KB plaintext (~20KB ciphertext + envelope) and
+        // iterate. Requester merges every chunk; IDB dedups.
+        let skip = 0, chunkIdx = 0, totalSent = 0;
+        while (true) {
+          let items = [];
+          try {
+            items = await window.SafeBotHistory.serialize(roomId, {
+              after, skip, maxItems: 15, maxBytes: 15 * 1024,
+            });
+          } catch (e) { console.warn('[safebot hist] serialize failed', e); break; }
+          if (!items.length) break;
+          const resp = { safebot_hist_resp_v1: true, req_id: env.req_id, items, chunk: chunkIdx };
+          try { postProtocol(JSON.stringify(resp)); totalSent += items.length; } catch (e) { console.warn('[safebot hist] resp post failed', e); }
+          chunkIdx += 1;
+          skip += items.length;
+          if (chunkIdx > 20) break; // absolute guard
+          // Small spacing so chunks don't all hit the WS flow-control window at once.
+          await new Promise((r) => setTimeout(r, 60));
+        }
+        console.log('[safebot hist] posted', chunkIdx, 'chunks totalling', totalSent, 'items');
       }, delay);
       return true;
     }
