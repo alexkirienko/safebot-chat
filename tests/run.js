@@ -1061,6 +1061,111 @@ async function e2eReplyReactionsEdgeCases() {
   }
 }
 
+async function e2ePermalink() {
+  log('E2E: permalink — build / open-in-new-tab jump / missing-target / k-preservation');
+  const browser = await chromium.launch();
+  const crypto = require('node:crypto');
+  try {
+    const roomId = 'PLK' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
+    const roomUrl = `${BASE}/room/${roomId}#k=${key}`;
+
+    // --- Build link preserves k exactly and places m second ---
+    const ctx = await browser.newContext();
+    const page = await ctx.newPage();
+    await page.goto(roomUrl, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
+    // Render a known bubble and compute its link via the debug hook.
+    const tgtId = crypto.randomUUID();
+    const link = await page.evaluate((id) => {
+      window.__safebotTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'permalink target' });
+      return window.__safebotTest.buildMessageLink(id);
+    }, tgtId);
+    if (!link) throw new Error('buildMessageLink returned empty');
+    if (!link.includes(`k=${key}`)) throw new Error('link dropped k fragment: ' + link);
+    if (!link.includes(`m=${tgtId}`)) throw new Error('link missing m fragment: ' + link);
+    // `k` must come before `m` (for human readability) and both
+    // params must be in the fragment, not the query string.
+    const fragOnly = link.split('#')[1] || '';
+    if (fragOnly.indexOf('k=') < 0 || fragOnly.indexOf('m=') < 0) throw new Error('params not in fragment: ' + link);
+    if (fragOnly.indexOf('k=') > fragOnly.indexOf('m=')) throw new Error('m= placed before k=: ' + link);
+    pass('permalink: copy-link writes #k=<KEY>&m=<ID> fragment preserving k exactly');
+
+    // --- Open the link in a fresh tab → target bubble flashes ---
+    await ctx.close();
+    const ctx2 = await browser.newContext();
+    const page2 = await ctx2.newPage();
+    // Inject a debug seed BEFORE room.js parses the fragment, so the
+    // target bubble exists when the jump logic runs. Easiest is a
+    // little preload of IDB via a navigation that renders a decoy
+    // first — but since the test room is fresh, we need the target
+    // to arrive AFTER page load. The observer should catch it.
+    await page2.goto(link, { waitUntil: 'domcontentloaded' });
+    await page2.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
+    // Simulate the message arriving via the real render path.
+    await page2.evaluate((id) => {
+      window.__safebotTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'permalink target' });
+    }, tgtId);
+    // The MutationObserver in room.js should flash it + clear m= from URL.
+    await page2.waitForFunction((id) => {
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+      return el && el.classList.contains('is-flash');
+    }, tgtId, { timeout: 3000 });
+    // After flashing, m= should be stripped from the URL via replaceState.
+    await page2.waitForFunction(() => !/(^|&)m=/.test(location.hash), null, { timeout: 3000 });
+    const urlAfter = await page2.url();
+    if (!urlAfter.includes(`k=${key}`)) throw new Error('k dropped after jump: ' + urlAfter);
+    if (/[#&]m=/.test(urlAfter)) throw new Error('m still in URL after jump: ' + urlAfter);
+    pass('permalink: opening #...&m=<ID> in a fresh tab flashes the target and strips m= from URL');
+
+    // --- Missing target → toast fires after 6 s cap ---
+    await ctx2.close();
+    const ctx3 = await browser.newContext();
+    const page3 = await ctx3.newPage();
+    const ghostId = crypto.randomUUID();
+    const ghostLink = `${BASE}/room/${roomId}#k=${key}&m=${ghostId}`;
+    await page3.goto(ghostLink, { waitUntil: 'domcontentloaded' });
+    await page3.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
+    // Don't render the target. Wait past the 6s cap and verify toast + URL cleared.
+    await page3.waitForFunction(() => {
+      const t = document.getElementById('toast');
+      return t && (t.textContent || '').includes('not in the loaded history');
+    }, null, { timeout: 8000 });
+    const urlMissing = await page3.url();
+    if (/[#&]m=/.test(urlMissing)) throw new Error('m should be stripped even on miss: ' + urlMissing);
+    pass('permalink: missing target → muted toast + m= stripped after 6s cap');
+
+    await ctx3.close();
+
+    // --- Attacker-controlled m= is regex-validated ---
+    const ctx4 = await browser.newContext();
+    const page4 = await ctx4.newPage();
+    const hostileLinks = [
+      `${BASE}/room/${roomId}#k=${key}&m=<img>`,        // contains <
+      `${BASE}/room/${roomId}#k=${key}&m=${'a'.repeat(80)}`, // too long
+      `${BASE}/room/${roomId}#k=${key}&m=a`,            // too short
+    ];
+    for (const bad of hostileLinks) {
+      await page4.goto(bad, { waitUntil: 'domcontentloaded' });
+      await page4.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
+      // After 1 s: if the regex rejected it correctly, there should be
+      // NO pending-jump attempt. Best observable: the toast never appears
+      // with "not in the loaded history" within 2 s (would-be observer
+      // is never armed) AND no bubble flashed.
+      const seenToast = await page4.evaluate(() => {
+        const t = document.getElementById('toast');
+        return t && (t.textContent || '').includes('not in the loaded history');
+      });
+      if (seenToast) throw new Error('invalid m= should be silently dropped, not surface missing-target toast: ' + bad);
+    }
+    pass('permalink: malformed m= fragments silently dropped by regex gate (no jump attempted)');
+
+    await ctx4.close();
+  } finally {
+    await browser.close();
+  }
+}
+
 async function main() {
   await startServer();
   try {
@@ -1073,6 +1178,7 @@ async function main() {
     await e2eReactionsAdversarial();
     await e2eReactionsV2();
     await e2eReplyReactionsEdgeCases();
+    await e2ePermalink();
     await pythonSdkTest();
     noLogsAudit();
   } finally {

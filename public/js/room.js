@@ -14,6 +14,15 @@
   const hash = location.hash.replace(/^#/, '');
   const params = new URLSearchParams(hash);
   const keyB64u = params.get('k');
+  // Deep-link target: `#...&m=<msg_id>` asks the room to scroll + flash
+  // the bubble with id=<msg_id> once it's in the DOM. Validated strictly
+  // against the same [A-Za-z0-9_-]{8,64} shape as wire-level reply_to
+  // — the value is attacker-controlled text coming from a URL fragment.
+  let pendingJumpId = '';
+  {
+    const raw = params.get('m');
+    if (raw && /^[A-Za-z0-9_-]{8,64}$/.test(raw)) pendingJumpId = raw;
+  }
   if (!roomId || !keyB64u) {
     document.body.innerHTML = '<div style="padding:60px;max-width:600px;margin:0 auto;color:#F2F4FA;background:#0B0D14;min-height:100vh"><h2 style="font-size:40px;margin:0 0 16px;font-weight:700">No room key.</h2><p style="color:#AFB6CA">This meeting link is missing its key fragment. Ask whoever shared it to resend the full URL.</p><p style="margin-top:24px"><a href="/" style="color:#6D7CFF">← back to SafeBot.Chat</a></p></div>';
     return;
@@ -702,6 +711,38 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       });
       bubble.appendChild(rep);
 
+      // Permalink / copy-link button. Builds a room URL with the
+      // current message id embedded in the fragment alongside `k`
+      // (`...#k=<KEY>&m=<id>`); recipients who open that URL land
+      // scrolled-and-flashed on this specific bubble. Server never
+      // sees anything because it's a URL fragment.
+      const lnk = document.createElement('button');
+      lnk.className = 'bubble__link-btn';
+      lnk.type = 'button';
+      lnk.title = `Copy link to this message`;
+      lnk.setAttribute('aria-label', lnk.title);
+      lnk.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.07 0l2.12-2.12a5 5 0 0 0-7.07-7.07l-1.41 1.41"/><path d="M14 11a5 5 0 0 0-7.07 0l-2.12 2.12a5 5 0 0 0 7.07 7.07l1.41-1.41"/></svg>';
+      lnk.addEventListener('click', async (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const link = buildMessageLink(m.id);
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(link);
+            showToast('Message link copied', true);
+          } else {
+            // Fallback for contexts with no clipboard permission.
+            const ta = document.createElement('textarea');
+            ta.value = link; document.body.appendChild(ta);
+            ta.select(); document.execCommand('copy'); ta.remove();
+            showToast('Message link copied', true);
+          }
+        } catch (e) {
+          prompt('Copy this message link:', link);
+        }
+      });
+      bubble.appendChild(lnk);
+
       // Reactions toggle button + inline picker (6 presets v1).
       const rxBtn = document.createElement('button');
       rxBtn.className = 'bubble__react-btn';
@@ -1049,6 +1090,85 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (!btn) return;
     const active = currentTtlMs > 0 || roomSignedOnly || pendingSignedOnlyLock;
     btn.classList.toggle('is-active', active);
+  }
+
+  // --- Permalinks / jump-to-message -------------------------------------
+  // Copy-link writes a URL with the target message id added to the
+  // fragment alongside `k`. On load, if `m=<id>` is present, try to
+  // scroll+flash the matching bubble; if the target isn't in the DOM
+  // yet (IDB replay / hist_resp / late live message), keep watching
+  // via MutationObserver for up to 6 s before giving up gracefully.
+  function buildMessageLink(id) {
+    if (!id) return location.href;
+    const p = new URLSearchParams(location.hash.replace(/^#/, ''));
+    // Rebuild the fragment deliberately: preserving `k` exactly (never
+    // drop the room key!), replacing `m` with the new target id.
+    p.set('m', String(id));
+    // URLSearchParams encodes the key base64url; rebuild the URL so the
+    // fragment stays human-readable (`#k=...&m=...`), not percent-
+    // encoded on every share.
+    const ordered = [];
+    for (const k of ['k', 'm']) {
+      if (p.has(k)) ordered.push(`${k}=${p.get(k)}`);
+    }
+    for (const [k, v] of p) {
+      if (k !== 'k' && k !== 'm') ordered.push(`${k}=${v}`);
+    }
+    return `${location.origin}${location.pathname}#${ordered.join('&')}`;
+  }
+  function flashBubbleById(id) {
+    if (!id) return null;
+    const el = chatListEl.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+    if (!el) return null;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('is-flash');
+    setTimeout(() => el.classList.remove('is-flash'), 1600);
+    return el;
+  }
+  function _clearJumpParam() {
+    // Strip `m=` from the URL after a successful jump so that
+    // subsequent reloads don't re-trigger the flash, and so a
+    // back-button doesn't leave a stale deep-link in history. Use
+    // replaceState to avoid adding a history entry.
+    const p = new URLSearchParams(location.hash.replace(/^#/, ''));
+    if (!p.has('m')) return;
+    p.delete('m');
+    const rest = [];
+    for (const [k, v] of p) rest.push(`${k}=${v}`);
+    const newHash = rest.length ? '#' + rest.join('&') : '';
+    try {
+      history.replaceState(null, '', location.pathname + newHash);
+    } catch (_) { /* ignore */ }
+  }
+  function attemptPendingJump() {
+    if (!pendingJumpId) return;
+    const el = flashBubbleById(pendingJumpId);
+    if (el) {
+      pendingJumpId = '';
+      _clearJumpParam();
+    }
+  }
+  // Watch for the target bubble to appear as content streams in
+  // (IDB replay, hist_resp merge, live WS message). 6 s cap — after
+  // that, surface a muted status so the user knows we looked and
+  // nothing matched (dead/TTL'd/truly out-of-buffer message).
+  if (pendingJumpId) {
+    attemptPendingJump();
+    if (pendingJumpId) {
+      const observer = new MutationObserver(() => attemptPendingJump());
+      observer.observe(chatListEl, { childList: true, subtree: true });
+      setTimeout(() => {
+        observer.disconnect();
+        if (pendingJumpId) {
+          // Deterministic missing-target path: clear `m=` so the deep
+          // link doesn't keep linger in the URL, surface a tiny toast.
+          const lost = pendingJumpId;
+          pendingJumpId = '';
+          _clearJumpParam();
+          try { showToast(`Message ${lost.slice(0, 8)}… is not in the loaded history`, false); } catch (_) {}
+        }
+      }, 6000);
+    }
   }
 
   // --- Reactions ---------------------------------------------------------
@@ -1554,6 +1674,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     renderMessage: (m) => renderMessage(m),
     rememberMessage: (m, text) => rememberMessage(m, text),
     applyDelete: (id, seq) => applyDelete(id, seq),
+    buildMessageLink,
     knownMessages,
     deletedIds,
   };

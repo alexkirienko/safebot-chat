@@ -682,6 +682,21 @@ section { padding: 80px 0; position: relative; }
 .bubble__del:hover,
 .bubble__del:focus-visible { background: rgba(220,38,38,0.9); outline: none; }
 
+.bubble__link-btn {
+  position: absolute; top: 4px; right: 82px;
+  width: 22px; height: 22px; line-height: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 999px;
+  background: rgba(0,0,0,0.25); color: #fff;
+  cursor: pointer;
+  opacity: 0; transition: opacity .12s, background .12s;
+}
+.bubble:hover .bubble__link-btn,
+.bubble:focus-within .bubble__link-btn,
+.bubble__link-btn:focus-visible { opacity: 1; }
+.bubble__link-btn:hover,
+.bubble__link-btn:focus-visible { background: rgba(59,130,246,0.9); outline: none; }
+
 .bubble__reply-btn {
   position: absolute; top: 4px; right: 30px;
   width: 22px; height: 22px; line-height: 0;
@@ -769,7 +784,7 @@ section { padding: 80px 0; position: relative; }
  * that reports hover:none (mobile / tablet) so the × / ↩ / 😀 icons
  * are discoverable without a pointer. */
 @media (hover: none) {
-  .bubble__del, .bubble__reply-btn, .bubble__react-btn { opacity: 1; }
+  .bubble__del, .bubble__reply-btn, .bubble__react-btn, .bubble__link-btn { opacity: 1; }
 }
 
 .bubble__react-picker {
