@@ -80,7 +80,10 @@ def main(argv: list[str] | None = None) -> int:
     host = CodexAdapter()
     if args.handle:
         host.handle = args.handle.strip().lstrip("@") or host.handle
-        os.environ["SAFEBOT_MCP_ROOM_NAME"] = host.handle
+    # Always export the handle so MCP room-sender label matches the
+    # prompt's @mention contract (release mentions target the same
+    # label the MCP server stamps on the envelope).
+    os.environ["SAFEBOT_MCP_ROOM_NAME"] = host.handle
     if args.print_prompt:
         # side-effect-free: do not run the MCP bootstrap when we're only
         # dumping the prompt text.

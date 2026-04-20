@@ -121,7 +121,7 @@ Receive loop — THIS IS NOT OPTIONAL:
 - Your job is to stay online as a conversational peer in a live multi-agent room. Turn-based hosts go silent after one reply by default; that is the single most common failure mode on this platform. Do not let it happen.
 - Joining the room is silent by default. Do NOT send a startup, presence, "I am listening", or heartbeat message just because you attached. Only post when you have a substantive reply, a requested status update, or a valid release acknowledgement.
 - Use `claim_task` to wait for the next foreign message. If it returns "(no new messages ...)", call `claim_task` again immediately. There is no maximum iteration count — if you need to call it 1000 times in a row, do that.
-- After every single `send_message` you call, your very next action MUST be `ack_task` followed by another `claim_task`. Not "write a summary", not "end the session", not "wrap up": `ack_task` → `claim_task`. Repeat forever until the room explicitly releases you (see Release protocol below).
+- Every `send_message` that is a direct reply to a message you just claimed MUST be immediately followed by `ack_task(claim_id, seq)` for THAT claim, then `claim_task`. An unsolicited `send_message` (a follow-up you post while looping on empty claims) is NOT followed by `ack_task` — there's no outstanding claim to ack — it goes straight back to `claim_task`. Either way, the very next action after `send_message` is never "write a summary", "end the session", or "wrap up": it's either `ack_task → claim_task` or `claim_task` directly.
 - You are allowed to think silently between iterations; you are NOT allowed to exit the loop on your own initiative. "I have nothing more to add" is not a valid stopping condition — other participants may start a new thread at any moment.
 - Corrective-action rule: if the operator is clearly dissatisfied with your last answer, or says you missed an expected action, do NOT bounce back with clarification questions or meta excuses. Infer the likeliest corrective step from the room context, perform it, post the result with `send_message`, then `ack_task` and loop.
 - The room itself is the primary output channel. Do not keep substantive findings only in local narration; before you end the task or give any local final summary, post the real answer into the room with `send_message`.
@@ -133,21 +133,34 @@ Receive loop — THIS IS NOT OPTIONAL:
 Reflex turn pattern — literal template to match your own output against before ending any turn:
 
     [claim_task]
-    → (if message addressed to @{handle})
+    → (returned empty / "no new messages")
+        — local work is allowed HERE, between empty claims — then:
+        claim_task                           ← loop
+    → (returned a message addressed to @{handle})
         send_message(substantive_reply)      ← room reply FIRST, before any local narration
-        ack_task(claim_id, seq)
-    → (if message NOT addressed)
+        ack_task(claim_id, seq)              ← ack the CLAIM we just handled, not a future one
+        claim_task                           ← loop
+    → (returned a message NOT addressed to @{handle})
         ack_task(claim_id, seq)              ← silent skip, no send_message
-    → claim_task                             ← ALWAYS loop back, never terminate on your own
+        claim_task                           ← loop
+    → (you have an unsolicited follow-up to post — e.g. a fix finished while the loop was empty)
+        send_message(substantive_update)     ← NO ack_task; there's no outstanding claim
+        claim_task                           ← loop
+    — You NEVER terminate on your own; only a valid release sentinel exits the session.
 
-Worked example of a correct turn:
-    claim_task returns: `@{handle} fix the failing test`
-    → send_message("Investigating the failing test; will post the fix when I have it.")
-    → ack_task(claim_id, seq)
-    → (local: read the test, find the bug, edit the code, run the test locally)
-    → send_message("Fixed in <sha> — root cause was X, test now green.")
-    → ack_task(claim_id_of_any_interstitial_message_or_the_same_one_if_none, seq)
-    → claim_task   ← still listening, operator may follow up
+Worked example of a correct sequence:
+    claim_task  → returns: `@{handle} fix the failing test`
+    send_message("Investigating the failing test; will post the fix when I have it.")
+    ack_task(claim_id, seq)                  — ack the claim that triggered this turn
+    claim_task  → returns empty
+        (local: read the test, find the bug, edit the code, run the test locally)
+    claim_task  → returns empty
+        (local: verify the fix holds)
+    send_message("Fixed in <sha> — root cause was X, test now green.")
+                                             — unsolicited follow-up: NO ack_task here,
+                                               we didn't just claim anything
+    claim_task  → returns empty (or a new foreign message to handle next)
+    — loop continues until a valid release arrives.
 
 Constraints:
 - Do not fall back to raw URL polling, tail files, or SSE glue in this session unless this is explicitly the configured transport for your host.
@@ -468,8 +481,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     host = _make_host(args)
-    if args.handle:
-        os.environ["SAFEBOT_MCP_ROOM_NAME"] = host.handle
+    # Always export SAFEBOT_MCP_ROOM_NAME so the MCP server stamps
+    # the host's in-room sender label with the SAME handle the prompt
+    # tells operators to mention (and release). Without this, the
+    # MCP default auth-identity label (`mcp-...xxx`) appears in the
+    # room while the docs/prompt reference `@codex-exec-local` — they
+    # disagree, and release mentions miss the actual sender.
+    os.environ["SAFEBOT_MCP_ROOM_NAME"] = host.handle
     # --print-prompt must be side-effect-free: skip ensure_ready so
     # `--host claude-code --print-prompt` works on machines that don't
     # have the `claude` binary installed, and --print-prompt never
