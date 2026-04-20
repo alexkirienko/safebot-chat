@@ -799,6 +799,121 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     .then((r) => { console.log('adopt sent', r); showToast('Adopt offer sent to ' + name, true); })
     .catch((e) => { console.error(e); alert('Adopt failed: ' + (e.message || e)); });
 
+  // --- Peer history sync ------------------------------------------------
+  // When a browser joins a room with an empty (or short) local cache, ask
+  // participants whether anyone has a longer cache, and merge the first
+  // response into IDB. Both request + response are normal room messages —
+  // they ride on the shared room key, so only room members can read them.
+  // Intercept BEFORE renderMessage so protocol envelopes never surface as
+  // chat bubbles or get persisted as chat entries.
+  const histReqsHandled = new Set();     // req_ids we've already answered (as responder)
+  const histReqsPending = new Map();     // req_id -> {resolved:false} for requests we sent
+  const histResponsesSeen = new Set();   // req_ids a response was observed for (by anyone)
+  let histRequestedThisSession = false;  // fire request exactly once per tab open
+
+  function postProtocol(plaintext) {
+    // Minimal ciphertext post that bypasses the signed_only first-message
+    // toggle. Used by the history-sync protocol so our protocol frames
+    // don't accidentally flip the room into signed-only mode or eat the
+    // user's explicit signed-only first-post.
+    const { ciphertext, nonce } = C.encrypt(key, plaintext);
+    const body = { sender: me, ciphertext, nonce };
+    if (identity) {
+      // fire-and-forget sign; don't block protocol sends on sig failures.
+      identity.signRoomMessage(roomId, ciphertext)
+        .then((sigFields) => {
+          Object.assign(body, sigFields);
+          const payload = JSON.stringify(body);
+          if (ws && ws.readyState === 1) ws.send(payload); else sendQueue.push(payload);
+        })
+        .catch(() => {
+          const payload = JSON.stringify(body);
+          if (ws && ws.readyState === 1) ws.send(payload); else sendQueue.push(payload);
+        });
+      return;
+    }
+    const payload = JSON.stringify(body);
+    if (ws && ws.readyState === 1) ws.send(payload); else sendQueue.push(payload);
+  }
+
+  async function requestHistoryFromPeers() {
+    if (!window.SafeBotHistory) return;
+    let after = 0;
+    try { after = await window.SafeBotHistory.lastSeq(roomId); } catch (_) {}
+    const reqId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
+    histReqsPending.set(reqId, { resolved: false, startedAt: Date.now() });
+    const envelope = { safebot_hist_req_v1: true, req_id: reqId, after };
+    try { postProtocol(JSON.stringify(envelope)); } catch (_) {}
+    // Give up waiting after 8s so stale pending entries don't leak.
+    setTimeout(() => histReqsPending.delete(reqId), 8000);
+  }
+
+  function tryApplyHistEnvelope(msg) {
+    const plaintext = SafeBotCrypto.decrypt(key, msg.ciphertext, msg.nonce);
+    if (plaintext === null) return false;
+    if (!plaintext.startsWith('{')) return false;
+    let env;
+    try { env = JSON.parse(plaintext); } catch (_) { return false; }
+    if (!env || typeof env !== 'object') return false;
+
+    // Response: someone replied to our (or anyone's) request.
+    if (env.safebot_hist_resp_v1 === true) {
+      if (!env.req_id) return true;
+      // First-responder-wins per req_id, even if the request wasn't ours.
+      // That lets us still suppress redundant responders if we see a
+      // response in-flight before our own reply fires (see req path below).
+      const firstForReq = !histResponsesSeen.has(env.req_id);
+      histResponsesSeen.add(env.req_id);
+      const pend = histReqsPending.get(env.req_id);
+      if (!pend || pend.resolved || !firstForReq) return true;
+      pend.resolved = true;
+      const items = Array.isArray(env.items) ? env.items : [];
+      (async () => {
+        try {
+          if (window.SafeBotHistory) await window.SafeBotHistory.mergeAll(roomId, items);
+        } catch (_) {}
+        // Render items we haven't already shown. renderMessage dedups by id.
+        // Sort by seq ascending so the replay is chronological.
+        items.sort((a, b) => (a.seq || 0) - (b.seq || 0));
+        let rendered = 0;
+        for (const it of items) {
+          if (!it || !it.id || renderedIds.has(it.id)) continue;
+          renderMessage(it);
+          rendered += 1;
+        }
+        if (rendered > 0) showToast(`Restored ${rendered} older message${rendered === 1 ? '' : 's'} from a peer`, true);
+      })();
+      return true;
+    }
+
+    // Request: someone (possibly us — ignore self) wants cached history.
+    if (env.safebot_hist_req_v1 === true) {
+      if (!env.req_id) return true;
+      if (msg.sender === me) return true; // our own echo
+      if (histReqsHandled.has(env.req_id)) return true;
+      if (histResponsesSeen.has(env.req_id)) return true; // already answered by someone
+      histReqsHandled.add(env.req_id);
+      const after = Number(env.after) || 0;
+      // Jittered reply: 0–1200ms. If another peer responds first in that
+      // window we cancel — ensures only one client pays the egress cost
+      // on a crowded room.
+      const delay = Math.floor(Math.random() * 1200);
+      setTimeout(async () => {
+        if (histResponsesSeen.has(env.req_id)) return;
+        if (!window.SafeBotHistory) return;
+        let items = [];
+        try { items = await window.SafeBotHistory.serialize(roomId, { after }); } catch (_) {}
+        if (!items.length) return;
+        if (histResponsesSeen.has(env.req_id)) return; // last check before we post
+        histResponsesSeen.add(env.req_id);
+        const resp = { safebot_hist_resp_v1: true, req_id: env.req_id, items };
+        try { postProtocol(JSON.stringify(resp)); } catch (_) {}
+      }, delay);
+      return true;
+    }
+    return false;
+  }
+
   function connect() {
     if (stopped) return;
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -813,6 +928,16 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       try { ws.send(JSON.stringify({ type: 'hello', name: me, box_pub: _myBoxPubB64 })); } catch (_) {}
       for (const q of sendQueue) { try { ws.send(q); } catch (_) {} }
       sendQueue = [];
+      // Ask peers if anyone has a longer local history than we do. First
+      // connect of a fresh tab with empty IDB = ask for everything;
+      // reconnect with a populated IDB = ask only for seqs we're missing.
+      // Skip on reconnects: the first response that satisfied us already
+      // caught our IDB up, and we don't want a fresh request burst per
+      // reconnect cycle.
+      if (!histRequestedThisSession) {
+        histRequestedThisSession = true;
+        try { requestHistoryFromPeers(); } catch (_) {}
+      }
     });
     ws.addEventListener('message', (ev) => {
       let obj;
@@ -823,6 +948,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         // #3 from codex-qa review). tryApplyAdoptEnvelope returns true
         // when the message was an adopt handled by us and must not render.
         if (tryApplyAdoptEnvelope(obj)) return;
+        if (tryApplyHistEnvelope(obj)) return;
         renderMessage(obj);
       }
       else if (obj.type === 'ready' || obj.type === 'presence') {

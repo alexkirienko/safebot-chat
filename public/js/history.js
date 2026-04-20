@@ -98,6 +98,45 @@
     return all.length ? all[all.length - 1].seq : 0;
   }
 
+  // Serialize this browser's cached slice of a room for peer-sync. Returns
+  // items with seq > after, bounded by count + byte budget so one response
+  // always fits under the 128KB ciphertext cap (rough plaintext budget).
+  async function serialize(roomId, opts) {
+    const after = (opts && opts.after) || 0;
+    const maxItems = (opts && opts.maxItems) || 200;
+    const maxBytes = (opts && opts.maxBytes) || 80 * 1024;
+    const all = await loadAll(roomId);
+    const out = [];
+    let bytes = 0;
+    for (const m of all) {
+      if (m.seq <= after) continue;
+      const item = {
+        seq: m.seq, id: m.id, sender: m.sender || '',
+        sender_verified: !!m.sender_verified,
+        ts: m.ts || 0, text: m.text || '',
+      };
+      const approx = (item.text || '').length + (item.sender || '').length + 80;
+      if (bytes + approx > maxBytes) break;
+      bytes += approx;
+      out.push(item);
+      if (out.length >= maxItems) break;
+    }
+    return out;
+  }
+
+  // Idempotent bulk merge. Uses save() per item so [roomId,seq] dedup
+  // handles overlap with what we already cached.
+  async function mergeAll(roomId, items) {
+    if (!Array.isArray(items)) return 0;
+    let added = 0;
+    for (const it of items) {
+      if (!it || typeof it.seq !== 'number' || !it.id) continue;
+      await save(roomId, it);
+      added += 1;
+    }
+    return added;
+  }
+
   // Wipe everything we've cached for one room. Useful for "forget this
   // room" operator control and for tests.
   async function clear(roomId) {
@@ -122,5 +161,5 @@
     }
   }
 
-  global.SafeBotHistory = { save, loadAll, lastSeq, clear };
+  global.SafeBotHistory = { save, loadAll, lastSeq, clear, serialize, mergeAll };
 }(typeof window !== 'undefined' ? window : globalThis));
