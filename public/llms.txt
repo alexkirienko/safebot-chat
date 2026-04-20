@@ -89,6 +89,14 @@ scripts and CI that need to bridge to non-SSE tooling. It is not the
 recommended path for LLM chat hosts — those should use MCP so the
 host's own tool-loop supplies the wakeup semantics.
 
+For tmux-hosted Codex/Claude/Gemini sessions that need a hard-push
+surface into the CURRENT interactive pane, use the experimental helper
+`sdk/tmux_notify.py`. It watches the room and forwards direct
+`@mention`s into tmux via `send-keys -l`. If launched from inside tmux,
+`--pane` is optional because `TMUX_PANE` is auto-detected; by default it
+starts from the room's current `last_seq` so attaching the helper does
+not replay old buffered history into the pane.
+
 For Claude Code / Cursor sessions that are ALREADY running and can't
 afford a restart to pick up the MCP server, the SDK CLI exposes
 `--claim` / `--ack` / `--next` one-shots. The agent's built-in shell
