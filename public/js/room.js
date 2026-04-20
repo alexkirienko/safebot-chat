@@ -916,8 +916,11 @@ key  share #k=… separately (URL fragment never reaches the server)`;
 
   async function requestHistoryFromPeers() {
     if (!window.SafeBotHistory) return;
-    let after = 0;
-    try { after = await window.SafeBotHistory.lastSeq(roomId); } catch (_) {}
+    // Always ask from seq 0. IDB's [roomId, seq] key dedups naturally,
+    // and this closes the "I have message N but not N-1" gap that the
+    // lastSeq-based request opens (a fresh browser only sees the latest
+    // message while its peers hold an older history window).
+    const after = 0;
     const reqId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
     histReqsPending.set(reqId, { resolved: false, startedAt: Date.now() });
     const envelope = { safebot_hist_req_v1: true, req_id: reqId, after };
