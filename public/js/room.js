@@ -1075,7 +1075,15 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     return false;
   }
   function applyReact(targetId, emoji, op, actor) {
-    if (!targetId || !emoji || !actor) return;
+    // Strict well-typed gate: emoji + actor must be non-empty strings,
+    // op must be 'add' or 'remove'. Aligns in-memory mutation with the
+    // wire-path validation in tryApplyReactEnvelope, so internal callers
+    // (Playwright hooks, hist_resp hydrate, etc.) can't silently
+    // introduce non-string keys into the aggregate either.
+    if (typeof targetId !== 'string' || !targetId) return;
+    if (typeof emoji !== 'string' || !emoji) return;
+    if (typeof actor !== 'string' || !actor) return;
+    if (op !== 'add' && op !== 'remove') return;
     if (reactionTargetIsDead(targetId)) return;
     const m = _ensureReactMap(targetId);
     let s = m.get(emoji);

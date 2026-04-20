@@ -943,7 +943,7 @@ async function e2eReplyReactionsEdgeCases() {
     // by calling with bad arguments; the internals must not throw.
     await page.evaluate((id) => {
       const R = window.__safebotTest_reactions;
-      // bad emoji types
+      // bad emoji types — all rejected
       try { R.applyReact(id, null, 'add', 'mallory'); } catch (_) {}
       try { R.applyReact(id, '', 'add', 'mallory'); } catch (_) {}
       try { R.applyReact(id, 42, 'add', 'mallory'); } catch (_) {}
@@ -957,20 +957,12 @@ async function e2eReplyReactionsEdgeCases() {
       const m = window.__safebotTest_reactions.reactionsByMsgId.get(id);
       return m ? Object.fromEntries(Array.from(m.entries()).map(([k, v]) => [k, Array.from(v)])) : {};
     }, rxTarget);
-    // An 'ADD_OR_WHATEVER' op becomes neither add nor remove → no-op.
-    // An empty emoji is also a no-op due to the early-return guard.
-    // A numeric 42 emoji with op='add' would have fallen through — the
-    // applyReact guard checks `!emoji` which is truthy for 42; so 42
-    // actually DOES add. That's acceptable because 42 would render as
-    // literal "42" text via the DOM-build path (no XSS vector).
-    //   Expected: the "42" key has one actor 'mallory'.
-    //   No other keys should exist.
-    const keys = Object.keys(after);
-    if (!(keys.length === 1 && keys[0] === '42')) {
-      throw new Error('malformed envelope probes produced unexpected aggregate: ' + JSON.stringify(after));
-    }
-    if (!(Array.isArray(after['42']) && after['42'].length === 1 && after['42'][0] === 'mallory')) {
-      throw new Error('numeric-emoji case stored wrong actor: ' + JSON.stringify(after));
+    // Stricter contract since applyReact now rejects non-string emoji
+    // too (not only on the wire path): every probe is malformed, so
+    // the aggregate must remain empty. Closes the codex-qa nit on
+    // 1f9688c where the old test contradicted its own pass string.
+    if (Object.keys(after).length !== 0) {
+      throw new Error('malformed probes should not mutate state; got: ' + JSON.stringify(after));
     }
     pass('reactions: malformed arguments drop gracefully; only well-typed input mutates state');
 
