@@ -1138,27 +1138,38 @@ async function e2ePermalink() {
     await ctx3.close();
 
     // --- Attacker-controlled m= is regex-validated ---
+    // Positive observable: if the regex rejected the fragment, the
+    // jump logic never armed, so `m=` stays in the URL untouched
+    // (strip happens only on hit or miss, both of which require
+    // pendingJumpId to have been set). No toast, no DOM lookup with
+    // the attacker-controlled string, no fragment mutation.
     const ctx4 = await browser.newContext();
     const page4 = await ctx4.newPage();
     const hostileLinks = [
-      `${BASE}/room/${roomId}#k=${key}&m=<img>`,        // contains <
-      `${BASE}/room/${roomId}#k=${key}&m=${'a'.repeat(80)}`, // too long
-      `${BASE}/room/${roomId}#k=${key}&m=a`,            // too short
+      { bad: `${BASE}/room/${roomId}#k=${key}&m=${encodeURIComponent('<img>')}`, expectFragment: 'm=%3Cimg%3E' },
+      { bad: `${BASE}/room/${roomId}#k=${key}&m=${'a'.repeat(80)}`, expectFragment: 'm=' + 'a'.repeat(80) },
+      { bad: `${BASE}/room/${roomId}#k=${key}&m=a`, expectFragment: 'm=a' },
     ];
-    for (const bad of hostileLinks) {
+    for (const { bad, expectFragment } of hostileLinks) {
       await page4.goto(bad, { waitUntil: 'domcontentloaded' });
       await page4.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
-      // After 1 s: if the regex rejected it correctly, there should be
-      // NO pending-jump attempt. Best observable: the toast never appears
-      // with "not in the loaded history" within 2 s (would-be observer
-      // is never armed) AND no bubble flashed.
-      const seenToast = await page4.evaluate(() => {
-        const t = document.getElementById('toast');
-        return t && (t.textContent || '').includes('not in the loaded history');
-      });
-      if (seenToast) throw new Error('invalid m= should be silently dropped, not surface missing-target toast: ' + bad);
+      // Wait a beat so any wrongly-armed observer would kick.
+      await page4.waitForTimeout(300);
+      const state = await page4.evaluate(() => ({
+        hash: location.hash,
+        flashed: !!document.querySelector('.bubble.is-flash'),
+        toast: (() => {
+          const t = document.getElementById('toast');
+          return t && (t.textContent || '').includes('not in the loaded history');
+        })(),
+      }));
+      if (!state.hash.includes(expectFragment)) {
+        throw new Error(`malformed m= was mutated by the client; expected fragment to still contain ${JSON.stringify(expectFragment)}, got hash=${state.hash}`);
+      }
+      if (state.toast) throw new Error('malformed m= should not surface missing-target toast: ' + bad);
+      if (state.flashed) throw new Error('malformed m= should not flash any bubble: ' + bad);
     }
-    pass('permalink: malformed m= fragments silently dropped by regex gate (no jump attempted)');
+    pass('permalink: malformed m= fragments silently dropped by regex gate (URL untouched, no flash, no toast)');
 
     await ctx4.close();
   } finally {
