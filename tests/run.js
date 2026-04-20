@@ -518,6 +518,86 @@ async function e2eReplyConvergence() {
   }
 }
 
+async function e2eReactionsV1() {
+  log('E2E: reactions v1 — state + dead-target rule');
+  const browser = await chromium.launch();
+  try {
+    const page = await (await browser.newContext()).newPage();
+    const crypto = require('node:crypto');
+    const rid = 'RXV1' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
+    await page.goto(`${BASE}/room/${rid}#k=${key}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => !!(window.__safebotTest_reactions), null, { timeout: 10000 });
+
+    const parentId = crypto.randomUUID();
+    // Render a parent bubble so the DOM has something to hang reactions on.
+    await page.evaluate((id) => {
+      window.__safebotTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'hello' });
+    }, parentId);
+
+    // 1. Add two distinct actors with the same emoji → count = 2, no dupes.
+    await page.evaluate((id) => {
+      const R = window.__safebotTest_reactions;
+      R.applyReact(id, '👍', 'add', 'alice');
+      R.applyReact(id, '👍', 'add', 'bob');
+      R.applyReact(id, '👍', 'add', 'alice');        // idempotent add
+    }, parentId);
+    let s = await page.evaluate((id) => {
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+      const pills = el ? Array.from(el.querySelectorAll('.bubble__react-pill')) : [];
+      return pills.map((p) => ({
+        emoji: (p.querySelector('.bubble__react-emoji') || {}).textContent,
+        count: (p.querySelector('.bubble__react-count') || {}).textContent,
+      }));
+    }, parentId);
+    if (s.length !== 1 || s[0].emoji !== '👍' || s[0].count !== '2') {
+      throw new Error('unexpected pills after two distinct actors: ' + JSON.stringify(s));
+    }
+    pass('reactions: two distinct actors → single pill, count=2, idempotent add');
+
+    // 2. Remove one actor → count drops to 1.
+    await page.evaluate((id) => window.__safebotTest_reactions.applyReact(id, '👍', 'remove', 'bob'), parentId);
+    s = await page.evaluate((id) => {
+      const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+      const pills = el ? Array.from(el.querySelectorAll('.bubble__react-pill')) : [];
+      return pills.map((p) => ({
+        emoji: (p.querySelector('.bubble__react-emoji') || {}).textContent,
+        count: (p.querySelector('.bubble__react-count') || {}).textContent,
+      }));
+    }, parentId);
+    if (s.length !== 1 || s[0].count !== '1') throw new Error('remove did not decrement: ' + JSON.stringify(s));
+    pass('reactions: remove one actor → count=1');
+
+    // 3. Delete the target → react aggregate drops AND a later react
+    //    envelope for the same id is ignored (deletedIds dominates).
+    await page.evaluate((id) => window.__safebotTest.applyDelete(id, 1), parentId);
+    await page.evaluate((id) => window.__safebotTest_reactions.applyReact(id, '❤️', 'add', 'eve'), parentId);
+    const post = await page.evaluate((id) => {
+      const R = window.__safebotTest_reactions;
+      return {
+        mapHas: R.reactionsByMsgId.has(id),
+        bubbleStillInDom: !!document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`),
+      };
+    }, parentId);
+    if (post.mapHas) throw new Error('deletedIds must dominate: react state lingered after delete');
+    pass('reactions: delete-target prunes aggregate and rejects new reactions');
+
+    // 4. Hydrate from hist-summary for an already-deleted target → rejected.
+    await page.evaluate((id) => {
+      window.__safebotTest_reactions.hydrateReactions(id, { '🔥': ['carol'] });
+    }, parentId);
+    const afterHydrate = await page.evaluate((id) =>
+      window.__safebotTest_reactions.reactionsByMsgId.has(id), parentId);
+    if (afterHydrate) throw new Error('hist-summary hydrate must not resurrect reactions for deleted target');
+    pass('reactions: hist-summary hydrate drops aggregate for already-deleted target');
+
+    await browser.close();
+  } catch (e) {
+    await browser.close();
+    throw e;
+  }
+}
+
 async function main() {
   await startServer();
   try {
@@ -526,6 +606,7 @@ async function main() {
     await e2eTests();
     await e2eRoomUIChecks();
     await e2eReplyConvergence();
+    await e2eReactionsV1();
     await pythonSdkTest();
     noLogsAudit();
   } finally {

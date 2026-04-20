@@ -591,7 +591,8 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         if (probe && (probe.safebot_adopt_v1 === true
                    || probe.safebot_hist_req_v1 === true
                    || probe.safebot_hist_resp_v1 === true
-                   || probe.safebot_delete_v1 === true)) {
+                   || probe.safebot_delete_v1 === true
+                   || probe.safebot_react_v1 === true)) {
           // Evict a prior stale cache entry if present.
           try { window.SafeBotHistory && window.SafeBotHistory.evict && window.SafeBotHistory.evict(roomId, m.seq); } catch (_) {}
           return;
@@ -700,6 +701,31 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         setReplyingTo({ id: m.id, sender: m.sender || 'agent', preview: plaintext });
       });
       bubble.appendChild(rep);
+
+      // Reactions toggle button + inline picker (6 presets v1).
+      const rxBtn = document.createElement('button');
+      rxBtn.className = 'bubble__react-btn';
+      rxBtn.type = 'button';
+      rxBtn.title = 'Add reaction';
+      rxBtn.setAttribute('aria-label', 'Add reaction');
+      rxBtn.textContent = '😀';
+      rxBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        toggleReactPicker(bubble, m.id);
+      });
+      bubble.appendChild(rxBtn);
+    }
+
+    // Restore any existing reactions for this msg on (re-)render.
+    if (m.id && !reactionTargetIsDead(m.id)) {
+      // Accept persisted reactions from the cache record path.
+      if (m.reactions && typeof m.reactions === 'object') hydrateReactions(m.id, m.reactions);
+      // Separate row — renderReactionsRow no-ops when empty.
+      const row = document.createElement('div');
+      row.className = 'bubble__reactions';
+      bubble.appendChild(row);
+      renderReactionsRow(row, m.id);
     }
 
     // Disappearing-messages badge + expiry schedule. If the message
@@ -754,11 +780,13 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     // still shows the conversation. Fire-and-forget; IDB failures are
     // logged and don't affect rendering.
     if (window.SafeBotHistory) {
+      const reactionsObj = m.id ? serializeReactions(m.id) : undefined;
       window.SafeBotHistory.save(roomId, {
         id: m.id, seq: m.seq, sender: m.sender,
         sender_verified: m.sender_verified, ts: m.ts, text: plaintext,
         ttl_ms: ttlMs || undefined,
         reply_to: m.reply_to || undefined,
+        reactions: reactionsObj,
       });
     }
   }
@@ -1023,6 +1051,212 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     btn.classList.toggle('is-active', active);
   }
 
+  // --- Reactions ---------------------------------------------------------
+  // In-memory: target_id → emoji → Set<actor>. Persisted in IDB as
+  // per-msg `reactions: {emoji: [actor, ...], ...}` on the cached
+  // record so a reload carries the aggregate. Protocol envelope:
+  // {safebot_react_v1: true, target_id, emoji, op: "add"|"remove", actor}
+  // is intercepted before renderMessage.
+  const REACTION_PRESETS = ['👍', '❤️', '😂', '🔥', '😮', '👎'];
+  const reactionsByMsgId = new Map();
+  function _ensureReactMap(id) {
+    let m = reactionsByMsgId.get(id);
+    if (!m) { m = new Map(); reactionsByMsgId.set(id, m); }
+    return m;
+  }
+  function reactionTargetIsDead(targetId) {
+    // deletedIds + TTL death dominate: react envelopes for a tombstoned
+    // or expired target are dropped on arrival and never resurrect
+    // aggregate state later (codex-qa QA bar on reactions v1).
+    if (!targetId) return true;
+    if (deletedIds.has(targetId)) return true;
+    const rec = knownMessages.get(targetId);
+    if (rec && rec.ttl_ms && rec.ts && (rec.ts + rec.ttl_ms) <= Date.now()) return true;
+    return false;
+  }
+  function applyReact(targetId, emoji, op, actor) {
+    if (!targetId || !emoji || !actor) return;
+    if (reactionTargetIsDead(targetId)) return;
+    const m = _ensureReactMap(targetId);
+    let s = m.get(emoji);
+    if (!s) { s = new Set(); m.set(emoji, s); }
+    if (op === 'add') s.add(actor);
+    else if (op === 'remove') s.delete(actor);
+    if (s.size === 0) m.delete(emoji);
+    if (m.size === 0) reactionsByMsgId.delete(targetId);
+    refreshReactionsOn(targetId);
+    // Persist aggregate to IDB — best-effort, doesn't block UI.
+    try { persistReactionsFor(targetId); } catch (_) {}
+  }
+  function serializeReactions(targetId) {
+    const m = reactionsByMsgId.get(targetId);
+    if (!m) return undefined;
+    const out = {};
+    for (const [emoji, actors] of m) out[emoji] = Array.from(actors);
+    return out;
+  }
+  function hydrateReactions(targetId, obj) {
+    if (!obj || typeof obj !== 'object') return;
+    // Same dead-target rule as applyReact: a hist-summary carrying
+    // reactions for a target that's already deleted/expired on this
+    // client must not resurrect the aggregate.
+    if (reactionTargetIsDead(targetId)) return;
+    const m = _ensureReactMap(targetId);
+    for (const [emoji, actors] of Object.entries(obj)) {
+      if (!Array.isArray(actors)) continue;
+      let s = m.get(emoji);
+      if (!s) { s = new Set(); m.set(emoji, s); }
+      for (const a of actors) if (typeof a === 'string') s.add(a);
+    }
+    refreshReactionsOn(targetId);
+  }
+  async function persistReactionsFor(targetId) {
+    if (!window.SafeBotHistory || !window.SafeBotHistory.loadAll) return;
+    const cached = await window.SafeBotHistory.loadAll(roomId);
+    const rec = cached.find((c) => c.id === targetId);
+    if (!rec) return;
+    const serialized = serializeReactions(targetId);
+    await window.SafeBotHistory.save(roomId, { ...rec, reactions: serialized });
+  }
+  function myReactorLabel() {
+    // Signed sender → '@handle' (server-stamps this on our messages);
+    // unsigned → our display name. Matches what the server would stamp
+    // on our outgoing react envelope, so the aggregate counts our own
+    // reaction exactly once.
+    return identity ? ('@' + identity.handle) : me;
+  }
+  function myReactions(targetId) {
+    const actor = myReactorLabel();
+    const m = reactionsByMsgId.get(targetId);
+    if (!m) return new Set();
+    const out = new Set();
+    for (const [emoji, actors] of m) if (actors.has(actor)) out.add(emoji);
+    return out;
+  }
+  function renderReactionsRow(el, targetId) {
+    el.innerHTML = '';
+    const m = reactionsByMsgId.get(targetId);
+    if (!m || m.size === 0) { el.hidden = true; return; }
+    el.hidden = false;
+    const mine = myReactions(targetId);
+    // Stable order: presets first in their declared order, then any
+    // other emoji alphabetically so counts don't jitter on every add.
+    const seen = new Set();
+    const ordered = [];
+    for (const e of REACTION_PRESETS) if (m.has(e)) { ordered.push(e); seen.add(e); }
+    const extra = [];
+    for (const e of m.keys()) if (!seen.has(e)) extra.push(e);
+    extra.sort();
+    for (const e of extra) ordered.push(e);
+    for (const emoji of ordered) {
+      const pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'bubble__react-pill' + (mine.has(emoji) ? ' is-mine' : '');
+      pill.innerHTML = `<span class="bubble__react-emoji">${emoji}</span><span class="bubble__react-count">${m.get(emoji).size}</span>`;
+      pill.title = Array.from(m.get(emoji)).join(', ');
+      pill.addEventListener('click', (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        toggleOwnReaction(targetId, emoji);
+      });
+      el.appendChild(pill);
+    }
+  }
+  function refreshReactionsOn(targetId) {
+    const bubble = chatListEl.querySelector(`.bubble[data-msg-id="${CSS.escape(targetId)}"]`);
+    if (!bubble) return;
+    let row = bubble.querySelector('.bubble__reactions');
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'bubble__reactions';
+      bubble.appendChild(row);
+    }
+    renderReactionsRow(row, targetId);
+  }
+  function toggleOwnReaction(targetId, emoji) {
+    const actor = myReactorLabel();
+    const m = reactionsByMsgId.get(targetId);
+    const alreadyHas = !!(m && m.get(emoji) && m.get(emoji).has(actor));
+    const op = alreadyHas ? 'remove' : 'add';
+    // Optimistic local apply — the echo of our own envelope will be a
+    // no-op because the Set membership is already in the target state.
+    applyReact(targetId, emoji, op, actor);
+    // Wire: no `actor` field — receivers derive actor from the outer
+    // msg.sender (server-stamped for signed posts). The local
+    // optimistic apply already used the right actor value above.
+    const env = { safebot_react_v1: true, target_id: targetId, emoji, op };
+    try { postProtocol(JSON.stringify(env)); } catch (_) {}
+  }
+  let _openPicker = null;
+  function toggleReactPicker(bubble, targetId) {
+    if (_openPicker && _openPicker.parentNode === bubble) {
+      bubble.removeChild(_openPicker);
+      _openPicker = null;
+      return;
+    }
+    if (_openPicker && _openPicker.parentNode) _openPicker.parentNode.removeChild(_openPicker);
+    const pick = document.createElement('div');
+    pick.className = 'bubble__react-picker';
+    for (const emoji of REACTION_PRESETS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'bubble__react-pick';
+      b.textContent = emoji;
+      b.title = 'React with ' + emoji;
+      b.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        toggleOwnReaction(targetId, emoji);
+        if (pick.parentNode) pick.parentNode.removeChild(pick);
+        if (_openPicker === pick) _openPicker = null;
+      });
+      pick.appendChild(b);
+    }
+    bubble.appendChild(pick);
+    _openPicker = pick;
+    setTimeout(() => {
+      const onDoc = (e) => {
+        if (!_openPicker) { document.removeEventListener('click', onDoc, true); return; }
+        if (!_openPicker.contains(e.target)) {
+          if (_openPicker.parentNode) _openPicker.parentNode.removeChild(_openPicker);
+          _openPicker = null;
+          document.removeEventListener('click', onDoc, true);
+        }
+      };
+      document.addEventListener('click', onDoc, true);
+    }, 0);
+  }
+
+  function tryApplyReactEnvelope(msg) {
+    const plaintext = C.decrypt(key, msg.ciphertext, msg.nonce);
+    if (plaintext === null) return false;
+    if (!plaintext.startsWith('{')) return false;
+    let env;
+    try { env = JSON.parse(plaintext); } catch (_) { return false; }
+    if (!env || env.safebot_react_v1 !== true) return false;
+    if (typeof env.target_id !== 'string' || typeof env.emoji !== 'string') return true;
+    if (env.op !== 'add' && env.op !== 'remove') return true;
+    // Derive actor strictly from the outer envelope — NEVER trust the
+    // inner `env.actor` field (per codex-qa pre-commit note). Signed
+    // transport authenticates the outer sender, not arbitrary inner
+    // fields: otherwise a signed author could post a signed react
+    // envelope that claimed someone else's `actor`. In unsigned rooms
+    // msg.sender is still spoofable by anyone with the room key; that's
+    // the known unsigned-room limitation, not new surface.
+    const actor = msg.sender || '';
+    if (!actor) return true;
+    applyReact(env.target_id, env.emoji, env.op, actor);
+    return true;
+  }
+
+  // Dev hooks for Playwright regression of the reactions slice.
+  window.__safebotTest_reactions = {
+    applyReact,
+    serializeReactions,
+    hydrateReactions,
+    toggleOwnReaction,
+    reactionsByMsgId,
+  };
+
   // --- Reply-to-message --------------------------------------------------
   // Stable id → {sender, text, ts, ttl_ms} so reply-ref previews can
   // look up a target after its original bubble has scrolled away.
@@ -1179,6 +1413,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (!targetId || deletedIds.has(targetId)) return;
     deletedIds.set(targetId, Date.now());
     persistDeleted();
+    // Drop any reaction aggregate for the deleted target — deletedIds
+    // dominates hist-summary merge AND live react envelopes, so the
+    // state must go too (not just the DOM).
+    reactionsByMsgId.delete(targetId);
     // Converge any live reply-ref pointing at this id on the
     // "deleted message" placeholder so a child reply can't keep
     // showing cached plaintext.
@@ -1317,6 +1555,15 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         try {
           if (window.SafeBotHistory) await window.SafeBotHistory.mergeAll(roomId, items);
         } catch (_) {}
+        // Hydrate reaction aggregates carried in the hist_resp summary.
+        // reactionTargetIsDead() gating inside hydrateReactions drops
+        // any that point at an already-deleted/expired target on this
+        // client — deletedIds + TTL death dominate the merge.
+        for (const it of items) {
+          if (it && it.id && it.reactions) {
+            try { hydrateReactions(it.id, it.reactions); } catch (_) {}
+          }
+        }
         // Render items we haven't already shown. renderMessage dedups by id.
         // Sort by seq ascending so the replay is chronological.
         items.sort((a, b) => (a.seq || 0) - (b.seq || 0));
@@ -1438,6 +1685,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         // when the message was an adopt handled by us and must not render.
         if (tryApplyAdoptEnvelope(obj)) return;
         if (tryApplyDeleteEnvelope(obj)) return;
+        if (tryApplyReactEnvelope(obj)) return;
         if (tryApplyHistEnvelope(obj)) return;
         renderMessage(obj);
       }

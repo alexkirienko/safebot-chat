@@ -743,6 +743,60 @@ section { padding: 80px 0; position: relative; }
   font-size: 16px; line-height: 1; cursor: pointer; padding: 0 4px;
 }
 .replying-pill__x:hover { color: var(--d-text-1); }
+
+.bubble__react-btn {
+  position: absolute; top: 4px; right: 56px;
+  width: 22px; height: 22px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 999px;
+  background: rgba(0,0,0,0.25);
+  font-size: 13px; cursor: pointer;
+  opacity: 0; transition: opacity .12s, background .12s;
+}
+.bubble:hover .bubble__react-btn,
+.bubble:focus-within .bubble__react-btn,
+.bubble__react-btn:focus-visible { opacity: 1; }
+.bubble__react-btn:hover,
+.bubble__react-btn:focus-visible { background: rgba(59,130,246,0.9); outline: none; }
+
+.bubble__react-picker {
+  position: absolute; top: 28px; right: 4px;
+  display: flex; gap: 2px;
+  padding: 4px 6px; border-radius: 999px;
+  background: var(--d-surface-2, #1a1a22);
+  border: 1px solid var(--d-border);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  z-index: 10;
+}
+.bubble__react-pick {
+  border: none; background: transparent;
+  font-size: 18px; line-height: 1;
+  padding: 4px 6px; border-radius: 999px;
+  cursor: pointer;
+}
+.bubble__react-pick:hover { background: var(--d-surface-3, rgba(255,255,255,0.08)); }
+
+.bubble__reactions {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  margin-top: 4px;
+}
+.bubble__reactions[hidden] { display: none; }
+.bubble__react-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--d-border);
+  background: rgba(0,0,0,0.15);
+  font-size: 12px; cursor: pointer;
+  color: var(--d-text-2);
+}
+.bubble__react-pill:hover { background: rgba(0,0,0,0.22); }
+.bubble__react-pill.is-mine {
+  border-color: var(--primary, #3B82F6);
+  background: color-mix(in srgb, var(--primary, #3B82F6) 18%, transparent);
+  color: var(--d-text-1);
+}
+.bubble__react-emoji { font-size: 13px; line-height: 1; }
+.bubble__react-count { font-weight: 600; }
 .bubble__ttl {
   display: inline-flex; align-items: center; gap: 4px;
   margin-top: 4px;

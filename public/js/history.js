@@ -61,6 +61,9 @@
         };
         if (typeof msg.ttl_ms === 'number' && msg.ttl_ms > 0) rec.ttl_ms = msg.ttl_ms;
         if (typeof msg.reply_to === 'string' && msg.reply_to) rec.reply_to = msg.reply_to;
+        if (msg.reactions && typeof msg.reactions === 'object' && Object.keys(msg.reactions).length > 0) {
+          rec.reactions = msg.reactions;
+        }
         tx.objectStore(STORE).put(rec);
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
@@ -127,7 +130,8 @@
           if (p && (p.safebot_adopt_v1 === true
                  || p.safebot_hist_req_v1 === true
                  || p.safebot_hist_resp_v1 === true
-                 || p.safebot_delete_v1 === true)) continue;
+                 || p.safebot_delete_v1 === true
+                 || p.safebot_react_v1 === true)) continue;
         } catch (_) { /* not JSON */ }
       }
       seen += 1;
@@ -141,6 +145,7 @@
       };
       if (m.ttl_ms) item.ttl_ms = m.ttl_ms;
       if (m.reply_to) item.reply_to = m.reply_to;
+      if (m.reactions && Object.keys(m.reactions).length > 0) item.reactions = m.reactions;
       const approx = (item.text || '').length + (item.sender || '').length + 80;
       if (bytes + approx > maxBytes) break;
       bytes += approx;
