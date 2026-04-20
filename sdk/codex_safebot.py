@@ -69,13 +69,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     host = CodexAdapter()
+    if args.print_prompt:
+        # side-effect-free: do not run the MCP bootstrap when we're only
+        # dumping the prompt text.
+        print(build_prompt(host, args.room_url, release_sentinel=DEFAULT_RELEASE_SENTINEL))
+        return 0
     host.ensure_ready(base=args.base, mcp_name=args.mcp_name, force=args.force)
     if args.install_only:
         return 0
     prompt = build_prompt(host, args.room_url, release_sentinel=DEFAULT_RELEASE_SENTINEL)
-    if args.print_prompt:
-        print(prompt)
-        return 0
     extras = list(args.codex_args)
     def _argv():
         return host.build_argv(args.room_url, prompt, extras)

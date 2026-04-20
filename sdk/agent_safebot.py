@@ -193,17 +193,19 @@ class CustomAdapter(HostAdapter):
 
     name = "custom"
 
-    def __init__(self, cmd_template: str, *, handle: str = "safebot-listener"):
+    def __init__(self, cmd_template: str, *, handle: str = "safebot-listener",
+                 release_sentinel: str = DEFAULT_RELEASE_SENTINEL):
         if not cmd_template:
             fail("--host custom requires --cmd '<command template>'")
         self.cmd_template = cmd_template
         self.handle = handle
+        self.release_sentinel = release_sentinel
 
     def build_argv(self, room_url, prompt, extras):
         rendered = self.cmd_template.format(
             prompt=prompt,
             room_url=room_url,
-            release_sentinel=DEFAULT_RELEASE_SENTINEL,
+            release_sentinel=self.release_sentinel,
         )
         argv = shlex.split(rendered)
         if "{prompt}" not in self.cmd_template and "{room_url}" not in self.cmd_template:
@@ -330,7 +332,11 @@ def respawn_loop(
 
 def _make_host(args: argparse.Namespace) -> HostAdapter:
     if args.host == "custom":
-        return CustomAdapter(args.cmd or "", handle=args.custom_handle or "safebot-listener")
+        return CustomAdapter(
+            args.cmd or "",
+            handle=args.custom_handle or "safebot-listener",
+            release_sentinel=args.release_sentinel,
+        )
     cls = HOSTS.get(args.host)
     if not cls:
         fail(f"unknown --host: {args.host}. Known: {', '.join(sorted(list(HOSTS.keys()) + ['custom']))}")
@@ -368,13 +374,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     host = _make_host(args)
+    # --print-prompt must be side-effect-free: skip ensure_ready so
+    # `--host claude-code --print-prompt` works on machines that don't
+    # have the `claude` binary installed, and --print-prompt never
+    # touches MCP config on machines that do.
+    if args.print_prompt:
+        print(build_prompt(host, args.room_url or "", release_sentinel=args.release_sentinel))
+        return 0
     host.ensure_ready(base=args.base, mcp_name=args.mcp_name, force=args.force)
     if args.install_only:
         return 0
     prompt = build_prompt(host, args.room_url or "", release_sentinel=args.release_sentinel)
-    if args.print_prompt:
-        print(prompt)
-        return 0
     def _argv():
         return host.build_argv(args.room_url, prompt, list(args.host_args))
     return respawn_loop(_argv, release_sentinel=args.release_sentinel, once=args.once)

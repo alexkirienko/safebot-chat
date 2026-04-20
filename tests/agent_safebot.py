@@ -162,28 +162,66 @@ def case_print_prompt() -> None:
 
 
 def case_claude_code_addendum() -> None:
-    # claude-code preset requires `claude` binary on PATH for ensure_ready;
-    # skip that by calling --print-prompt which short-circuits before it.
+    # --print-prompt MUST be side-effect-free (no ensure_ready, no MCP
+    # probe). Run on an empty PATH so that if ensure_ready leaked in,
+    # the `claude` binary lookup would fail the test loudly.
     proc = run([
         "--host", "claude-code",
         "--print-prompt",
         "https://safebot.chat/room/ABC#k=xyz",
-    ], {})
-    if proc.returncode != 0:
-        # ensure_ready still runs before print-prompt in our impl — accept
-        # the binary-missing error path as well, but verify the prompt if
-        # it did print.
-        assert "Claude Code" in proc.stdout or "missing required command: claude" in proc.stderr, (proc.stdout, proc.stderr)
-    else:
-        out = proc.stdout
-        assert "@claude-code-exec" in out, out
-        assert "Monitor" in out or "ScheduleWakeup" in out, "claude-code addendum should mention host primitives"
-        ok("claude-code preset prompt mentions Monitor / ScheduleWakeup")
+    ], {"PATH": "/nonexistent"})
+    assert proc.returncode == 0, f"--print-prompt must not invoke ensure_ready, got rc={proc.returncode}: {proc.stderr}"
+    out = proc.stdout
+    assert "@claude-code-exec" in out, out
+    assert "Monitor" in out or "ScheduleWakeup" in out, "claude-code addendum should mention host primitives"
+    ok("claude-code preset --print-prompt is side-effect-free and mentions Monitor / ScheduleWakeup")
+
+
+def case_custom_sentinel_honoured() -> None:
+    # Regression: CustomAdapter was hard-coding DEFAULT_RELEASE_SENTINEL in
+    # its template substitution, while the wrapper listened for
+    # args.release_sentinel — so the two disagreed on the sentinel string.
+    # Verify that a custom sentinel piped through via --release-sentinel
+    # round-trips into the template AND stops the respawn loop.
+    with tempfile.TemporaryDirectory() as td:
+        log = Path(td) / "log"
+        bindir = Path(td) / "bin"
+        bindir.mkdir()
+        # Fake host: echoes its --marker arg on stdout then exits 0.
+        echo = bindir / "echo-host"
+        echo.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys, json, os\n"
+            "open(os.environ['TEST_LOG'],'a').write(json.dumps(sys.argv[1:])+'\\n')\n"
+            "for a in sys.argv[1:]:\n"
+            "    if a.startswith('marker='):\n"
+            "        print(a.split('=',1)[1]); break\n",
+            encoding="utf-8",
+        )
+        echo.chmod(echo.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        env = {
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "TEST_LOG": str(log),
+        }
+        proc = run([
+            "--host", "custom",
+            "--cmd", "echo-host marker={release_sentinel}",
+            "--release-sentinel", "CUSTOM_STOP_42",
+            "https://safebot.chat/room/ABC#k=xyz",
+        ], env, timeout=15)
+        assert proc.returncode == 0, (proc.returncode, proc.stderr)
+        assert "CUSTOM_STOP_42" in proc.stdout, proc.stdout
+        lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
+        # Exactly one invocation: sentinel observed → wrapper stops.
+        assert len(lines) == 1, f"wrapper did not stop on custom sentinel: {lines!r}"
+        assert any(a == "marker=CUSTOM_STOP_42" for a in lines[0]), f"template did not substitute custom sentinel: {lines[0]!r}"
+        ok("custom --release-sentinel round-trips through template AND stops respawn loop")
 
 
 def main() -> int:
     case_custom_once()
     case_release_sentinel()
+    case_custom_sentinel_honoured()
     case_print_prompt()
     case_claude_code_addendum()
     case_fast_fail_cap()
