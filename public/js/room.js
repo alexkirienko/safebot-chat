@@ -1030,6 +1030,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   let replyingTo = null; // {id, sender, preview} or null
   function rememberMessage(m, text) {
     if (!m || !m.id) return;
+    const hadBefore = knownMessages.has(m.id);
     knownMessages.set(m.id, {
       sender: m.sender || 'agent',
       text: typeof text === 'string' ? text : (m.text || ''),
@@ -1045,6 +1046,14 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         if (i++ >= drop) break;
         knownMessages.delete(k);
       }
+    }
+    // Child-before-parent convergence (codex-qa major on 206cf63):
+    // if any live reply-ref in the DOM was rendered as the generic
+    // "replying to an earlier message" placeholder because this id
+    // was unknown at that moment, upgrade it now that we have the
+    // real sender + text.
+    if (!hadBefore) {
+      try { refreshReplyRefsPointingAt(m.id); } catch (_) {}
     }
   }
   function replyRefIsDead(id) {
@@ -1190,6 +1199,17 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   }
   // Console escape hatch for deleting by id (or by raw CSS-selector search).
   window.safebotDelete = (id, seq) => initiateDelete({ id, seq });
+
+  // Debug namespace — exposed in all builds (no prod-sensitive data)
+  // so browser tests can inject synthetic messages to exercise UI
+  // invariants like child-before-parent reply convergence.
+  window.__safebotTest = {
+    renderMessage: (m) => renderMessage(m),
+    rememberMessage: (m, text) => rememberMessage(m, text),
+    applyDelete: (id, seq) => applyDelete(id, seq),
+    knownMessages,
+    deletedIds,
+  };
 
   const histReqsHandled = new Set();     // req_ids we've already answered (as responder)
   const histReqsPending = new Map();     // req_id -> {resolved:false} for requests we sent

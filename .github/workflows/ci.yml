@@ -83,6 +83,13 @@ jobs:
           python3 tests/tmux_notify.py
           python3 tests/room_reply.py
 
+      - name: Browser regression (reply-ref convergence)
+        env:
+          SAFEBOT_BASE: http://127.0.0.1:3123
+        run: |
+          npx playwright install --with-deps chromium
+          node tests/reply_convergence.js
+
       - name: MCP smoke (stdio JSON-RPC)
         env:
           SAFEBOT_BASE: http://127.0.0.1:3123
