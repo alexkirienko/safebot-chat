@@ -1696,7 +1696,20 @@ app.post('/api/identity/register', (req, res) => {
   if (!isCanonicalBase64(box_pub, 32) || !isCanonicalBase64(sign_pub, 32)) {
     return res.status(400).json({ error: 'box_pub and sign_pub must be strict canonical base64 of 32 bytes' });
   }
-  if (identities.has(handle)) return res.status(409).json({ error: 'handle taken' });
+  if (identities.has(handle)) {
+    // Idempotent re-register: same owner with matching sign_pub + valid
+    // proof of possession gets 200. Only a different keypair collides
+    // with 409. This prevents the "sign in on a second browser, server
+    // keeps your OG keys, client silently stores new useless keys"
+    // footgun — client can now probe by calling register and
+    // distinguishing "still me" from "someone else owns this now".
+    const existing = identities.get(handle);
+    if (existing.sign_pub !== sign_pub) {
+      return res.status(409).json({ error: 'handle taken' });
+    }
+    // Fall through to verify register_sig so we don't accept a
+    // ciphertext-recycled request without proof of sign_sk possession.
+  }
   // Require proof that the registrant actually holds sign_sk matching sign_pub:
   // sign `"register <handle> <register_ts>"`. Without this, a third party
   // could race to register someone else's handle with arbitrary keys.

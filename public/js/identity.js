@@ -161,6 +161,30 @@
   }
 
   async function createAndRegister(handle, baseUrl) {
+    // Reuse an existing local keypair for this handle if we have one.
+    // Registering is idempotent on the wire, but minting a fresh keypair
+    // every time the user types an already-owned handle is a footgun:
+    // server 409s, the new sk doesn't match the stored sign_pub, and
+    // every signed message the user then sends fails verifyRoomSenderSig.
+    const existing = loadFromStorage();
+    if (existing && existing.handle === handle) {
+      const ident = new Identity(existing);
+      // Best-effort re-register: server is idempotent on matching
+      // (handle, sign_pub) so this is a no-op in the happy path and
+      // surfaces a clear error if the server has a DIFFERENT sign_pub
+      // under this handle (meaning someone else owns it now).
+      try {
+        const res = await ident.register(baseUrl);
+        if (!res.ok && res.status === 409) {
+          throw new Error('@' + handle + ' is registered to a different keypair on the server — this browser\'s local identity is stale. Use Sign in → Import with the original JSON, or pick a new handle.');
+        }
+      } catch (e) {
+        if (e && /stale/.test(e.message || '')) throw e;
+        // network hiccup — keep using the local identity; the first
+        // signed send will surface a clearer error if needed.
+      }
+      return ident;
+    }
     const { ident, rec } = await _mintAndRegister(handle, baseUrl);
     saveToStorage(rec);
     return ident;
