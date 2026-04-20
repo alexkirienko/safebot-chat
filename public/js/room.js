@@ -526,6 +526,13 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   function renderMessage(m) {
     if (renderedIds.has(m.id)) return;
     renderedIds.add(m.id);
+    // Any actual message — from cache, WS, or hist_resp — means the
+    // signed-only one-shot on our next send will be ignored server-side.
+    // Hide the toggle to stop advertising a no-op.
+    if (!roomHasMessages) {
+      roomHasMessages = true;
+      refreshIdentityUI();
+    }
 
     touchParticipant(m.sender);
 
@@ -1395,11 +1402,15 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   const signedOnlyToggle = document.getElementById('signed-only-toggle');
   const overlaySigninBtn = document.getElementById('signed-overlay-signin');
 
+  // Signed-only toggle is a one-shot that the server only honours when
+  // room.recent is empty on the very first POST. Once ANY message
+  // exists in the room it's a no-op — hide it to avoid misleading UI.
+  let roomHasMessages = false;
   function refreshIdentityUI() {
     if (identity) {
       if (signinLabel) signinLabel.textContent = '@' + identity.handle;
       if (signinBtn) signinBtn.title = 'Signed in as @' + identity.handle + '. Click to forget.';
-      if (signedOnlyRow) signedOnlyRow.hidden = false;
+      if (signedOnlyRow) signedOnlyRow.hidden = roomHasMessages;
     } else {
       if (signinLabel) signinLabel.textContent = 'Sign in';
       if (signinBtn) signinBtn.title = 'Sign in as @handle to enable verified-sender mode';
@@ -1497,6 +1508,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       const s = await r.json();
       if (s && s.signed_only && !identity && signedOverlay) {
         signedOverlay.hidden = false;
+      }
+      if (s && (s.recent_count > 0 || s.last_seq > 0)) {
+        roomHasMessages = true;
+        refreshIdentityUI();
       }
     } catch (_) {}
   })();
