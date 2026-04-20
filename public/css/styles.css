@@ -676,8 +676,11 @@ section { padding: 80px 0; position: relative; }
   font-size: 14px; cursor: pointer;
   opacity: 0; transition: opacity .12s;
 }
-.bubble:hover .bubble__del { opacity: 1; }
-.bubble__del:hover { background: rgba(220,38,38,0.9); }
+.bubble:hover .bubble__del,
+.bubble:focus-within .bubble__del,
+.bubble__del:focus-visible { opacity: 1; }
+.bubble__del:hover,
+.bubble__del:focus-visible { background: rgba(220,38,38,0.9); outline: none; }
 .bubble__ttl {
   display: inline-flex; align-items: center; gap: 4px;
   margin-top: 4px;

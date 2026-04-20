@@ -661,6 +661,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       del.className = 'bubble__del';
       del.type = 'button';
       del.title = isSelf ? 'Delete for everyone' : `Delete ${m.sender || 'message'} for everyone`;
+      del.setAttribute('aria-label', del.title);
       del.textContent = '×';
       del.addEventListener('click', (ev) => {
         ev.preventDefault();
@@ -988,20 +989,47 @@ key  share #k=… separately (URL fragment never reaches the server)`;
   // evict the matching bubble from DOM + IDB and remember the id so late-
   // joined transcript replay (server's 24h recent) can't resurface it.
   const DEL_KEY = `safebot:deleted:${roomId}`;
-  const deletedIds = new Set();
+  const DEL_MAX = 5000;
+  const DEL_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+  // deletedIds maps id → last-observed-timestamp (ms). The backing store
+  // format is forwards-compat with the old array-of-ids form: an array
+  // entry is treated as {id, ts=now}. New writes are always object form.
+  const deletedIds = new Map();
   try {
-    const persisted = JSON.parse(localStorage.getItem(DEL_KEY) || '[]');
-    if (Array.isArray(persisted)) for (const id of persisted) deletedIds.add(String(id));
+    const raw = localStorage.getItem(DEL_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const nowTs = Date.now();
+        for (const entry of parsed) {
+          if (typeof entry === 'string') deletedIds.set(entry, nowTs);
+          else if (entry && typeof entry.id === 'string') deletedIds.set(entry.id, Number(entry.ts) || nowTs);
+        }
+      }
+    }
   } catch (_) {}
   function persistDeleted() {
     try {
-      const arr = Array.from(deletedIds).slice(-500);
+      const cutoff = Date.now() - DEL_MAX_AGE_MS;
+      // Evict entries older than the age cap, then trim to DEL_MAX by
+      // oldest-first. Raised cap + age-prune closes the "after >500
+      // deletes, older deletions can reappear" regression from the
+      // codex-qa review.
+      for (const [id, ts] of deletedIds) {
+        if (ts < cutoff) deletedIds.delete(id);
+      }
+      if (deletedIds.size > DEL_MAX) {
+        const sorted = Array.from(deletedIds).sort((a, b) => a[1] - b[1]);
+        const drop = sorted.length - DEL_MAX;
+        for (let i = 0; i < drop; i++) deletedIds.delete(sorted[i][0]);
+      }
+      const arr = Array.from(deletedIds).map(([id, ts]) => ({ id, ts }));
       localStorage.setItem(DEL_KEY, JSON.stringify(arr));
     } catch (_) {}
   }
   function applyDelete(targetId, targetSeq) {
     if (!targetId || deletedIds.has(targetId)) return;
-    deletedIds.add(targetId);
+    deletedIds.set(targetId, Date.now());
     persistDeleted();
     // Evict DOM bubble.
     const el = chatListEl.querySelector(`.bubble[data-msg-id="${CSS.escape(targetId)}"]`);
@@ -1094,8 +1122,18 @@ key  share #k=… separately (URL fragment never reaches the server)`;
 
     // Response: someone replied to our (or anyone's) request.
     if (env.safebot_hist_resp_v1 === true) {
-      console.log('[safebot hist] got response for req', env.req_id, 'items=', (env.items || []).length);
+      console.log('[safebot hist] got response for req', env.req_id, 'items=', (env.items || []).length, 'verified=', !!msg.sender_verified);
       if (!env.req_id) return true;
+      // BLOCKER fix (codex-qa review): a hist_resp from an unsigned
+      // sender is unauthenticated — any room-key holder could forge
+      // history items or inject tombstones to hide honest messages.
+      // Only accept peer history from a server-stamped @handle. Rooms
+      // without any signed sender simply get no peer-sync; that's an
+      // acceptable degradation vs the forgery surface.
+      if (msg.sender_verified !== true) {
+        console.warn('[safebot hist] dropping hist_resp from unverified sender', msg.sender);
+        return true;
+      }
       // Merge every response, not just the first — different peers hold
       // different slices of the history (one browser might have 14
       // cached messages while another has only 1). IDB's [roomId,seq]
@@ -1169,8 +1207,11 @@ key  share #k=… separately (URL fragment never reaches the server)`;
           // On the FIRST chunk, attach our local tombstone list so a
           // fresh joiner learns about past deletions and can suppress
           // any straggler cached copies reaching them from other peers.
+          // Share the most-recent 2000 tombstones with the first chunk.
+          // Older ones are less likely to still be floating around in
+          // peer IDB caches (server only keeps 24h of ciphertext).
           const deletedPayload = (chunkIdx === 0 && deletedIds.size)
-            ? Array.from(deletedIds).slice(-500) : undefined;
+            ? Array.from(deletedIds).sort((a, b) => a[1] - b[1]).slice(-2000).map(([id]) => id) : undefined;
           if (!items.length && !deletedPayload) break;
           const resp = { safebot_hist_resp_v1: true, req_id: env.req_id, items, chunk: chunkIdx };
           if (deletedPayload) resp.deleted = deletedPayload;
@@ -1265,6 +1306,22 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         refreshSettingsBadge(); if (settingsPop) renderSettingsPop();
         if (!identity && signedOverlay) signedOverlay.hidden = false;
       }
+      else if (obj.type === 'error') {
+        // Server rejected our WS frame. Roll back any pending-lock
+        // arming, surface a short toast, and re-probe /status so we
+        // know the true locked state (codex-qa review, major #3).
+        console.warn('[safebot] ws error frame', obj);
+        if (pendingSignedOnlyLock && /signed_only/.test(String(obj.error || ''))) {
+          pendingSignedOnlyLock = false;
+          refreshSettingsBadge(); if (settingsPop) renderSettingsPop();
+          showToast('Lock rejected by server: ' + (obj.error || 'unknown'), false);
+          // Re-probe /status in case another client raced us.
+          fetch(`/api/rooms/${roomId}/status`, { cache: 'no-store' })
+            .then((r) => r.json())
+            .then((s) => { if (s && s.signed_only) { roomSignedOnly = true; refreshSettingsBadge(); if (settingsPop) renderSettingsPop(); } })
+            .catch(() => {});
+        }
+      }
       else if (obj.type === 'rename' && obj.from && obj.to && obj.from !== me) {
         // A live participant changed their name. Drop the old alias and
         // promote the new one so the sidebar shows one row, not two.
@@ -1354,11 +1411,12 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     // post and then the room is locked for subsequent non-signed frames.
     if (pendingSignedOnlyLock && identity) {
       body.signed_only = true;
-      pendingSignedOnlyLock = false;
-      // Optimistic local flip — server confirms on ack. If it rejects
-      // we'll re-discover via /status on next probe.
-      roomSignedOnly = true;
-      refreshSettingsBadge(); if (settingsPop) renderSettingsPop();
+      // Don't clear pendingSignedOnlyLock yet — we mirror state from
+      // the server's {type:'locked'} broadcast. If the server rejects
+      // the frame (error code from the WS handler) we reset there.
+      // Previously we flipped roomSignedOnly here optimistically; that
+      // left a tab believing the room was locked when the server had
+      // actually rejected the post (codex-qa review, major #3).
     }
     firstMessageSent = true;
     // Disappearing-messages TTL: server clamps, client schedules expiry on
@@ -1524,15 +1582,30 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       settingsPop.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
       settingsPop.style.top = (r.bottom + 4) + 'px';
       btn.setAttribute('aria-expanded', 'true');
+      // Focus the first actionable row for keyboard users.
+      const firstRow = settingsPop.querySelector('.settings-pop__row');
+      if (firstRow && typeof firstRow.focus === 'function') firstRow.focus();
       setTimeout(() => {
         const onDoc = (e) => {
           if (!settingsPop) { document.removeEventListener('click', onDoc, true); return; }
           if (!settingsPop.contains(e.target) && !btn.contains(e.target)) {
             closeSettingsPop();
             document.removeEventListener('click', onDoc, true);
+            document.removeEventListener('keydown', onKey, true);
+          }
+        };
+        const onKey = (e) => {
+          if (!settingsPop) { document.removeEventListener('keydown', onKey, true); return; }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            closeSettingsPop();
+            document.removeEventListener('click', onDoc, true);
+            document.removeEventListener('keydown', onKey, true);
+            btn.focus();
           }
         };
         document.addEventListener('click', onDoc, true);
+        document.addEventListener('keydown', onKey, true);
       }, 0);
     });
   })();
@@ -1588,6 +1661,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         refreshIdentityUI();
         if (signedOverlay) signedOverlay.hidden = true;
         showToast('Imported @' + identity.handle, true);
+        // Re-request peer history — an earlier anonymous hist_req may
+        // have been rejected by a locked room, or our responses were
+        // ignored because hist_resp now requires sender_verified.
+        try { requestHistoryFromPeers(); } catch (_) {}
       } catch (e) {
         alert('Import failed: ' + (e.message || e));
       }
@@ -1613,6 +1690,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       refreshIdentityUI();
       if (signedOverlay) signedOverlay.hidden = true;
       showToast('Registered as @' + handle, true);
+      try { requestHistoryFromPeers(); } catch (_) {}
     } catch (e) {
       alert(String(e.message || e));
     }
