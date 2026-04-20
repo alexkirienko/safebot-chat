@@ -1176,6 +1176,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       pill.appendChild(emojiEl);
       pill.appendChild(countEl);
       pill.title = _formatActorTooltip(emoji, m.get(emoji));
+      // A11y: expose toggled state so screen readers / keyboard users
+      // can tell a "my-reaction" pill from a bystander pill.
+      pill.setAttribute('aria-label', pill.title);
+      pill.setAttribute('aria-pressed', mine.has(emoji) ? 'true' : 'false');
       pill.addEventListener('click', (ev) => {
         ev.preventDefault(); ev.stopPropagation();
         toggleOwnReaction(targetId, emoji);
@@ -1218,6 +1222,8 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (_openPicker && _openPicker.parentNode) _openPicker.parentNode.removeChild(_openPicker);
     const pick = document.createElement('div');
     pick.className = 'bubble__react-picker';
+    pick.setAttribute('role', 'menu');
+    pick.setAttribute('aria-label', 'Pick a reaction');
     const closePicker = () => {
       if (pick.parentNode) pick.parentNode.removeChild(pick);
       if (_openPicker === pick) _openPicker = null;
@@ -1228,6 +1234,8 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       b.className = 'bubble__react-pick';
       b.textContent = emoji;
       b.title = 'React with ' + emoji;
+      b.setAttribute('aria-label', b.title);
+      b.setAttribute('role', 'menuitem');
       b.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
@@ -1245,6 +1253,8 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     plus.className = 'bubble__react-pick bubble__react-pick--custom';
     plus.textContent = '+';
     plus.title = 'Custom reaction';
+    plus.setAttribute('aria-label', 'Custom reaction');
+    plus.setAttribute('role', 'menuitem');
     plus.addEventListener('click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
@@ -1257,6 +1267,53 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     pick.appendChild(plus);
     bubble.appendChild(pick);
     _openPicker = pick;
+    // Reposition if the picker clips out of the viewport — on narrow
+    // mobile screens the default `top:28px; right:4px` is fine, but
+    // when the bubble is near the top of viewport the picker can end
+    // up above the browser chrome. Re-anchor below-the-bubble + clamp
+    // to the visible horizontal range.
+    requestAnimationFrame(() => {
+      const r = pick.getBoundingClientRect();
+      const b = bubble.getBoundingClientRect();
+      if (r.top < 4) {
+        // Flip to below-bubble.
+        pick.style.top = (b.height + 4) + 'px';
+      }
+      if (r.right > window.innerWidth - 4) {
+        // Clamp so the whole picker is on-screen; override the default
+        // right:4px with an explicit left:auto anchor.
+        pick.style.right = '4px';
+        pick.style.left = 'auto';
+      } else if (r.left < 4) {
+        pick.style.left = '4px';
+        pick.style.right = 'auto';
+      }
+    });
+    // Keyboard a11y: focus first option, roving-Tab via default
+    // focus order works because each button is focusable by default;
+    // Escape closes and returns focus to the trigger; ArrowLeft/Right
+    // move focus within the picker.
+    const firstBtn = pick.querySelector('button');
+    if (firstBtn) firstBtn.focus();
+    const pickButtons = Array.from(pick.querySelectorAll('button'));
+    pick.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        closePicker();
+        const trigger = bubble.querySelector('.bubble__react-btn');
+        if (trigger) trigger.focus();
+        return;
+      }
+      if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+        ev.preventDefault();
+        const i = pickButtons.indexOf(document.activeElement);
+        if (i < 0) return;
+        const next = ev.key === 'ArrowRight'
+          ? (i + 1) % pickButtons.length
+          : (i - 1 + pickButtons.length) % pickButtons.length;
+        pickButtons[next].focus();
+      }
+    });
     setTimeout(() => {
       const onDoc = (e) => {
         if (!_openPicker) { document.removeEventListener('click', onDoc, true); return; }

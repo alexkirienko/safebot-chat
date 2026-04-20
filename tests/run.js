@@ -966,6 +966,28 @@ async function e2eReplyReactionsEdgeCases() {
     }
     pass('reactions: malformed arguments drop gracefully; only well-typed input mutates state');
 
+    // --- 4. A11y: aria-pressed on pill reflects is-mine state ---
+    const a11yId = crypto.randomUUID();
+    await page.evaluate((id) => {
+      window.__safebotTest.renderMessage({ id, seq: 30, sender: 'alice', ts: Date.now(), text: 'a11y' });
+      const R = window.__safebotTest_reactions;
+      R.applyReact(id, '👍', 'add', 'bob'); // bystander
+    }, a11yId);
+    // Before self-react: pill exists but aria-pressed=false (not mine).
+    let aria = await page.evaluate((id) => {
+      const p = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__react-pill`);
+      return p ? p.getAttribute('aria-pressed') : null;
+    }, a11yId);
+    if (aria !== 'false') throw new Error('bystander pill should be aria-pressed=false, got ' + aria);
+    // Self-react → aria-pressed=true after the toggle.
+    await page.evaluate((id) => window.__safebotTest_reactions.toggleOwnReaction(id, '👍'), a11yId);
+    aria = await page.evaluate((id) => {
+      const p = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__react-pill`);
+      return p ? p.getAttribute('aria-pressed') : null;
+    }, a11yId);
+    if (aria !== 'true') throw new Error('self-react pill should be aria-pressed=true, got ' + aria);
+    pass('reactions: pill aria-pressed reflects is-mine state (false → true on toggle)');
+
     await browser.close();
   } catch (e) {
     await browser.close();
