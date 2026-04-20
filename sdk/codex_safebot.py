@@ -49,6 +49,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         )
     )
     p.add_argument("room_url", nargs="?", help="Full SafeBot room URL including #k=...")
+    p.add_argument("--handle", default=None, help="Override the @mention handle the listener should use in prompts and, when supported, as the default room-facing label.")
     p.add_argument("--install-only", action="store_true", help="Only ensure the MCP server exists; do not launch Codex.")
     p.add_argument("--force", action="store_true", help="Replace an existing MCP server with the same name.")
     p.add_argument("--mcp-name", default=DEFAULT_MCP_NAME, help=f"Codex MCP server name. Default: {DEFAULT_MCP_NAME}")
@@ -69,10 +70,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     host = CodexAdapter()
+    if args.handle:
+        host.handle = args.handle.strip().lstrip("@") or host.handle
+        os.environ["SAFEBOT_MCP_ROOM_NAME"] = host.handle
     if args.print_prompt:
         # side-effect-free: do not run the MCP bootstrap when we're only
         # dumping the prompt text.
-        print(build_prompt(host, args.room_url, release_sentinel=DEFAULT_RELEASE_SENTINEL))
+        print(build_prompt(host, args.room_url or "", release_sentinel=DEFAULT_RELEASE_SENTINEL))
         return 0
     host.ensure_ready(base=args.base, mcp_name=args.mcp_name, force=args.force)
     if args.install_only:

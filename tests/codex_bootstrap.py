@@ -114,6 +114,7 @@ def main() -> int:
         or "claim_task" not in launch[-1]
         or "SAFEBOT_RELEASED_BY_ROOM" not in launch[-1]
         or "operator is clearly dissatisfied" not in launch[-1]
+        or "Do NOT send a startup" not in launch[-1]
     ):
         raise SystemExit(f"launch prompt missing room URL / claim_task guidance: {launch[-1]!r}")
     ok("single-shot launch path forwards Codex args and injects the SafeBot prompt")

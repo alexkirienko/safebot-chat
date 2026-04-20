@@ -158,6 +158,7 @@ def case_print_prompt() -> None:
     assert "@my-bot" in out, "custom handle should appear in prompt"
     assert "SAFEBOT_RELEASED_BY_ROOM" in out, out
     assert "https://safebot.chat/room/ABC#k=xyz" in out
+    assert "Do NOT send a startup" in out, out
     ok("--print-prompt emits prompt with room URL + custom @handle")
 
 

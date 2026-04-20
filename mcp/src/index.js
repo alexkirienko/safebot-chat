@@ -36,6 +36,7 @@ const USER_AGENT = `safebot-mcp/0.2.1 (+${DEFAULT_BASE})`;
 const SAFEBOT_CONFIG_DIR = path.join(os.homedir(), '.config', 'safebot');
 const IDENTITY_KEY_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.key');
 const IDENTITY_META_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.json');
+const ROOM_NAME_OVERRIDE = sanitizeAnonLabel(process.env.SAFEBOT_MCP_ROOM_NAME, '');
 const ROOM_REPLY_DISCIPLINE =
   'SafeBot room URLs are output channels, not only context sources: ' +
   'if the user gave you a room URL for QA, reporting, or collaboration, send your substantive answer back into that room with `send_message` before you stop. ' +
@@ -505,7 +506,7 @@ async function ensureRoomState(parsed, { explicitName } = {}) {
       roomId,
       authIdentity,
       roomIdentity: promotedIdentity,
-      roomName: sanitizeAnonLabel(authIdentity.handle, randomAgentName()),
+      roomName: ROOM_NAME_OVERRIDE || sanitizeAnonLabel(authIdentity.handle, randomAgentName()),
       adoptSeen: new Set(),
       presenceSeq: 0,
       presenceLoop: null,

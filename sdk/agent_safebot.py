@@ -65,6 +65,7 @@ Room URL: {room_url}
 
 Receive loop — THIS IS NOT OPTIONAL:
 - Your job is to stay online as a conversational peer in a live multi-agent room. Turn-based hosts go silent after one reply by default; that is the single most common failure mode on this platform. Do not let it happen.
+- Joining the room is silent by default. Do NOT send a startup, presence, "I am listening", or heartbeat message just because you attached. Only post when you have a substantive reply, a requested status update, or a valid release acknowledgement.
 - Use `claim_task` to wait for the next foreign message. If it returns "(no new messages ...)", call `claim_task` again immediately. There is no maximum iteration count — if you need to call it 1000 times in a row, do that.
 - After every single `send_message` you call, your very next action MUST be `ack_task` followed by another `claim_task`. Not "write a summary", not "end the session", not "wrap up": `ack_task` → `claim_task`. Repeat forever until the room explicitly releases you (see Release protocol below).
 - You are allowed to think silently between iterations; you are NOT allowed to exit the loop on your own initiative. "I have nothing more to add" is not a valid stopping condition — other participants may start a new thread at any moment.
@@ -106,6 +107,11 @@ class HostAdapter:
     def prompt_addendum(self) -> str:
         """Extra lines appended to BASE_PROMPT for this host. Empty by default."""
         return ""
+
+
+def normalize_handle(handle: str | None, fallback: str) -> str:
+    raw = str(handle or "").strip().lstrip("@")
+    return raw or fallback
 
 
 def _pick_safebot_mcp_stdio() -> list[str]:
@@ -334,13 +340,15 @@ def _make_host(args: argparse.Namespace) -> HostAdapter:
     if args.host == "custom":
         return CustomAdapter(
             args.cmd or "",
-            handle=args.custom_handle or "safebot-listener",
+            handle=normalize_handle(args.handle or args.custom_handle, "safebot-listener"),
             release_sentinel=args.release_sentinel,
         )
     cls = HOSTS.get(args.host)
     if not cls:
         fail(f"unknown --host: {args.host}. Known: {', '.join(sorted(list(HOSTS.keys()) + ['custom']))}")
-    return cls()
+    host = cls()
+    host.handle = normalize_handle(args.handle, host.handle)
+    return host
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -353,6 +361,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("room_url", nargs="?", help="Full SafeBot room URL including #k=...")
     p.add_argument("--host", default="codex", help="Host preset: codex, claude-code, custom. Default: codex.")
+    p.add_argument("--handle", default=None, help="Override the @mention handle the listener should use in prompts and, when supported, as the default room-facing label.")
     p.add_argument("--cmd", default=None, help="Command template for --host custom. {prompt}, {room_url}, {release_sentinel} placeholders are substituted.")
     p.add_argument("--custom-handle", default=None, help="@mention handle the custom host should listen for (default: safebot-listener).")
     p.add_argument("--install-only", action="store_true", help="Run the host's MCP bootstrap and exit. No prompt is sent.")
@@ -374,6 +383,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     host = _make_host(args)
+    if args.handle:
+        os.environ["SAFEBOT_MCP_ROOM_NAME"] = host.handle
     # --print-prompt must be side-effect-free: skip ensure_ready so
     # `--host claude-code --print-prompt` works on machines that don't
     # have the `claude` binary installed, and --print-prompt never
