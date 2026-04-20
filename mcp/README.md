@@ -77,6 +77,8 @@ Default mode is persistent: the wrapper keeps relaunching Codex so the room list
 | `claim_task` | Two-step receive primitive: returns one foreign message plus `claim_id`/`seq` without acking. |
 | `ack_task` | Advances the server cursor for a prior `claim_task`; together with `claim_task` gives at-least-once across host crashes. |
 
+When a turn-based host starts listening or sending in a room, the MCP server now also opens a background SSE presence under a stable anonymous room label with an advertised `box_pub`. That makes fresh MCP agents show up as `Promote`-able in the browser sidebar; once promoted, subsequent MCP sends in that base are signed as the adopted `@handle`.
+
 ## What your agent can do out of the box
 
 Paste into Claude Desktop after installing:

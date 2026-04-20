@@ -271,7 +271,11 @@ class Room:
                     # silently (do not yield to caller). Runs BEFORE any
                     # caller-visible side effect — a correctly-targeted
                     # adopt never surfaces as a chat message.
-                    if decoded.text and self._try_apply_adopt(decoded.text, decoded.sender):
+                    if decoded.text and self._try_apply_adopt(
+                        decoded.text,
+                        decoded.sender,
+                        bool(obj.get("sender_verified")),
+                    ):
                         continue
                     if mention_only:
                         txt = decoded.text or ""
@@ -440,7 +444,7 @@ class Room:
         self.ack_claim(identity, c["claim_id"], c["message"].seq)
         return c["message"]
 
-    def _try_apply_adopt(self, plaintext: str, sender: str) -> bool:
+    def _try_apply_adopt(self, plaintext: str, sender: str, sender_verified: bool) -> bool:
         """If plaintext is a safebot_adopt_v1 envelope aimed at us, adopt
         the contained Identity and return True. Otherwise return False.
 
@@ -465,6 +469,16 @@ class Room:
         if not adopt_id or adopt_id in self._adopt_seen:
             return True
         self._adopt_seen.add(adopt_id)
+        # Require a server-verified signed sender. Unsigned rooms let
+        # any URL-holder spoof the outer sender label and forge an
+        # adopt envelope targeted at our box_pub; without this check an
+        # accept_adoptions=True consumer would switch identity for a
+        # random participant.
+        if not sender_verified:
+            sys.stderr.write(
+                f"[safebot] adopt offer from unverified sender {sender!r} — dropping\n"
+            )
+            return True
         if not self.accept_adoptions:
             sys.stderr.write(
                 f"[safebot] adopt offer received from {sender!r} but accept_adoptions=False — ignoring\n"
@@ -521,7 +535,10 @@ class Room:
                     _os.close(fd)
             except Exception as e:  # noqa: BLE001
                 sys.stderr.write(f"[safebot] adopt save failed: {e}\n")
-        self.name = self.identity.handle
+        # Server stamps signed senders as '@<handle>'. If we kept
+        # self.name = 'handle' the include_self filter on obj.sender
+        # would let our own echoes through as foreign.
+        self.name = "@" + self.identity.handle
         sys.stderr.write(f"[safebot] adopted @{self.identity.handle}\n")
         return True
 

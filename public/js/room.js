@@ -694,6 +694,14 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (env.target_name !== me) return true;
     if (adoptHasApplied(env.adopt_id)) return true;
     if (!env.sender_box_pub || !env.nonce || !env.ciphertext) return true;
+    // Require a server-verified signed sender. Unsigned rooms let anyone
+    // spoof the outer sender label, so the confirm() dialog would be
+    // misleading and an auto-accept consumer would switch identity for
+    // any URL-holder. Drop silently instead.
+    if (msg.sender_verified !== true) {
+      console.warn('[safebot] adopt: dropping envelope from unverified sender', msg.sender);
+      return true;
+    }
     let inner;
     try {
       const senderPub = SafeBotCrypto.b64urlDecode(env.sender_box_pub);
@@ -1006,6 +1014,14 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       if (!txt) return;
       try {
         identity = window.SafeBotIdentity.importJson(txt.trim());
+        const oldMe = me;
+        me = '@' + identity.handle;
+        nameInputEl.value = me;
+        sessionStorage.setItem('safebot:name', me);
+        seenNames.delete(oldMe);
+        seenNames.set(me, Date.now());
+        try { ws && ws.readyState === 1 && ws.send(JSON.stringify({ type: 'hello', name: me, box_pub: _myBoxPubB64 })); } catch (_) {}
+        renderPeople();
         refreshIdentityUI();
         if (signedOverlay) signedOverlay.hidden = true;
         showToast('Imported @' + identity.handle, true);

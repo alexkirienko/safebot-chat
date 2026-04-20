@@ -22,6 +22,10 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import nacl from 'tweetnacl';
 import naclUtil from 'tweetnacl-util';
 
@@ -29,6 +33,9 @@ const DEFAULT_BASE = process.env.SAFEBOT_BASE || 'https://safebot.chat';
 const ROOM_ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const NAME_PREFIX = 'agent';
 const USER_AGENT = `safebot-mcp/0.1.0 (+${DEFAULT_BASE})`;
+const SAFEBOT_CONFIG_DIR = path.join(os.homedir(), '.config', 'safebot');
+const IDENTITY_KEY_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.key');
+const IDENTITY_META_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.json');
 
 // ---- URL + crypto helpers ----------------------------------------------
 
@@ -50,6 +57,27 @@ function randomRoomId() {
 }
 function randomAgentName() {
   return `${NAME_PREFIX}-${Buffer.from(nacl.randomBytes(3)).toString('hex')}`;
+}
+
+function sha256Hex(text) {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function roomStateKey(base, roomId) {
+  return `${base}\n${roomId}`;
+}
+
+function roomIdentityPath(base) {
+  return path.join(SAFEBOT_CONFIG_DIR, `mcp_room_identity-${sha256Hex(base).slice(0, 12)}.json`);
+}
+
+function sanitizeAnonLabel(name, fallback) {
+  const raw = String(name || '').trim().slice(0, 64) || fallback;
+  return raw.replace(/^@+/, '') || fallback;
 }
 
 function parseRoomUrl(url) {
@@ -271,67 +299,63 @@ const TOOLS = [
   },
 ];
 
-// ---- Persistent Identity (for next_task) --------------------------------
+// ---- Persistent local identities -----------------------------------------
 //
-// The MCP server auto-provisions one Identity per user-install at
-// ~/.config/safebot/mcp_identity.key (64 bytes: 32 box_sk | 32 sign_sk).
-// Handle is derived at creation and saved as JSON alongside. Registered
-// once with the live server on first use; idempotent 409 = already have
-// it, so re-runs are cheap.
-
-import fs from 'node:fs';
-import path from 'node:path';
-import os from 'node:os';
-
-const IDENTITY_DIR = path.join(os.homedir(), '.config', 'safebot');
-const IDENTITY_KEY_PATH = path.join(IDENTITY_DIR, 'mcp_identity.key');
-const IDENTITY_META_PATH = path.join(IDENTITY_DIR, 'mcp_identity.json');
+// The MCP host uses two independent identities:
+//   1. auth identity   — hidden, durable, used only for claim_task/ack_task
+//   2. room identity   — what the room sees; starts anonymous/promotable and
+//                        becomes signed only after an adopt/promote handoff
+//
+// Splitting them keeps the at-least-once cursor stable even after the room-
+// facing identity changes.
 
 let CACHED_IDENTITY = null;
+let CACHED_ROOM_IDENTITY = undefined; // undefined = not loaded yet; null = no promoted identity
 
-async function loadOrCreateIdentity(base) {
-  if (CACHED_IDENTITY && CACHED_IDENTITY.base === base) return CACHED_IDENTITY;
-  fs.mkdirSync(IDENTITY_DIR, { recursive: true, mode: 0o700 });
-  let handle, box_sk, sign_kp, meta;
-  if (fs.existsSync(IDENTITY_KEY_PATH) && fs.existsSync(IDENTITY_META_PATH)) {
-    const raw = fs.readFileSync(IDENTITY_KEY_PATH);
-    if (raw.length !== 64) throw new Error(`mcp_identity.key: expected 64 bytes, got ${raw.length}`);
-    box_sk = raw.subarray(0, 32);
-    const sign_seed = raw.subarray(32, 64);
-    sign_kp = nacl.sign.keyPair.fromSeed(sign_seed);
-    meta = JSON.parse(fs.readFileSync(IDENTITY_META_PATH, 'utf8'));
-    handle = meta.handle;
-  } else {
-    // Generate fresh identity. Handle: "mcp-<6-hex>" — stable for the life
-    // of this install unless the user deletes the file or overrides via env.
-    const envHandle = (process.env.SAFEBOT_MCP_HANDLE || '').toLowerCase();
-    handle = envHandle && /^[a-z0-9_-]{1,32}$/.test(envHandle)
-      ? envHandle
-      : 'mcp-' + Buffer.from(nacl.randomBytes(3)).toString('hex');
-    box_sk = nacl.randomBytes(32);
-    const sign_seed = nacl.randomBytes(32);
-    sign_kp = nacl.sign.keyPair.fromSeed(sign_seed);
-    const combined = Buffer.concat([Buffer.from(box_sk), Buffer.from(sign_seed)]);
-    fs.writeFileSync(IDENTITY_KEY_PATH, combined, { mode: 0o600 });
-    meta = { handle, created: Date.now() };
-    fs.writeFileSync(IDENTITY_META_PATH, JSON.stringify(meta), { mode: 0o600 });
-  }
-  // Compute box_pub from box_sk.
+function ensureIdentityDir() {
+  fs.mkdirSync(SAFEBOT_CONFIG_DIR, { recursive: true, mode: 0o700 });
+}
+
+function buildLocalIdentity({ handle, box_sk, sign_seed, base }) {
+  const sign_kp = nacl.sign.keyPair.fromSeed(sign_seed);
   const box_kp = nacl.box.keyPair.fromSecretKey(box_sk);
-  const box_pub_b64 = b64Encode(box_kp.publicKey);
-  const sign_pub_b64 = b64Encode(sign_kp.publicKey);
-  // Register on server — idempotent; 409 means already taken by us, ok.
+  return {
+    handle,
+    base,
+    box_sk: new Uint8Array(box_sk),
+    sign_seed: new Uint8Array(sign_seed),
+    sign_sk: sign_kp.secretKey,
+    box_pub_b64: b64Encode(box_kp.publicKey),
+    box_pub_b64u: b64urlEncode(box_kp.publicKey),
+    sign_pub_b64: b64Encode(sign_kp.publicKey),
+  };
+}
+
+function exportIdentityRecord(ident) {
+  return {
+    safebot_identity_v1: true,
+    handle: ident.handle,
+    box_sk_b64u: b64urlEncode(ident.box_sk),
+    sign_seed_b64u: b64urlEncode(ident.sign_seed),
+    base: ident.base,
+  };
+}
+
+async function registerIdentity(base, ident, meta = {}) {
   const ts = Date.now();
-  const blob = naclUtil.decodeUTF8(`register ${handle} ${ts} ${box_pub_b64} ${sign_pub_b64}`);
-  const sig = nacl.sign.detached(blob, sign_kp.secretKey);
+  const blob = naclUtil.decodeUTF8(`register ${ident.handle} ${ts} ${ident.box_pub_b64} ${ident.sign_pub_b64}`);
+  const sig = nacl.sign.detached(blob, ident.sign_sk);
   try {
     const r = await fetch(`${base}/api/identity/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
       body: JSON.stringify({
-        handle, box_pub: box_pub_b64, sign_pub: sign_pub_b64,
-        register_ts: ts, register_sig: b64Encode(sig),
-        meta: { bio: 'Auto-provisioned SafeBot MCP client.' },
+        handle: ident.handle,
+        box_pub: ident.box_pub_b64,
+        sign_pub: ident.sign_pub_b64,
+        register_ts: ts,
+        register_sig: b64Encode(sig),
+        meta,
       }),
     });
     if (r.status !== 201 && r.status !== 409) {
@@ -339,12 +363,286 @@ async function loadOrCreateIdentity(base) {
       throw new Error(`register failed: ${r.status} ${body}`);
     }
   } catch (e) {
-    // Network error is survivable — subsequent /claim will fail cleanly and
-    // the user can retry. Don't crash the whole MCP server.
     console.error(`[safebot-mcp] identity register warning: ${e.message}`);
   }
-  CACHED_IDENTITY = { handle, box_sk, sign_sk: sign_kp.secretKey, box_pub_b64, sign_pub_b64, base };
-  return CACHED_IDENTITY;
+}
+
+async function loadOrCreateIdentity(base) {
+  if (CACHED_IDENTITY && CACHED_IDENTITY.base === base) return CACHED_IDENTITY;
+  ensureIdentityDir();
+  let handle;
+  let box_sk;
+  let sign_seed;
+  if (fs.existsSync(IDENTITY_KEY_PATH) && fs.existsSync(IDENTITY_META_PATH)) {
+    const raw = fs.readFileSync(IDENTITY_KEY_PATH);
+    if (raw.length !== 64) throw new Error(`mcp_identity.key: expected 64 bytes, got ${raw.length}`);
+    box_sk = raw.subarray(0, 32);
+    sign_seed = raw.subarray(32, 64);
+    const meta = JSON.parse(fs.readFileSync(IDENTITY_META_PATH, 'utf8'));
+    handle = meta.handle;
+  } else {
+    const envHandle = (process.env.SAFEBOT_MCP_HANDLE || '').toLowerCase();
+    handle = envHandle && /^[a-z0-9_-]{1,32}$/.test(envHandle)
+      ? envHandle
+      : 'mcp-' + Buffer.from(nacl.randomBytes(3)).toString('hex');
+    box_sk = nacl.randomBytes(32);
+    sign_seed = nacl.randomBytes(32);
+    const combined = Buffer.concat([Buffer.from(box_sk), Buffer.from(sign_seed)]);
+    fs.writeFileSync(IDENTITY_KEY_PATH, combined, { mode: 0o600 });
+    fs.writeFileSync(IDENTITY_META_PATH, JSON.stringify({ handle, created: Date.now() }), { mode: 0o600 });
+  }
+  const ident = buildLocalIdentity({ handle, box_sk, sign_seed, base });
+  await registerIdentity(base, ident, { bio: 'Auto-provisioned SafeBot MCP auth identity.' });
+  CACHED_IDENTITY = ident;
+  return ident;
+}
+
+function loadPromotedRoomIdentity(base) {
+  if (CACHED_ROOM_IDENTITY !== undefined && (!CACHED_ROOM_IDENTITY || CACHED_ROOM_IDENTITY.base === base)) {
+    return CACHED_ROOM_IDENTITY;
+  }
+  ensureIdentityDir();
+  const file = roomIdentityPath(base);
+  if (!fs.existsSync(file)) {
+    CACHED_ROOM_IDENTITY = null;
+    return CACHED_ROOM_IDENTITY;
+  }
+  const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (!rec || rec.safebot_identity_v1 !== true || !rec.handle || !rec.box_sk_b64u || !rec.sign_seed_b64u) {
+    throw new Error('mcp_room_identity.json is malformed');
+  }
+  CACHED_ROOM_IDENTITY = buildLocalIdentity({
+    handle: rec.handle,
+    box_sk: b64urlDecode(rec.box_sk_b64u),
+    sign_seed: b64urlDecode(rec.sign_seed_b64u),
+    base,
+  });
+  return CACHED_ROOM_IDENTITY;
+}
+
+function persistPromotedRoomIdentity(ident) {
+  ensureIdentityDir();
+  fs.writeFileSync(roomIdentityPath(ident.base), JSON.stringify(exportIdentityRecord(ident), null, 2), { mode: 0o600 });
+  CACHED_ROOM_IDENTITY = ident;
+}
+
+function signRoomEnvelope(roomId, ciphertext, ident) {
+  const ts = Date.now();
+  const nonce = b64urlEncode(nacl.randomBytes(18));
+  const blob = naclUtil.decodeUTF8(`room-msg ${roomId} ${ts} ${nonce} ${sha256Hex(ciphertext)}`);
+  const sig = nacl.sign.detached(blob, ident.sign_sk);
+  return {
+    sender_handle: ident.handle,
+    sender_ts: ts,
+    sender_nonce: nonce,
+    sender_sig: b64Encode(sig),
+  };
+}
+
+const ROOM_STATES = new Map();
+
+function currentRoomIdentity(state) {
+  return state.roomIdentity || state.authIdentity;
+}
+
+function currentRoomLabel(state) {
+  return state.roomIdentity ? '@' + state.roomIdentity.handle : state.roomName;
+}
+
+function currentRoomBoxPub(state) {
+  return currentRoomIdentity(state).box_pub_b64u;
+}
+
+function markPresenceDirty(state) {
+  state.presenceDesiredKey = `${currentRoomLabel(state)}\n${currentRoomBoxPub(state)}`;
+}
+
+async function ensureRoomState(parsed, { explicitName } = {}) {
+  const { roomId, key, base } = parsed;
+  const rk = roomStateKey(base, roomId);
+  const authIdentity = await loadOrCreateIdentity(base);
+  const promotedIdentity = loadPromotedRoomIdentity(base);
+  let state = ROOM_STATES.get(rk);
+  if (!state) {
+    state = {
+      key,
+      base,
+      roomId,
+      authIdentity,
+      roomIdentity: promotedIdentity,
+      roomName: sanitizeAnonLabel(authIdentity.handle, randomAgentName()),
+      adoptSeen: new Set(),
+      presenceSeq: 0,
+      presenceLoop: null,
+      presenceAbort: null,
+      presenceDesiredKey: '',
+    };
+    ROOM_STATES.set(rk, state);
+  } else {
+    state.key = key;
+    state.base = base;
+    state.roomId = roomId;
+    state.authIdentity = authIdentity;
+    if (promotedIdentity) state.roomIdentity = promotedIdentity;
+  }
+  if (!state.roomIdentity && explicitName) {
+    state.roomName = sanitizeAnonLabel(explicitName, state.roomName || authIdentity.handle);
+  }
+  markPresenceDirty(state);
+  ensurePresenceLoop(state);
+  return state;
+}
+
+function extractSseFrame(buffer) {
+  const m = /\r?\n\r?\n/.exec(buffer);
+  if (!m) return null;
+  return {
+    frame: buffer.slice(0, m.index),
+    rest: buffer.slice(m.index + m[0].length),
+  };
+}
+
+function currentRoomBoxSecret(state) {
+  return currentRoomIdentity(state).box_sk;
+}
+
+function maybeApplyAdopt(state, plaintext, sender) {
+  if (!plaintext || !plaintext.startsWith('{')) return { consumed: false, applied: false };
+  let env;
+  try {
+    env = JSON.parse(plaintext);
+  } catch (_) {
+    return { consumed: false, applied: false };
+  }
+  if (!env || env.safebot_adopt_v1 !== true) return { consumed: false, applied: false };
+  const adoptId = env.adopt_id;
+  if (!adoptId || state.adoptSeen.has(adoptId)) return { consumed: true, applied: false };
+  state.adoptSeen.add(adoptId);
+  const target = String(env.target_name || '');
+  if (target !== currentRoomLabel(state)) return { consumed: true, applied: false };
+  if (!env.sender_box_pub || !env.nonce || !env.ciphertext) return { consumed: true, applied: false };
+  try {
+    const opened = nacl.box.open(
+      b64urlDecode(env.ciphertext),
+      b64urlDecode(env.nonce),
+      b64urlDecode(env.sender_box_pub),
+      currentRoomBoxSecret(state),
+    );
+    if (!opened) {
+      console.error('[safebot-mcp] adopt decrypt failed');
+      return { consumed: true, applied: false };
+    }
+    const inner = JSON.parse(naclUtil.encodeUTF8(opened));
+    if (!inner || !inner.handle || !inner.box_sk_b64u || !inner.sign_seed_b64u) {
+      return { consumed: true, applied: false };
+    }
+    const adopted = buildLocalIdentity({
+      handle: inner.handle,
+      box_sk: b64urlDecode(inner.box_sk_b64u),
+      sign_seed: b64urlDecode(inner.sign_seed_b64u),
+      base: state.base,
+    });
+    state.roomIdentity = adopted;
+    persistPromotedRoomIdentity(adopted);
+    rememberSender(state.roomId, currentRoomLabel(state));
+    markPresenceDirty(state);
+    ensurePresenceLoop(state);
+    console.error(`[safebot-mcp] adopted room identity as @${adopted.handle} (from ${sender || 'operator'})`);
+    return { consumed: true, applied: true };
+  } catch (e) {
+    console.error(`[safebot-mcp] adopt apply failed: ${e.message}`);
+    return { consumed: true, applied: false };
+  }
+}
+
+function handlePresenceEvent(state, obj) {
+  if (!obj || typeof obj !== 'object') return;
+  if (obj.type === 'ready' && Number.isFinite(obj.last_seq)) {
+    state.presenceSeq = Math.max(state.presenceSeq, Number(obj.last_seq) || 0);
+    return;
+  }
+  if (obj.type === 'message' && Number.isFinite(obj.seq)) {
+    state.presenceSeq = Math.max(state.presenceSeq, Number(obj.seq) || 0);
+    const plaintext = decrypt(state.key, obj.ciphertext, obj.nonce);
+    if (plaintext !== null) maybeApplyAdopt(state, plaintext, obj.sender);
+  }
+}
+
+async function runPresenceLoop(state, desiredKey) {
+  let backoffMs = 300;
+  while (state.presenceDesiredKey === desiredKey) {
+    const controller = new AbortController();
+    state.presenceAbort = controller;
+    const qs = new URLSearchParams({
+      name: currentRoomLabel(state),
+      box_pub: currentRoomBoxPub(state),
+    });
+    if (state.presenceSeq > 0) qs.set('after', String(state.presenceSeq));
+    try {
+      const res = await request(`${state.base}/api/rooms/${state.roomId}/events?${qs.toString()}`, {
+        retries: 0,
+        signal: controller.signal,
+        headers: { Accept: 'text/event-stream' },
+      });
+      const decoder = new TextDecoder();
+      let buf = '';
+      for await (const chunk of res.body) {
+        buf += decoder.decode(chunk, { stream: true });
+        for (;;) {
+          const next = extractSseFrame(buf);
+          if (!next) break;
+          buf = next.rest;
+          const payload = next.frame
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trimStart())
+            .join('\n');
+          if (!payload) continue;
+          try {
+            handlePresenceEvent(state, JSON.parse(payload));
+          } catch (_) {}
+        }
+      }
+      if (controller.signal.aborted) return;
+    } catch (e) {
+      if (controller.signal.aborted) return;
+      console.error(`[safebot-mcp] presence loop warning for ${state.roomId}: ${e.message}`);
+    }
+    await sleep(backoffMs);
+    backoffMs = Math.min(5000, backoffMs * 2);
+  }
+}
+
+function ensurePresenceLoop(state) {
+  if (state.presenceLoop && state.presenceDesiredKey === state.presenceActiveKey) return;
+  if (state.presenceAbort) {
+    try { state.presenceAbort.abort(); } catch (_) {}
+  }
+  state.presenceActiveKey = state.presenceDesiredKey;
+  const loop = runPresenceLoop(state, state.presenceActiveKey)
+    .catch((e) => console.error(`[safebot-mcp] presence crash for ${state.roomId}: ${e.message}`))
+    .finally(() => {
+      if (state.presenceLoop === loop) {
+        state.presenceLoop = null;
+      }
+    });
+  state.presenceLoop = loop;
+}
+
+async function claimSkippingAdopts(state, timeoutSec, extraExclude) {
+  while (true) {
+    const claim = await doClaim(state.base, state.roomId, state.authIdentity, timeoutSec, [
+      currentRoomLabel(state),
+      ...((Array.isArray(extraExclude) ? extraExclude : [])),
+    ]);
+    if (claim.empty || !claim.message) return claim;
+    const text = decrypt(state.key, claim.message.ciphertext, claim.message.nonce);
+    const adopt = maybeApplyAdopt(state, text, claim.message.sender);
+    if (!adopt.consumed) {
+      return { ...claim, decrypted_text: text };
+    }
+    await doAck(state.base, state.roomId, state.authIdentity, claim.claim_id, claim.message.seq);
+  }
 }
 
 function authHeader(ident, method, pathAndQuery) {
@@ -394,16 +692,34 @@ function sessionSenders(roomId) {
 }
 
 async function tool_send_message({ url, text, name }) {
-  const { roomId, key, base } = parseRoomUrl(url);
-  const sender = name && name.length > 0 ? name : randomAgentName();
-  rememberSender(roomId, sender);
-  const { ciphertext, nonce } = encrypt(key, text);
-  const body = JSON.stringify({ sender, ciphertext, nonce });
-  const res = await request(`${base}/api/rooms/${roomId}/messages`, {
+  const parsed = parseRoomUrl(url);
+  const state = await ensureRoomState(parsed, { explicitName: name });
+  const sender = currentRoomLabel(state);
+  rememberSender(parsed.roomId, sender);
+  const { ciphertext, nonce } = encrypt(parsed.key, text);
+  let body = { sender, ciphertext, nonce };
+  if (state.roomIdentity) {
+    body = { ...body, ...signRoomEnvelope(parsed.roomId, ciphertext, state.roomIdentity) };
+  }
+  let res = await fetch(`${parsed.base}/api/rooms/${parsed.roomId}/messages`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body,
+    headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+    body: JSON.stringify(body),
+    redirect: 'error',
   });
+  if (res.status === 403 && !state.roomIdentity) {
+    body = { sender, ciphertext, nonce, ...signRoomEnvelope(parsed.roomId, ciphertext, state.authIdentity) };
+    res = await fetch(`${parsed.base}/api/rooms/${parsed.roomId}/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
+      body: JSON.stringify(body),
+      redirect: 'error',
+    });
+  }
+  if (!res.ok) {
+    const err = await res.text().catch(() => '');
+    throw new Error(`send failed: ${res.status} ${err}`);
+  }
   const j = await res.json();
   return {
     content: [{
@@ -414,25 +730,35 @@ async function tool_send_message({ url, text, name }) {
 }
 
 async function tool_wait_for_messages({ url, after_seq = 0, timeout_seconds = 20, include_self = false, name }) {
-  const { roomId, key, base } = parseRoomUrl(url);
+  const parsed = parseRoomUrl(url);
+  const state = await ensureRoomState(parsed, { explicitName: name });
   const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 20));
   const res = await request(
-    `${base}/api/rooms/${roomId}/wait?after=${Number(after_seq) || 0}&timeout=${t}`,
+    `${parsed.base}/api/rooms/${parsed.roomId}/wait?after=${Number(after_seq) || 0}&timeout=${t}`,
     { retries: 2 },
   );
   const data = await res.json();
-  const msgs = (data.messages || []).map((m) => ({
-    seq: m.seq, sender: m.sender, ts: m.ts,
-    text: decrypt(key, m.ciphertext, m.nonce),
-  })).filter((m) => include_self || !name || m.sender !== name);
+  const msgs = [];
+  for (const m of (data.messages || [])) {
+    const text = decrypt(parsed.key, m.ciphertext, m.nonce);
+    const adopt = maybeApplyAdopt(state, text, m.sender);
+    if (adopt.consumed) continue;
+    msgs.push({ seq: m.seq, sender: m.sender, ts: m.ts, text });
+  }
+  const visible = msgs.filter((m) => {
+    if (include_self) return true;
+    const selfNames = new Set([currentRoomLabel(state)]);
+    if (name) selfNames.add(String(name));
+    return !selfNames.has(m.sender);
+  });
   const lastSeq = msgs.length ? Math.max(...msgs.map((m) => m.seq)) : (data.last_seq || after_seq);
   return {
     content: [{
       type: 'text',
       text:
-        (msgs.length === 0
+        (visible.length === 0
           ? `(no new messages — timed out after ${t}s, latest server seq ${data.last_seq})`
-          : msgs.map((m) =>
+          : visible.map((m) =>
               `[seq=${m.seq}] ${m.sender}: ${m.text == null ? '[undecryptable — wrong key or different room]' : m.text}`
             ).join('\n')
         ) +
@@ -442,13 +768,13 @@ async function tool_wait_for_messages({ url, after_seq = 0, timeout_seconds = 20
 }
 
 async function tool_get_transcript({ url, after_seq = 0, limit = 100 }) {
-  const { roomId, key, base } = parseRoomUrl(url);
+  const parsed = parseRoomUrl(url);
   const L = Math.max(1, Math.min(500, Number(limit) || 100));
-  const res = await request(`${base}/api/rooms/${roomId}/transcript?after=${Number(after_seq) || 0}&limit=${L}`);
+  const res = await request(`${parsed.base}/api/rooms/${parsed.roomId}/transcript?after=${Number(after_seq) || 0}&limit=${L}`);
   const data = await res.json();
   const msgs = (data.messages || []).map((m) => ({
     seq: m.seq, sender: m.sender, ts: m.ts,
-    text: decrypt(key, m.ciphertext, m.nonce),
+    text: decrypt(parsed.key, m.ciphertext, m.nonce),
   }));
   if (msgs.length === 0) {
     return { content: [{ type: 'text', text: `(empty — no messages in the buffer after seq ${after_seq})` }] };
@@ -527,22 +853,22 @@ async function doAck(base, roomId, ident, claim_id, seq) {
 }
 
 async function tool_next_task({ url, timeout_seconds = 60 }) {
-  const { roomId, key, base } = parseRoomUrl(url);
+  const parsed = parseRoomUrl(url);
   const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 60));
-  const ident = await loadOrCreateIdentity(base);
-  const claim = await doClaim(base, roomId, ident, t);
+  const state = await ensureRoomState(parsed);
+  const claim = await claimSkippingAdopts(state, t);
   if (claim.empty || !claim.message) {
-    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as @${ident.handle}, cursor=${claim.cursor || 0}; call next_task again to keep listening)` }] };
+    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}, cursor=${claim.cursor || 0}; call next_task again to keep listening)` }] };
   }
   const m = claim.message;
-  const text = decrypt(key, m.ciphertext, m.nonce);
+  const text = claim.decrypted_text;
   // Ack before return. Gives the "one call, one message, cursor advances"
   // ergonomics. Network failure on ack leaves the claim in flight → same
   // message re-delivers on next call (at-least-once vs network). Host-crash
   // AFTER return loses the message; use claim_task+ack_task for that guarantee.
   let ackWarn = '';
   try {
-    await doAck(base, roomId, ident, claim.claim_id, m.seq);
+    await doAck(parsed.base, parsed.roomId, state.authIdentity, claim.claim_id, m.seq);
   } catch (e) {
     ackWarn = `\n(warning: ${e.message}; message will be re-delivered on next call)`;
   }
@@ -552,22 +878,22 @@ async function tool_next_task({ url, timeout_seconds = 60 }) {
       type: 'text',
       text:
         `[seq=${m.seq}] ${m.sender}${verified}: ${text == null ? '[undecryptable — wrong room key]' : text}` +
-        `\n\n(listening as @${ident.handle}; call next_task again to block for the next message)` +
+        `\n\n(listening in-room as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}; call next_task again to block for the next message)` +
         ackWarn,
     }],
   };
 }
 
 async function tool_claim_task({ url, timeout_seconds = 60 }) {
-  const { roomId, key, base } = parseRoomUrl(url);
+  const parsed = parseRoomUrl(url);
   const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 60));
-  const ident = await loadOrCreateIdentity(base);
-  const claim = await doClaim(base, roomId, ident, t);
+  const state = await ensureRoomState(parsed);
+  const claim = await claimSkippingAdopts(state, t);
   if (claim.empty || !claim.message) {
-    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as @${ident.handle}, cursor=${claim.cursor || 0}; call claim_task again to keep listening)` }] };
+    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}, cursor=${claim.cursor || 0}; call claim_task again to keep listening)` }] };
   }
   const m = claim.message;
-  const text = decrypt(key, m.ciphertext, m.nonce);
+  const text = claim.decrypted_text;
   const verified = m.sender_verified ? ' ✓' : '';
   return {
     content: [{
@@ -581,9 +907,9 @@ async function tool_claim_task({ url, timeout_seconds = 60 }) {
 }
 
 async function tool_ack_task({ url, claim_id, seq }) {
-  const { roomId, base } = parseRoomUrl(url);
-  const ident = await loadOrCreateIdentity(base);
-  const r = await doAck(base, roomId, ident, String(claim_id || ''), Number(seq) || 0);
+  const parsed = parseRoomUrl(url);
+  const state = await ensureRoomState(parsed);
+  const r = await doAck(parsed.base, parsed.roomId, state.authIdentity, String(claim_id || ''), Number(seq) || 0);
   return {
     content: [{
       type: 'text',
