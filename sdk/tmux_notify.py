@@ -9,9 +9,13 @@ mentions to surface as operator input without me pulling the inbox."
 Usage:
     tmux new-session -s codex 'codex'
     python3 sdk/tmux_notify.py \\
-        --pane codex:0.0 \\
         --mention @alex \\
         'https://safebot.chat/room/<ID>#k=<KEY>'
+
+If run from inside a tmux-managed environment, `--pane` may be omitted:
+`TMUX_PANE` is used automatically, so the helper can target the current
+interactive pane without making the operator look up `session:window.pane`
+by hand.
 
 Guardrails (day-1):
   - Explicit opt-in only — you must pass --pane AND --mention.
@@ -23,6 +27,8 @@ Guardrails (day-1):
   - NEVER sends Ctrl-C / NEVER interrupts a running turn. Injected
     text just sits in Codex's input buffer until its current turn ends.
   - include_self=False on the stream, so we don't self-echo.
+  - Starts from the room's current `last_seq` by default, so attaching
+    the notifier does NOT replay old buffer history into the pane.
 
 See the tests at tests/tmux_notify.py for the behavioural contract.
 """
@@ -44,6 +50,26 @@ def _require_tmux() -> str:
         print("tmux not found on PATH — this helper is tmux-only by design.", file=sys.stderr)
         raise SystemExit(1)
     return path
+
+
+def _resolve_pane(pane: str | None) -> str:
+    """Resolve the target pane.
+
+    Explicit `--pane` wins. Otherwise fall back to the tmux-provided
+    `TMUX_PANE` env var so a helper launched from an existing tmux-hosted
+    Codex/Claude/Gemini session can push directly into the current pane.
+    """
+    raw = (pane or "").strip()
+    if raw and raw.lower() != "current":
+        return raw
+    current = os.environ.get("TMUX_PANE", "").strip()
+    if current:
+        return current
+    print(
+        "--pane is required unless TMUX_PANE is set (launch from inside tmux or pass an explicit pane target).",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
 
 def _mention_regex(handle: str) -> "re.Pattern[str]":
@@ -68,7 +94,9 @@ def _send_to_pane(tmux: str, pane: str, text: str) -> None:
     subprocess.run([tmux, "send-keys", "-t", pane, "Enter"], check=False)
 
 
-def run_notifier(room_url: str, *, pane: str, mention: str, tmux_bin: str) -> int:
+def run_notifier(
+    room_url: str, *, pane: str, mention: str, tmux_bin: str, include_buffer: bool = False
+) -> int:
     # Lazy-import so `--help` works on machines without pynacl. Append
     # this file's directory to sys.path rather than insert(0, ...) so
     # an earlier entry (e.g. a test's PYTHONPATH-injected fake module)
@@ -82,13 +110,21 @@ def run_notifier(room_url: str, *, pane: str, mention: str, tmux_bin: str) -> in
     # Use a distinctive default name so agents see the notifier itself
     # in their sidebar and don't mistake it for a regular peer.
     room = Room(room_url, name="tmux-notifier")
+    floor = 0
+    if not include_buffer:
+        try:
+            floor = int(room.status().get("last_seq") or 0)
+        except Exception:
+            floor = 0
     print(
         f"[tmux_notify] listening on {room.room_id} for '{mention}', "
-        f"pushing to pane {pane!r}. Ctrl-C locally to stop.",
+        f"pushing to pane {pane!r} from seq>{floor}. Ctrl-C locally to stop.",
         file=sys.stderr,
     )
     try:
         for msg in room.stream(include_self=False):
+            if msg.seq and msg.seq <= floor:
+                continue
             text = (msg.text or "").strip()
             if not text:
                 continue
@@ -112,20 +148,28 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         )
     )
     p.add_argument("room_url", help="Full SafeBot room URL including #k=...")
-    p.add_argument("--pane", required=True, help="tmux target-pane identifier (e.g. codex:0.0, mysession:1.2, or %% pane-id).")
+    p.add_argument("--pane", default=None, help="tmux target-pane identifier (e.g. codex:0.0, mysession:1.2, or %% pane-id). Optional when TMUX_PANE is set; use `current` to force auto-detect.")
     p.add_argument("--mention", required=True, help="@handle to match (word-boundary, case-insensitive). Only matches forward.")
+    p.add_argument("--include-buffer", action="store_true", help="Also forward already-buffered room messages on startup. Default is from-now-only to avoid replaying history into the pane.")
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     tmux_bin = _require_tmux()
+    pane = _resolve_pane(args.pane)
     try:
         _mention_regex(args.mention)
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 2
-    return run_notifier(args.room_url, pane=args.pane, mention=args.mention, tmux_bin=tmux_bin)
+    return run_notifier(
+        args.room_url,
+        pane=pane,
+        mention=args.mention,
+        tmux_bin=tmux_bin,
+        include_buffer=args.include_buffer,
+    )
 
 
 if __name__ == "__main__":

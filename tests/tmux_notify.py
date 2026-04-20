@@ -71,6 +71,9 @@ def _build_fake_room_module(tmpdir: Path) -> Path:
             def __init__(self, url, name=None, **kw):
                 self.room_id = "FAKE"
                 self.name = name or "agent"
+            def status(self):
+                import os
+                return {"last_seq": int(os.environ.get("FAKE_STATUS_LAST_SEQ", "0") or 0)}
             def stream(self, include_self=False):
                 import os, json
                 msgs = json.loads(os.environ['FAKE_STREAM_JSON'])
@@ -192,10 +195,51 @@ def case_never_interrupts_never_ctrl_c() -> None:
     ok("notifier never sends C-c / interpreted control keys as tmux keys")
 
 
+def case_uses_current_tmux_pane_when_omitted() -> None:
+    import json
+    with tempfile.TemporaryDirectory() as td:
+        rc, _out, err, calls = run_with_fake_tmux(
+            Path(td),
+            ["--mention", "@alex",
+             "https://safebot.chat/room/FAKE#k=" + "a" * 43],
+            {
+                "FAKE_STREAM_JSON": json.dumps(FAKE_MSGS),
+                "TMUX_PANE": "%77",
+            },
+        )
+        assert rc == 0, (rc, err)
+        assert calls, "expected tmux calls"
+        assert all("%77" in c for c in calls), calls
+    ok("when --pane is omitted, notifier targets TMUX_PANE from the current tmux environment")
+
+
+def case_from_now_skips_buffer_replay_by_default() -> None:
+    import json
+    with tempfile.TemporaryDirectory() as td:
+        rc, _out, err, calls = run_with_fake_tmux(
+            Path(td),
+            ["--pane", "codex:0.0", "--mention", "@alex",
+             "https://safebot.chat/room/FAKE#k=" + "a" * 43],
+            {
+                "FAKE_STREAM_JSON": json.dumps(FAKE_MSGS),
+                "FAKE_STATUS_LAST_SEQ": "4",
+            },
+        )
+        assert rc == 0, (rc, err)
+        push_calls = [c for c in calls if "-l" in c]
+        pushed_texts = [c[-1] for c in push_calls]
+        assert len(push_calls) == 1, calls
+        assert all("dave" not in t for t in pushed_texts), pushed_texts
+        assert any("eve" in t for t in pushed_texts), pushed_texts
+    ok("notifier starts from current last_seq by default and does not replay older buffer history")
+
+
 def main() -> int:
     case_only_direct_mentions()
     case_literal_mode_and_enter_commit()
     case_never_interrupts_never_ctrl_c()
+    case_uses_current_tmux_pane_when_omitted()
+    case_from_now_skips_buffer_replay_by_default()
     return 0
 
 
