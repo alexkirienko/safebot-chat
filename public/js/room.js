@@ -627,6 +627,22 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       `<span>· ${time}</span>`;
     bubble.appendChild(meta);
 
+    // Reply-to quoted preview. `m.reply_to` is the message-id of the
+    // target; we look it up in renderedIds → preview text via an
+    // in-memory map. If the target is deleted (tombstone in deletedIds)
+    // or expired (TTL) or simply out of our buffer, we render a muted
+    // placeholder instead of cached plaintext. Any subsequent delete/
+    // expiry of the target must converge on placeholder — see the
+    // `applyDelete` hook which rewrites live reply-previews pointing
+    // at it.
+    if (m.reply_to) {
+      const rp = document.createElement('div');
+      rp.className = 'bubble__reply-ref';
+      rp.dataset.replyTo = m.reply_to;
+      renderReplyRefInto(rp, m.reply_to);
+      bubble.appendChild(rp);
+    }
+
     const body = document.createElement('div');
     body.className = 'bubble__body';
     let mentionedMe = false;
@@ -672,6 +688,18 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         initiateDelete({ id: m.id, seq: m.seq });
       });
       bubble.appendChild(del);
+
+      const rep = document.createElement('button');
+      rep.className = 'bubble__reply-btn';
+      rep.type = 'button';
+      rep.title = `Reply to ${m.sender || 'message'}`;
+      rep.setAttribute('aria-label', rep.title);
+      rep.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg>';
+      rep.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        setReplyingTo({ id: m.id, sender: m.sender || 'agent', preview: plaintext });
+      });
+      bubble.appendChild(rep);
     }
 
     // Disappearing-messages badge + expiry schedule. If the message
@@ -697,7 +725,14 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       // simpler than polling a timer wheel.
       const tick = () => {
         const rem = expiresAt - Date.now();
-        if (rem <= 0) { applyDelete(m.id, m.seq); return; }
+        if (rem <= 0) {
+          applyDelete(m.id, m.seq);
+          // applyDelete already updates deletedIds + triggers
+          // refreshReplyRefsPointingAt; the placeholder path will show
+          // "deleted" rather than "expired" for TTL'd parents, which
+          // is acceptable simplification — both are "gone".
+          return;
+        }
         setTimeout(tick, Math.min(rem, 60 * 60 * 1000));
       };
       setTimeout(tick, Math.min(remaining, 60 * 60 * 1000));
@@ -711,6 +746,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     requestAnimationFrame(() => {
       chatListEl.scrollTop = chatListEl.scrollHeight;
     });
+    // Remember the message so future reply-refs can preview it even
+    // after its bubble scrolls out of the viewport.
+    try { rememberMessage(m, plaintext); } catch (_) {}
+
     // Persist to the per-browser IDB cache so a tab-reload days later
     // still shows the conversation. Fire-and-forget; IDB failures are
     // logged and don't affect rendering.
@@ -719,6 +758,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
         id: m.id, seq: m.seq, sender: m.sender,
         sender_verified: m.sender_verified, ts: m.ts, text: plaintext,
         ttl_ms: ttlMs || undefined,
+        reply_to: m.reply_to || undefined,
       });
     }
   }
@@ -983,6 +1023,105 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     btn.classList.toggle('is-active', active);
   }
 
+  // --- Reply-to-message --------------------------------------------------
+  // Stable id → {sender, text, ts, ttl_ms} so reply-ref previews can
+  // look up a target after its original bubble has scrolled away.
+  const knownMessages = new Map();
+  let replyingTo = null; // {id, sender, preview} or null
+  function rememberMessage(m, text) {
+    if (!m || !m.id) return;
+    knownMessages.set(m.id, {
+      sender: m.sender || 'agent',
+      text: typeof text === 'string' ? text : (m.text || ''),
+      ts: m.ts || 0,
+      ttl_ms: m.ttl_ms || 0,
+    });
+    // Bound memory growth — we don't need the whole room ever, just
+    // enough to satisfy reply-refs on the currently-rendered bubbles.
+    if (knownMessages.size > 4000) {
+      const drop = knownMessages.size - 3000;
+      let i = 0;
+      for (const k of knownMessages.keys()) {
+        if (i++ >= drop) break;
+        knownMessages.delete(k);
+      }
+    }
+  }
+  function replyRefIsDead(id) {
+    if (!id) return true;
+    if (deletedIds.has(id)) return true;
+    const rec = knownMessages.get(id);
+    if (!rec) return false; // unknown — not dead, just not-in-buffer
+    if (rec.ttl_ms && rec.ts && (rec.ts + rec.ttl_ms) <= Date.now()) return true;
+    return false;
+  }
+  function renderReplyRefInto(el, id) {
+    el.innerHTML = '';
+    if (!id) return;
+    const dead = replyRefIsDead(id);
+    const rec = knownMessages.get(id);
+    const label = document.createElement('span');
+    label.className = 'bubble__reply-ref__label';
+    if (dead) {
+      label.textContent = deletedIds.has(id) ? 'replying to a deleted message' : 'replying to an expired message';
+      el.classList.add('is-dead');
+    } else if (rec) {
+      label.textContent = `replying to ${rec.sender}`;
+      el.classList.remove('is-dead');
+    } else {
+      label.textContent = 'replying to an earlier message';
+      el.classList.remove('is-dead');
+    }
+    el.appendChild(label);
+    if (!dead && rec && rec.text) {
+      const preview = document.createElement('span');
+      preview.className = 'bubble__reply-ref__preview';
+      preview.textContent = (rec.text || '').slice(0, 140);
+      el.appendChild(preview);
+    }
+    // Click scrolls to the target bubble in the current DOM; if it's
+    // not rendered, fall through silently.
+    el.onclick = (ev) => {
+      ev.preventDefault();
+      const target = chatListEl.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        target.classList.add('is-flash');
+        setTimeout(() => target.classList.remove('is-flash'), 1200);
+      }
+    };
+  }
+  function refreshReplyRefsPointingAt(targetId) {
+    // Called after applyDelete so any live reply-ref targeting the
+    // just-deleted id converges on the placeholder — "a child reply
+    // must never keep showing cached plaintext after parent delete"
+    // (codex-qa QA matrix).
+    if (!targetId) return;
+    const refs = chatListEl.querySelectorAll(`.bubble__reply-ref[data-reply-to="${CSS.escape(targetId)}"]`);
+    for (const el of refs) renderReplyRefInto(el, targetId);
+  }
+  function setReplyingTo(t) {
+    replyingTo = t;
+    const pill = document.getElementById('replying-pill');
+    if (!pill) return;
+    if (!t) { pill.hidden = true; pill.innerHTML = ''; return; }
+    pill.hidden = false;
+    pill.innerHTML = '';
+    const lbl = document.createElement('span');
+    lbl.className = 'replying-pill__lbl';
+    lbl.textContent = `Replying to ${t.sender}:`;
+    const snip = document.createElement('span');
+    snip.className = 'replying-pill__snip';
+    snip.textContent = (t.preview || '').slice(0, 120);
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'replying-pill__x';
+    close.textContent = '×';
+    close.setAttribute('aria-label', 'Cancel reply');
+    close.addEventListener('click', (e) => { e.preventDefault(); setReplyingTo(null); });
+    pill.appendChild(lbl); pill.appendChild(snip); pill.appendChild(close);
+  }
+
   // --- Delete-for-everyone -----------------------------------------------
   // Small protocol on top of the room key: any participant can post a
   // delete envelope referencing a target message id + seq. All clients
@@ -1031,6 +1170,10 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     if (!targetId || deletedIds.has(targetId)) return;
     deletedIds.set(targetId, Date.now());
     persistDeleted();
+    // Converge any live reply-ref pointing at this id on the
+    // "deleted message" placeholder so a child reply can't keep
+    // showing cached plaintext.
+    try { refreshReplyRefsPointingAt(targetId); } catch (_) {}
     // Evict DOM bubble.
     const el = chatListEl.querySelector(`.bubble[data-msg-id="${CSS.escape(targetId)}"]`);
     if (el) el.remove();
@@ -1419,6 +1562,13 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       // actually rejected the post (codex-qa review, major #3).
     }
     firstMessageSent = true;
+    // Reply-to: attach stable message-id of the target set via the
+    // Reply button. Cleared after send so the next message isn't
+    // silently threaded to the wrong parent.
+    if (replyingTo && replyingTo.id) {
+      body.reply_to = replyingTo.id;
+      setReplyingTo(null);
+    }
     // Disappearing-messages TTL: server clamps, client schedules expiry on
     // echo via renderMessage. Only attach if > 0 so the wire stays clean
     // for the common "Off" case.

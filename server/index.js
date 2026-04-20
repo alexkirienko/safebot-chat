@@ -581,6 +581,7 @@ function buildExcludeSet(handle, extra) {
 function buildClaimEnvelope(m) {
   const e = { seq: m.seq, id: m.id, sender: m.sender, ciphertext: m.ciphertext, nonce: m.nonce, ts: m.ts, sender_verified: !!m.sender_verified };
   if (m.ttl_ms) e.ttl_ms = m.ttl_ms;
+  if (m.reply_to) e.reply_to = m.reply_to;
   return e;
 }
 
@@ -1142,6 +1143,15 @@ function validMessage(msg) {
   if (!isCanonicalBase64(msg.nonce, 24)) return false;
   try { if (Buffer.from(msg.ciphertext, 'base64').length > MAX_MSG_BYTES) return false; } catch (_) { return false; }
   if (msg.sender != null && (typeof msg.sender !== 'string' || msg.sender.length > 64)) return false;
+  // reply_to: optional message-id of a previous message this one replies
+  // to. Server doesn't enforce existence (rooms cycle through the 2000
+  // / 24h buffer, so the target may no longer be in recent) — clients
+  // render a "deleted" / "gone" placeholder if the id is unknown. We
+  // just validate shape to keep the wire clean.
+  if (msg.reply_to != null) {
+    if (typeof msg.reply_to !== 'string' || msg.reply_to.length < 8 || msg.reply_to.length > 64) return false;
+    if (!/^[A-Za-z0-9_-]+$/.test(msg.reply_to)) return false;
+  }
   if (msg.ttl_ms != null) {
     if (typeof msg.ttl_ms !== 'number' || !Number.isFinite(msg.ttl_ms)) return false;
     // 0 = no expiry (same as unset). Otherwise clamp to [30 s, 1 year].
@@ -2061,6 +2071,7 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
     _bytes: ctBytes,
   };
   if (typeof req.body.ttl_ms === 'number' && req.body.ttl_ms > 0) msg.ttl_ms = req.body.ttl_ms;
+  if (typeof req.body.reply_to === 'string' && req.body.reply_to) msg.reply_to = req.body.reply_to;
   ROOM_GLOBAL_BYTES += ctBytes;
   room.recent.push(msg);
   pruneRecent(room);
@@ -2909,6 +2920,7 @@ function handleWs(ws, roomId, ip) {
       _bytes: ctBytes,
     };
     if (typeof msg.ttl_ms === 'number' && msg.ttl_ms > 0) out.ttl_ms = msg.ttl_ms;
+    if (typeof msg.reply_to === 'string' && msg.reply_to) out.reply_to = msg.reply_to;
     ROOM_GLOBAL_BYTES += ctBytes;
     room.recent.push(out);
     pruneRecent(room);

@@ -60,6 +60,7 @@
           text: typeof msg.text === 'string' ? msg.text : '',
         };
         if (typeof msg.ttl_ms === 'number' && msg.ttl_ms > 0) rec.ttl_ms = msg.ttl_ms;
+        if (typeof msg.reply_to === 'string' && msg.reply_to) rec.reply_to = msg.reply_to;
         tx.objectStore(STORE).put(rec);
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
@@ -139,6 +140,7 @@
         ts: m.ts || 0, text: m.text || '',
       };
       if (m.ttl_ms) item.ttl_ms = m.ttl_ms;
+      if (m.reply_to) item.reply_to = m.reply_to;
       const approx = (item.text || '').length + (item.sender || '').length + 80;
       if (bytes + approx > maxBytes) break;
       bytes += approx;

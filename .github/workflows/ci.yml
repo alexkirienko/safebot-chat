@@ -81,6 +81,7 @@ jobs:
           python3 tests/room_ttl.py
           python3 tests/agent_safebot.py
           python3 tests/tmux_notify.py
+          python3 tests/room_reply.py
 
       - name: MCP smoke (stdio JSON-RPC)
         env:
