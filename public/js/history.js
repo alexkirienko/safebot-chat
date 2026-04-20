@@ -110,6 +110,16 @@
     let bytes = 0;
     for (const m of all) {
       if (m.seq <= after) continue;
+      // Skip protocol envelopes that older clients may have cached.
+      const t = m.text || '';
+      if (t && t.charCodeAt(0) === 123 /* '{' */) {
+        try {
+          const p = JSON.parse(t);
+          if (p && (p.safebot_adopt_v1 === true
+                 || p.safebot_hist_req_v1 === true
+                 || p.safebot_hist_resp_v1 === true)) continue;
+        } catch (_) { /* not JSON */ }
+      }
       const item = {
         seq: m.seq, id: m.id, sender: m.sender || '',
         sender_verified: !!m.sender_verified,
@@ -137,6 +147,22 @@
     return added;
   }
 
+  // Remove a single cached item (by seq) — used to evict stale protocol
+  // envelopes that older clients wrote into IDB before we learned to
+  // filter them at the render layer.
+  async function evict(roomId, seq) {
+    if (typeof seq !== 'number') return;
+    try {
+      const db = await open();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).delete([roomId, seq]);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (_) { /* best-effort */ }
+  }
+
   // Wipe everything we've cached for one room. Useful for "forget this
   // room" operator control and for tests.
   async function clear(roomId) {
@@ -161,5 +187,5 @@
     }
   }
 
-  global.SafeBotHistory = { save, loadAll, lastSeq, clear, serialize, mergeAll };
+  global.SafeBotHistory = { save, loadAll, lastSeq, clear, serialize, mergeAll, evict };
 }(typeof window !== 'undefined' ? window : globalThis));

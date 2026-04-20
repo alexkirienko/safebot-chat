@@ -547,6 +547,23 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       }
     }
 
+    // Filter protocol envelopes (adopt / hist_req / hist_resp). On older
+    // clients without the WS-level interceptor these can end up persisted
+    // in IDB, so we re-check at the render stage too. Cheap JSON probe —
+    // only parse if the text even looks like a JSON object.
+    if (plaintext && plaintext.charCodeAt(0) === 123 /* '{' */) {
+      try {
+        const probe = JSON.parse(plaintext);
+        if (probe && (probe.safebot_adopt_v1 === true
+                   || probe.safebot_hist_req_v1 === true
+                   || probe.safebot_hist_resp_v1 === true)) {
+          // Evict a prior stale cache entry if present.
+          try { window.SafeBotHistory && window.SafeBotHistory.evict && window.SafeBotHistory.evict(roomId, m.seq); } catch (_) {}
+          return;
+        }
+      } catch (_) { /* not JSON, fall through */ }
+    }
+
     anyMessages = true;
     maybeHideInvite();
 
