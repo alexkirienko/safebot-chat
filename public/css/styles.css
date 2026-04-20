@@ -756,6 +756,12 @@ section { padding: 80px 0; position: relative; }
   border: 1px solid color-mix(in srgb, var(--primary, #3B82F6) 30%, transparent);
   font-size: 12.5px;
 }
+/* `display: flex` above has the same specificity as the user-agent
+ * `[hidden] { display: none }` rule and wins by later-declaration,
+ * which left an empty ~22px strip visible between namechip and the
+ * message input when no reply was active. Force-hide with !important
+ * so the JS-controlled `hidden` attribute always takes effect. */
+.replying-pill[hidden] { display: none !important; }
 .replying-pill__lbl { font-weight: 600; color: var(--primary, #3B82F6); }
 .replying-pill__snip { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--d-text-2); }
 .replying-pill__x {

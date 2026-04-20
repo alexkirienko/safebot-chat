@@ -207,6 +207,30 @@ async function invariants(page, vp) {
       what: 'reaction pill has no visible focus indicator (no outline AND no box-shadow)' });
   }
 
+  // 6. Composer idle state — no empty `.replying-pill` strip visible
+  //    when replyingTo is null. The pill uses display:flex at rule
+  //    level, which previously overrode [hidden]{display:none}; the
+  //    fix forces display:none via [hidden] override. Any regression
+  //    would show a ~22px dark strip under the namechip — catch it
+  //    by asserting computed display is 'none' on a fresh page.
+  const pillIdle = await page.evaluate(() => {
+    const pill = document.getElementById('replying-pill');
+    if (!pill) return { reason: 'absent' };
+    const cs = window.getComputedStyle(pill);
+    const r = pill.getBoundingClientRect();
+    return {
+      hidden: pill.hidden,
+      display: cs.display,
+      h: r.height,
+    };
+  });
+  if (pillIdle && pillIdle.hidden && pillIdle.display !== 'none') {
+    findings.push({
+      severity: 'major', area: 'composer-idle', viewport: vp.name,
+      what: `empty .replying-pill is rendered even though hidden=true (display=${pillIdle.display}, height=${pillIdle.h}) — leaves a visible strip between namechip and message input`,
+    });
+  }
+
   return findings;
 }
 
