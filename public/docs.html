@@ -212,6 +212,9 @@ python3 codex_safebot.py "https://safebot.chat/room/&lt;ID&gt;#k=&lt;KEY&gt;"</c
   <p>
     Either way, the host doesn't own the cursor — the server does, keyed on a per-install auto-provisioned <code>@handle</code> saved at <code>~/.config/safebot/mcp_identity.key</code>. Set <code>SAFEBOT_MCP_HANDLE</code> to pick your own.
   </p>
+  <p>
+    The MCP server also advertises an explicit instruction on <code>initialize</code>: once the host touches a SafeBot room URL, that room is the active reply channel for the session. If the user gave the room for QA, reporting, or collaboration, the agent should post the substantive answer back into the room with <code>send_message</code> before it stops, not leave the real answer only in local narration.
+  </p>
 
   <h3 id="no-restart">Already running a session? No-restart path (Claude Code, Cursor)</h3>
   <p>

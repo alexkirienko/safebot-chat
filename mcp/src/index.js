@@ -32,10 +32,21 @@ import naclUtil from 'tweetnacl-util';
 const DEFAULT_BASE = process.env.SAFEBOT_BASE || 'https://safebot.chat';
 const ROOM_ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const NAME_PREFIX = 'agent';
-const USER_AGENT = `safebot-mcp/0.1.0 (+${DEFAULT_BASE})`;
+const USER_AGENT = `safebot-mcp/0.2.1 (+${DEFAULT_BASE})`;
 const SAFEBOT_CONFIG_DIR = path.join(os.homedir(), '.config', 'safebot');
 const IDENTITY_KEY_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.key');
 const IDENTITY_META_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.json');
+const ROOM_REPLY_DISCIPLINE =
+  'SafeBot room URLs are output channels, not only context sources: ' +
+  'if the user gave you a room URL for QA, reporting, or collaboration, send your substantive answer back into that room with `send_message` before you stop. ' +
+  'Do not keep the real answer only in local narration.';
+const SERVER_INSTRUCTIONS = [
+  'SafeBot.Chat rooms are collaboration channels.',
+  'When you call any SafeBot room tool with a `url`, treat that room as the active reply channel for this MCP session until another SafeBot room URL supersedes it.',
+  ROOM_REPLY_DISCIPLINE,
+  'If posting to the active room fails, say so explicitly instead of silently finishing locally.',
+  'For receive loops, use `send_message` for the room-facing reply, then `ack_task`/loop as appropriate.',
+].join(' ');
 
 // ---- URL + crypto helpers ----------------------------------------------
 
@@ -95,7 +106,7 @@ function parseRoomUrl(url) {
   // still point at localhost for dev, but LAN/internal hosts require opting
   // in via SAFEBOT_MCP_ALLOWED_BASES.
   assertSafeBase(base);
-  return { roomId: m[1], key, base };
+  return { roomId: m[1], key, base, url: u.toString() };
 }
 
 function encrypt(key, plaintext) {
@@ -195,7 +206,8 @@ const TOOLS = [
     description:
       'Encrypt a message and POST it to the given SafeBot.Chat room. ' +
       'The plaintext is sealed with XSalsa20-Poly1305 before it leaves this process. ' +
-      'Returns the server-assigned sequence number on success.',
+      'Returns the server-assigned sequence number on success. ' +
+      'Use this to publish your substantive answer back into the room; do not keep the real answer only in local narration.',
     inputSchema: {
       type: 'object',
       required: ['url', 'text'],
@@ -211,7 +223,8 @@ const TOOLS = [
     description:
       'Long-poll the room for new messages. Blocks up to `timeout_seconds` (default 20) ' +
       'and returns any messages with seq > `after_seq`, decrypted. Use the highest returned seq as the next `after_seq` to avoid duplicates. ' +
-      'Safe to call in a loop; the server-side endpoint is designed for this.',
+      'Safe to call in a loop; the server-side endpoint is designed for this. ' +
+      ROOM_REPLY_DISCIPLINE,
     inputSchema: {
       type: 'object',
       required: ['url'],
@@ -228,7 +241,8 @@ const TOOLS = [
     name: 'get_transcript',
     description:
       'Fetch and decrypt the recent message buffer from the room (up to 200 messages or 60 minutes of history — whichever is smaller). ' +
-      'Use this when you join a room mid-conversation and need onboarding context.',
+      'Use this when you join a room mid-conversation and need onboarding context. ' +
+      ROOM_REPLY_DISCIPLINE,
     inputSchema: {
       type: 'object',
       required: ['url'],
@@ -242,7 +256,8 @@ const TOOLS = [
   {
     name: 'room_status',
     description:
-      'Lightweight probe: does the room exist, how many participants are live, what is the latest seq, how long has it been idle. Does not require decryption.',
+      'Lightweight probe: does the room exist, how many participants are live, what is the latest seq, how long has it been idle. Does not require decryption. ' +
+      ROOM_REPLY_DISCIPLINE,
     inputSchema: {
       type: 'object',
       required: ['url'],
@@ -257,7 +272,8 @@ const TOOLS = [
       'Delivery guarantee: the cursor advances ONLY if the server receives the ack — a network failure mid-call leaves the claim in flight and the same message re-delivers. ' +
       'Host-crash after tool return, however, DOES lose the message: the cursor was already advanced. If you need at-least-once against host crashes, use claim_task + ack_task instead. ' +
       'Loop: call repeatedly. On "(no new messages ...)" call again immediately. ' +
-      'On first use, auto-provisions a persistent @handle at ~/.config/safebot/mcp_identity.key; override with SAFEBOT_MCP_HANDLE.',
+      'On first use, auto-provisions a persistent @handle at ~/.config/safebot/mcp_identity.key; override with SAFEBOT_MCP_HANDLE. ' +
+      'If the message warrants a response, reply to the same room with `send_message` before you move on.',
     inputSchema: {
       type: 'object',
       required: ['url'],
@@ -272,7 +288,8 @@ const TOOLS = [
     description:
       'Two-step at-least-once primitive — step 1. Blocks up to `timeout_seconds` and returns the next foreign message WITHOUT acking. Returns a `claim_id` you must pass to `ack_task` once the host has fully processed the message. ' +
       'If the host crashes between this call and ack_task (or simply never acks), the server claim expires after 60 s and the same message is re-delivered on the next claim_task call — this is the real at-least-once guarantee. ' +
-      'Prefer `next_task` if you want simpler ergonomics and can tolerate losing one message on host crash.',
+      'Prefer `next_task` if you want simpler ergonomics and can tolerate losing one message on host crash. ' +
+      'If the message warrants a response, reply to the same room with `send_message` before `ack_task`.',
     inputSchema: {
       type: 'object',
       required: ['url'],
@@ -311,6 +328,7 @@ const TOOLS = [
 
 let CACHED_IDENTITY = null;
 let CACHED_ROOM_IDENTITY = undefined; // undefined = not loaded yet; null = no promoted identity
+let ACTIVE_ROOM = null;
 
 function ensureIdentityDir() {
   fs.mkdirSync(SAFEBOT_CONFIG_DIR, { recursive: true, mode: 0o700 });
@@ -437,6 +455,22 @@ function signRoomEnvelope(roomId, ciphertext, ident) {
     sender_nonce: nonce,
     sender_sig: b64Encode(sig),
   };
+}
+
+function setActiveRoom(room) {
+  if (!room || !room.url) return false;
+  const changed = !ACTIVE_ROOM || ACTIVE_ROOM.url !== room.url;
+  ACTIVE_ROOM = { url: room.url, roomId: room.roomId, base: room.base };
+  return changed;
+}
+
+function activeRoomNotice(room, { changedOnly = true } = {}) {
+  const changed = setActiveRoom(room);
+  if (changedOnly && !changed) return '';
+  return (
+    `\n\n(active room set to ${room.roomId} — ` +
+    'if this room came from the user, post your substantive answer there with send_message before you stop)'
+  );
 }
 
 const ROOM_STATES = new Map();
@@ -661,13 +695,15 @@ async function tool_create_room({ base }) {
   const roomId = randomRoomId();
   const key = nacl.randomBytes(32);
   const url = `${b}/room/${roomId}#k=${b64urlEncode(key)}`;
+  const notice = activeRoomNotice({ url, roomId, base: b });
   return {
     content: [{
       type: 'text',
       text:
         `Created room ${roomId}.\n` +
         `\nJoin URL (contains the 256-bit key in the fragment — share exactly as-is):\n${url}\n` +
-        `\nThe server knows the room ID but has never seen the key. All participants with this URL can read and post.`,
+        `\nThe server knows the room ID but has never seen the key. All participants with this URL can read and post.` +
+        notice,
     }],
   };
 }
@@ -693,6 +729,7 @@ function sessionSenders(roomId) {
 
 async function tool_send_message({ url, text, name }) {
   const parsed = parseRoomUrl(url);
+  setActiveRoom(parsed);
   const state = await ensureRoomState(parsed, { explicitName: name });
   const sender = currentRoomLabel(state);
   rememberSender(parsed.roomId, sender);
@@ -731,6 +768,7 @@ async function tool_send_message({ url, text, name }) {
 
 async function tool_wait_for_messages({ url, after_seq = 0, timeout_seconds = 20, include_self = false, name }) {
   const parsed = parseRoomUrl(url);
+  const notice = activeRoomNotice(parsed);
   const state = await ensureRoomState(parsed, { explicitName: name });
   const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 20));
   const res = await request(
@@ -762,13 +800,15 @@ async function tool_wait_for_messages({ url, after_seq = 0, timeout_seconds = 20
               `[seq=${m.seq}] ${m.sender}: ${m.text == null ? '[undecryptable — wrong key or different room]' : m.text}`
             ).join('\n')
         ) +
-        `\n\n(last_seq=${lastSeq} — pass this as next after_seq)`,
+        `\n\n(last_seq=${lastSeq} — pass this as next after_seq)` +
+        notice,
     }],
   };
 }
 
 async function tool_get_transcript({ url, after_seq = 0, limit = 100 }) {
   const parsed = parseRoomUrl(url);
+  const notice = activeRoomNotice(parsed);
   const L = Math.max(1, Math.min(500, Number(limit) || 100));
   const res = await request(`${parsed.base}/api/rooms/${parsed.roomId}/transcript?after=${Number(after_seq) || 0}&limit=${L}`);
   const data = await res.json();
@@ -777,24 +817,26 @@ async function tool_get_transcript({ url, after_seq = 0, limit = 100 }) {
     text: decrypt(parsed.key, m.ciphertext, m.nonce),
   }));
   if (msgs.length === 0) {
-    return { content: [{ type: 'text', text: `(empty — no messages in the buffer after seq ${after_seq})` }] };
+    return { content: [{ type: 'text', text: `(empty — no messages in the buffer after seq ${after_seq})` + notice }] };
   }
   return {
     content: [{
       type: 'text',
       text:
         msgs.map((m) => `[seq=${m.seq}] ${m.sender}: ${m.text == null ? '[undecryptable]' : m.text}`).join('\n') +
-        `\n\n(last_seq=${data.last_seq}; ${msgs.length} of ${data.count} returned)`,
+        `\n\n(last_seq=${data.last_seq}; ${msgs.length} of ${data.count} returned)` +
+        notice,
     }],
   };
 }
 
 async function tool_room_status({ url }) {
-  const { roomId, base } = parseRoomUrl(url);
+  const { roomId, base, url: canonicalUrl } = parseRoomUrl(url);
+  const notice = activeRoomNotice({ url: canonicalUrl, roomId, base });
   const res = await request(`${base}/api/rooms/${roomId}/status`);
   const data = await res.json();
   if (!data.exists) {
-    return { content: [{ type: 'text', text: `Room ${roomId} does not currently exist on the server (possibly evicted after 30s of zero subscribers — re-joining will recreate it with a fresh buffer).` }] };
+    return { content: [{ type: 'text', text: `Room ${roomId} does not currently exist on the server (possibly evicted after 30s of zero subscribers — re-joining will recreate it with a fresh buffer).` + notice }] };
   }
   return {
     content: [{
@@ -805,7 +847,8 @@ async function tool_room_status({ url }) {
         `  recent_count: ${data.recent_count}\n` +
         `  last_seq:     ${data.last_seq}\n` +
         `  age:          ${data.age_seconds}s\n` +
-        `  idle:         ${data.idle_seconds}s`,
+        `  idle:         ${data.idle_seconds}s` +
+        notice,
     }],
   };
 }
@@ -854,11 +897,12 @@ async function doAck(base, roomId, ident, claim_id, seq) {
 
 async function tool_next_task({ url, timeout_seconds = 60 }) {
   const parsed = parseRoomUrl(url);
+  const notice = activeRoomNotice(parsed);
   const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 60));
   const state = await ensureRoomState(parsed);
   const claim = await claimSkippingAdopts(state, t);
   if (claim.empty || !claim.message) {
-    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}, cursor=${claim.cursor || 0}; call next_task again to keep listening)` }] };
+    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}, cursor=${claim.cursor || 0}; call next_task again to keep listening)` + notice }] };
   }
   const m = claim.message;
   const text = claim.decrypted_text;
@@ -878,7 +922,8 @@ async function tool_next_task({ url, timeout_seconds = 60 }) {
       type: 'text',
       text:
         `[seq=${m.seq}] ${m.sender}${verified}: ${text == null ? '[undecryptable — wrong room key]' : text}` +
-        `\n\n(listening in-room as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}; call next_task again to block for the next message)` +
+        `\n\n(listening in-room as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}; if a reply is needed, use send_message to the same room, then call next_task again to block for the next message)` +
+        notice +
         ackWarn,
     }],
   };
@@ -886,11 +931,12 @@ async function tool_next_task({ url, timeout_seconds = 60 }) {
 
 async function tool_claim_task({ url, timeout_seconds = 60 }) {
   const parsed = parseRoomUrl(url);
+  const notice = activeRoomNotice(parsed);
   const t = Math.max(1, Math.min(90, Number(timeout_seconds) || 60));
   const state = await ensureRoomState(parsed);
   const claim = await claimSkippingAdopts(state, t);
   if (claim.empty || !claim.message) {
-    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}, cursor=${claim.cursor || 0}; call claim_task again to keep listening)` }] };
+    return { content: [{ type: 'text', text: `(no new messages — blocked ${t}s as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}, cursor=${claim.cursor || 0}; call claim_task again to keep listening)` + notice }] };
   }
   const m = claim.message;
   const text = claim.decrypted_text;
@@ -900,14 +946,16 @@ async function tool_claim_task({ url, timeout_seconds = 60 }) {
       type: 'text',
       text:
         `[seq=${m.seq}] ${m.sender}${verified}: ${text == null ? '[undecryptable — wrong room key]' : text}` +
-        `\n\n(claim_id=${claim.claim_id} seq=${m.seq} — call ack_task with these once you have fully processed the message; ` +
-        `claim expires in 60s and re-delivers if you never ack)`,
+        `\n\n(claim_id=${claim.claim_id} seq=${m.seq} — if the message warrants a reply, call send_message to the same room first, then call ack_task once you have fully processed it; ` +
+        `claim expires in 60s and re-delivers if you never ack)` +
+        notice,
     }],
   };
 }
 
 async function tool_ack_task({ url, claim_id, seq }) {
   const parsed = parseRoomUrl(url);
+  setActiveRoom(parsed);
   const state = await ensureRoomState(parsed);
   const r = await doAck(parsed.base, parsed.roomId, state.authIdentity, String(claim_id || ''), Number(seq) || 0);
   return {
@@ -934,8 +982,8 @@ const DISPATCH = {
 // ---- MCP wiring --------------------------------------------------------
 
 const server = new Server(
-  { name: 'safebot-chat', version: '0.1.0' },
-  { capabilities: { tools: {} } },
+  { name: 'safebot-chat', version: '0.2.1' },
+  { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));

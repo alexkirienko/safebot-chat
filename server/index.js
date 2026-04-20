@@ -1434,8 +1434,12 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
   }
   const sub = {
     kind: 'sse',
+    last_seen: Date.now(),
     send(text) {
       res.write(`data: ${text}\n\n`);
+      // Each write is a server→client push; treat as evidence the sub is
+      // alive (write failures are caught below and tear down the sub).
+      sub.last_seen = Date.now();
     },
     close() { try { res.end(); } catch (_) {} },
   };
@@ -2071,6 +2075,29 @@ app.post('/api/rooms/:roomId/messages', (req, res) => {
 });
 
 // --- Basic HTTP long-poll + transcript + status (agent-friendly) -----------
+
+// POST /api/rooms/:id/listening — external heartbeat for turn-based
+// agents. Body: {name, box_pub?}. Keeps the agent visible in the
+// participants list with a fresh last_seen_ms_ago so operators can
+// tell a listening SDK client apart from one that silently went away.
+// Rebroadcasts presence to all subscribers on receipt.
+app.post('/api/rooms/:roomId/listening', (req, res) => {
+  const { roomId } = req.params;
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(roomId)) return res.status(400).json({ error: 'bad roomId' });
+  const room = rooms.get(roomId);
+  if (!room) return res.status(404).json({ error: 'no such room' });
+  const name = typeof req.body.name === 'string' ? req.body.name.slice(0, 64) : '';
+  if (!/^[A-Za-z0-9@._\-\u00A0-\uFFFF]{1,64}$/.test(name)) return res.status(400).json({ error: 'bad name' });
+  const boxPub = typeof req.body.box_pub === 'string' && isValidBoxPub(req.body.box_pub) ? req.body.box_pub : null;
+  if (!room.externalHeartbeats) room.externalHeartbeats = new Map();
+  room.externalHeartbeats.set(name, { last_seen: Date.now(), box_pub: boxPub });
+  room.lastActive = Date.now();
+  broadcast(room, {
+    type: 'presence', size: room.subs.size,
+    names: collectSubNames(room), participants: collectSubParticipants(room),
+  });
+  res.json({ ok: true });
+});
 
 // GET /api/rooms/:id/status — lightweight room probe.
 app.get('/api/rooms/:roomId/status', (req, res) => {
@@ -2709,14 +2736,45 @@ function collectSubNames(room) {
 function collectSubParticipants(room) {
   const out = [];
   const seenNames = new Set();
+  const now = Date.now();
+  // Persistent subscribers (WS + SSE).
   for (const sub of room.subs) {
     if (!sub || !sub.name || seenNames.has(sub.name)) continue;
     const entry = { name: sub.name };
     if (sub.box_pub) entry.box_pub = sub.box_pub;
+    if (sub.last_seen) entry.last_seen_ms_ago = Math.max(0, now - sub.last_seen);
+    else entry.last_seen_ms_ago = 0;
     out.push(entry);
     seenNames.add(sub.name);
   }
+  // External heartbeats: turn-based agents (SDK users calling claim_task
+  // without a persistent stream, browser fallbacks, etc.) post to
+  // /listening so presence reflects "still here" even without an open
+  // WS/SSE connection. We expire them after 60 s of silence.
+  if (room.externalHeartbeats) {
+    for (const [name, rec] of room.externalHeartbeats) {
+      if (seenNames.has(name)) continue;
+      if (now - rec.last_seen > 60_000) continue;
+      const entry = { name, last_seen_ms_ago: now - rec.last_seen };
+      if (rec.box_pub) entry.box_pub = rec.box_pub;
+      out.push(entry);
+      seenNames.add(name);
+    }
+  }
   return out;
+}
+
+// Expire externalHeartbeats older than 60s. Called on presence-touch and
+// on collectSubParticipants indirectly; we keep it cheap by iterating
+// only when the map is non-empty.
+function pruneExternalHeartbeats(room) {
+  if (!room.externalHeartbeats || room.externalHeartbeats.size === 0) return false;
+  const cutoff = Date.now() - 60_000;
+  let changed = false;
+  for (const [name, rec] of room.externalHeartbeats) {
+    if (rec.last_seen < cutoff) { room.externalHeartbeats.delete(name); changed = true; }
+  }
+  return changed;
 }
 
 // Validate a base64-encoded 32-byte X25519 public key advertised by a
@@ -2739,6 +2797,7 @@ function handleWs(ws, roomId, ip) {
   if (!room) { streamRelease(ip); try { ws.send(JSON.stringify({ type: 'error', error: 'room cap reached' })); ws.close(); } catch (_) {} return; }
   const sub = {
     kind: 'ws',
+    last_seen: Date.now(),
     send(text) { if (ws.readyState === 1) ws.send(text); },
     close() { try { ws.close(); } catch (_) {} },
   };
@@ -2756,8 +2815,13 @@ function handleWs(ws, roomId, ip) {
   METRICS.ws_connects_total += 1;
 
   ws.on('message', (data) => {
+    // Any inbound frame means the client is actively reading — bump
+    // last_seen so presence shows "listening now". Includes our new
+    // lightweight {type:'listening'} heartbeat frame.
+    sub.last_seen = Date.now();
     let msg;
     try { msg = JSON.parse(data.toString('utf8')); } catch (_) { return; }
+    if (msg && msg.type === 'listening') return; // no-op, just a heartbeat
     // Hello frame: a subscriber declares its display name up-front so the
     // presence broadcast can carry a names list. Without this, a browser
     // visitor who joins but doesn't post anything never appears in other

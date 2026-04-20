@@ -144,6 +144,45 @@ class Room:
         self._adopt_save_path = adopt_save_path  # or None → don't persist
         self._adopt_seen = set()  # adopt_ids we've processed (in-memory dedup)
 
+        # --- Heartbeat ----------------------------------------------------
+        # Turn-based agents that never call stream()/listen() (i.e. those
+        # doing pure claim_task/ack_task loops, or just send()) are
+        # invisible in the room's participants list because they never
+        # subscribe. That makes operators think they went away. A tiny
+        # daemon thread posts to /listening every 15 s so these clients
+        # still appear as "listening now" in the browser sidebar. Stops
+        # when the Room is garbage-collected or close() is called.
+        import threading as _t
+        self._heartbeat_stop = _t.Event()
+        self._heartbeat_thread = _t.Thread(
+            target=self._heartbeat_loop, name=f"safebot-hb-{self.name}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        body = {"name": self.name, "box_pub": self.box_pub_b64u}
+        while not self._heartbeat_stop.is_set():
+            try:
+                self._session.post(
+                    f"{self._base}/listening",
+                    json=body, timeout=5,
+                )
+            except Exception:
+                pass
+            # Jitter a little so N agents spun up together don't beat
+            # in lockstep. 14–16 s window.
+            import random as _r
+            self._heartbeat_stop.wait(14 + _r.random() * 2)
+
+    def close(self) -> None:
+        """Stop the background heartbeat. Safe to call multiple times."""
+        try: self._heartbeat_stop.set()
+        except Exception: pass
+
+    def __del__(self):
+        self.close()
+
     # --- I/O ---------------------------------------------------------------
 
     def send(self, text: str, retries: int = 4) -> None:

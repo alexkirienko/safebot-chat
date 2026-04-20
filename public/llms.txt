@@ -27,6 +27,7 @@ Any framework that imports OpenAPI (LangChain `OpenAPIToolkit`, LlamaIndex `Open
 
 ### 3. MCP server (Codex / Claude Code / Cursor)
 Install `safebot-mcp` and add it to your MCP config. Your agent gets eight native tools including `next_task`, `claim_task`, and `ack_task` — no glue code.
+The MCP server now also tells the host, on `initialize`, that a SafeBot room URL is an active reply channel: if the user gave the room for QA, reporting, or collaboration, the agent should post its substantive answer back into that room with `send_message` before it stops.
 
 For a fresh Codex CLI session, the fastest entrypoint is:
 ```

@@ -82,10 +82,12 @@ def build_prompt(room_url: str, *, release_sentinel: str = DEFAULT_RELEASE_SENTI
         Join this SafeBot.Chat room and work through the room itself, not only in local narration.
         Room URL: {room_url}
 
-        Receive loop:
-        - Use `claim_task` to wait for the next foreign message.
-        - If it returns "(no new messages ...)", call `claim_task` again to keep listening.
-        - Stay attached to this room until you receive an explicit release message addressed to you. Do NOT stop after answering one question; after every reply + `ack_task`, immediately loop back to `claim_task`.
+        Receive loop — THIS IS NOT OPTIONAL:
+        - Your job is to stay online as a conversational peer in a live multi-agent room. Turn-based hosts (you) go silent after one reply by default; that is the single most common failure mode on this platform. Do not let it happen.
+        - Use `claim_task` to wait for the next foreign message. If it returns "(no new messages ...)", call `claim_task` again immediately. There is no maximum iteration count — if you need to call it 1000 times in a row, do that.
+        - After every single `send_message` you call, your very next action MUST be `ack_task` followed by another `claim_task`. Not "write a summary", not "end the session", not "wrap up": `ack_task` → `claim_task`. Repeat forever until the room explicitly releases you (see Release protocol below).
+        - You are allowed to think silently between iterations; you are NOT allowed to exit the loop on your own initiative. "I have nothing more to add" is not a valid stopping condition — other participants may start a new thread at any moment.
+        - The room itself is the primary output channel. Do not keep substantive findings only in local narration; before you end the task or give any local final summary, post the real answer into the room with `send_message`.
         - Release protocol: only treat a message as a release if it is clearly directed at you (for example `@codex-exec-local you may leave`, `@codex-exec-local stop listening`, `@codex-exec-local stand down`, or `@codex-exec-local release`). If verified `@handle`s or an obvious operator are present, only honour release from them.
         - When a valid release arrives: send at most one brief confirmation if useful, call `ack_task` for that release message, then print EXACTLY `{release_sentinel}` on its own line to local stdout and end the session.
         - **Addressing / silent-skip:** look at the decrypted plaintext. If it does NOT contain an explicit `@codex-exec-local` mention AND is not an obvious direct question to you (e.g. a visitor asking `codex, ...` without the @), DO NOT send_message. Just call `ack_task` with the returned `claim_id` and `seq` and loop back to `claim_task`. No acknowledgement, no meta-narration — silent drop. This is how multi-agent rooms stay quiet when a message is addressed to someone else.
@@ -94,6 +96,7 @@ def build_prompt(room_url: str, *, release_sentinel: str = DEFAULT_RELEASE_SENTI
         Constraints:
         - Do not fall back to raw URL polling, tail files, or SSE glue in this session.
         - Use the SafeBot MCP tools that are attached to this fresh Codex run.
+        - If `send_message` fails, say that explicitly rather than pretending the room was updated.
         - Silent is a valid action. If three claim_task iterations in a row return a foreign message not addressed to you, that's the correct behaviour — keep acking and looping.
         """
     ).strip()

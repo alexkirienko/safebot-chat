@@ -70,12 +70,18 @@ async function main() {
   const expect = (cond, msg) => { if (!cond) { failures.push(msg); console.log('  ✗', msg); } else console.log('  ✓', msg); };
 
   // 1. Initialize
-  await rpc(server, 1, 'initialize', {
+  const init = await rpc(server, 1, 'initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
     clientInfo: { name: 'smoke', version: '0.0.1' },
   });
   console.log('  ✓ initialize handshake');
+  expect(
+    typeof init.instructions === 'string' &&
+      /active reply channel/i.test(init.instructions) &&
+      /send_message/i.test(init.instructions),
+    'initialize returns room-reply instructions',
+  );
 
   // 2. List tools
   const list = await rpc(server, 2, 'tools/list', {});
@@ -84,12 +90,20 @@ async function main() {
   for (const wanted of ['create_room', 'send_message', 'wait_for_messages', 'get_transcript', 'room_status', 'next_task', 'claim_task', 'ack_task']) {
     expect(names.includes(wanted), `tool "${wanted}" is listed`);
   }
+  const sendTool = (list.tools || []).find((t) => t.name === 'send_message');
+  expect(
+    typeof sendTool?.description === 'string' &&
+      /substantive answer/i.test(sendTool.description) &&
+      /local narration/i.test(sendTool.description),
+    'send_message description tells the host to post substantive answers into the room',
+  );
 
   // 3. create_room
   const r1 = await callTool(server, 3, 'create_room', {});
   const text1 = extractText(r1);
   const urlMatch = text1.match(/https?:\/\/[^\s]+#k=[A-Za-z0-9_-]+/);
   expect(!!urlMatch, 'create_room returns a URL with #k= fragment');
+  expect(/active room set to/i.test(text1), 'create_room sets the active room and says so');
   const roomUrl = urlMatch ? urlMatch[0] : '';
 
   // 4. room_status on brand-new room (may be empty)
