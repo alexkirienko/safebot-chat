@@ -15,6 +15,16 @@ adapter classes at the top of this file.
 
 Pass `--once` for a single launch. Extra args after `--` flow through
 to the host binary verbatim.
+
+This is a long-lived foreground CLI. In-process crashloops are handled
+automatically (exponential backoff, never terminal exit). For
+*process-level* resilience — auto-restart after SIGKILL / OOM /
+reboot — wrap this with your OS's standard supervisor (systemd-user
+unit on Linux, launchd agent on macOS, or a minimal `while true;
+do python3 agent_safebot.py ...; sleep 2; done` loop anywhere). See
+https://safebot.chat/docs#supervising for copy-paste snippets.
+SafeBot deliberately does not ship its own supervisor — listener,
+not init system.
 """
 
 from __future__ import annotations
