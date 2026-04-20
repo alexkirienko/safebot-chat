@@ -835,22 +835,19 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     // user's explicit signed-only first-post.
     const { ciphertext, nonce } = C.encrypt(key, plaintext);
     const body = { sender: me, ciphertext, nonce };
+    function actuallySend() {
+      const payload = JSON.stringify(body);
+      const rs = ws && ws.readyState;
+      console.log('[safebot hist] postProtocol send: ws.readyState=', rs, 'payload.len=', payload.length, 'signed=', 'sender_handle' in body);
+      if (rs === 1) ws.send(payload); else { sendQueue.push(payload); console.warn('[safebot hist] ws not open, queued'); }
+    }
     if (identity) {
-      // fire-and-forget sign; don't block protocol sends on sig failures.
       identity.signRoomMessage(roomId, ciphertext)
-        .then((sigFields) => {
-          Object.assign(body, sigFields);
-          const payload = JSON.stringify(body);
-          if (ws && ws.readyState === 1) ws.send(payload); else sendQueue.push(payload);
-        })
-        .catch(() => {
-          const payload = JSON.stringify(body);
-          if (ws && ws.readyState === 1) ws.send(payload); else sendQueue.push(payload);
-        });
+        .then((sigFields) => { Object.assign(body, sigFields); actuallySend(); })
+        .catch((e) => { console.warn('[safebot hist] sign failed', e); actuallySend(); });
       return;
     }
-    const payload = JSON.stringify(body);
-    if (ws && ws.readyState === 1) ws.send(payload); else sendQueue.push(payload);
+    actuallySend();
   }
 
   async function requestHistoryFromPeers() {
