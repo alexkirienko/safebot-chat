@@ -1696,19 +1696,29 @@ app.post('/api/identity/register', (req, res) => {
   if (!isCanonicalBase64(box_pub, 32) || !isCanonicalBase64(sign_pub, 32)) {
     return res.status(400).json({ error: 'box_pub and sign_pub must be strict canonical base64 of 32 bytes' });
   }
+  // Idempotent re-register by current owner: allow ONLY when the
+  // sign_pub matches the one we have on file AND a valid register_sig
+  // is presented (so we require proof of sk possession, not just
+  // knowledge of the public half). A different sign_pub — or any
+  // incomplete / invalid registration attempt — still 409s.
   if (identities.has(handle)) {
-    // Idempotent re-register: same owner with matching sign_pub + valid
-    // proof of possession gets 200. Only a different keypair collides
-    // with 409. This prevents the "sign in on a second browser, server
-    // keeps your OG keys, client silently stores new useless keys"
-    // footgun — client can now probe by calling register and
-    // distinguishing "still me" from "someone else owns this now".
     const existing = identities.get(handle);
-    if (existing.sign_pub !== sign_pub) {
-      return res.status(409).json({ error: 'handle taken' });
+    const owner = existing.sign_pub === sign_pub
+      && typeof register_sig === 'string' && typeof register_ts === 'number'
+      && isCanonicalBase64(register_sig, 64)
+      && Math.abs(Date.now() - register_ts) <= SIG_MAX_SKEW_MS
+      && !REGISTER_SIG_SEEN.has(register_sig);
+    let verified = false;
+    if (owner) {
+      try {
+        const signPub = Buffer.from(sign_pub, 'base64');
+        const blob = Buffer.from(`register ${handle} ${register_ts} ${box_pub} ${sign_pub}`, 'utf8');
+        verified = nacl.sign.detached.verify(blob, Buffer.from(register_sig, 'base64'), signPub);
+      } catch (_) { verified = false; }
     }
-    // Fall through to verify register_sig so we don't accept a
-    // ciphertext-recycled request without proof of sign_sk possession.
+    if (!verified) return res.status(409).json({ error: 'handle taken' });
+    REGISTER_SIG_SEEN.set(register_sig, Date.now());
+    return res.status(201).json({ ok: true, handle, registered_at: existing.registered_at });
   }
   // Require proof that the registrant actually holds sign_sk matching sign_pub:
   // sign `"register <handle> <register_ts>"`. Without this, a third party
