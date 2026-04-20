@@ -979,6 +979,11 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       if (!pend) return true;
       pend.resolved = true;
       const items = Array.isArray(env.items) ? env.items : [];
+      // Absorb responder's tombstone list BEFORE merging items so
+      // items that are already deleted don't render even once.
+      if (Array.isArray(env.deleted)) {
+        for (const id of env.deleted) applyDelete(String(id));
+      }
       (async () => {
         try {
           if (window.SafeBotHistory) await window.SafeBotHistory.mergeAll(roomId, items);
@@ -1028,9 +1033,19 @@ key  share #k=… separately (URL fragment never reaches the server)`;
             items = await window.SafeBotHistory.serialize(roomId, {
               after, skip, maxItems: 15, maxBytes: 15 * 1024,
             });
+          // Skip items the responder already knows are deleted — otherwise
+          // a new peer who joined after the deletion would keep seeing
+          // them, since the delete envelope was posted in-the-past.
+          if (deletedIds.size) items = items.filter((it) => !deletedIds.has(it.id));
           } catch (e) { console.warn('[safebot hist] serialize failed', e); break; }
-          if (!items.length) break;
+          // On the FIRST chunk, attach our local tombstone list so a
+          // fresh joiner learns about past deletions and can suppress
+          // any straggler cached copies reaching them from other peers.
+          const deletedPayload = (chunkIdx === 0 && deletedIds.size)
+            ? Array.from(deletedIds).slice(-500) : undefined;
+          if (!items.length && !deletedPayload) break;
           const resp = { safebot_hist_resp_v1: true, req_id: env.req_id, items, chunk: chunkIdx };
+          if (deletedPayload) resp.deleted = deletedPayload;
           try { postProtocol(JSON.stringify(resp)); totalSent += items.length; } catch (e) { console.warn('[safebot hist] resp post failed', e); }
           chunkIdx += 1;
           skip += items.length;
