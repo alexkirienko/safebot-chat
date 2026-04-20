@@ -175,6 +175,57 @@ def main() -> int:
         if len(launches) != 2:
             raise SystemExit(f"release sentinel should have stopped after 2 launches, got {len(launches)}: {calls!r}")
         ok("release sentinel stops the persistent wrapper without another relaunch")
+
+    # Per-room pidfile lock exercised through the codex_safebot.py shim
+    # so the "shared guardrail" claim has direct coverage on both
+    # entrypoints, not just agent_safebot.py.
+    import secrets
+    room = "CODEXLOCK" + secrets.token_hex(3).upper()
+    url = f"https://safebot.chat/room/{room}#k=abc"
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bindir = tmp / "bin"; bindir.mkdir()
+        log = tmp / "log.jsonl"
+        counter = tmp / "count"
+        make_exec(bindir / "codex", FAKE_CODEX)
+        make_exec(bindir / "npx", FAKE_NPX)
+        env = os.environ.copy()
+        env["PATH"] = f"{bindir}:{env.get('PATH', '')}"
+        env["TEST_LOG"] = str(log)
+        env["TEST_HAS_MCP"] = "1"
+        env["TEST_EXEC_COUNT"] = str(counter)
+        env["TEST_EXEC_MAX"] = "99"  # keep the first launcher relaunching
+        first = subprocess.Popen(
+            [sys.executable, str(SCRIPT), url],
+            cwd=ROOT, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            import time as _t
+            deadline = _t.time() + 5
+            banner = ""
+            while _t.time() < deadline:
+                line = first.stderr.readline()
+                if not line: _t.sleep(0.05); continue
+                banner += line
+                if "ONLY listener" in line:
+                    break
+            if "ONLY listener" not in banner:
+                raise SystemExit(f"first codex_safebot did not print ownership banner: {banner!r}")
+            second = subprocess.run(
+                [sys.executable, str(SCRIPT), "--once", url],
+                cwd=ROOT, env=env, text=True, capture_output=True, timeout=10,
+            )
+            if second.returncode == 0:
+                raise SystemExit(f"second codex_safebot should have refused, got rc=0: {second.stderr!r}")
+            if "already attached" not in second.stderr:
+                raise SystemExit(f"refusal msg missing 'already attached': {second.stderr!r}")
+            if str(first.pid) not in second.stderr:
+                raise SystemExit(f"refusal msg should carry first pid={first.pid}: {second.stderr!r}")
+        finally:
+            try: first.terminate(); first.wait(timeout=5)
+            except Exception: first.kill()
+    ok("codex shim: room-scoped lock refuses a second listener and names the owning pid")
     return 0
 
 
