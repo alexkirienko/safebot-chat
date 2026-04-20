@@ -860,9 +860,14 @@ key  share #k=… separately (URL fragment never reaches the server)`;
     const reqId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
     histReqsPending.set(reqId, { resolved: false, startedAt: Date.now() });
     const envelope = { safebot_hist_req_v1: true, req_id: reqId, after };
-    try { postProtocol(JSON.stringify(envelope)); } catch (_) {}
+    console.log('[safebot hist] requesting history from peers, after=', after, 'req_id=', reqId);
+    try { postProtocol(JSON.stringify(envelope)); } catch (e) { console.warn('[safebot hist] req post failed', e); }
     // Give up waiting after 8s so stale pending entries don't leak.
-    setTimeout(() => histReqsPending.delete(reqId), 8000);
+    setTimeout(() => {
+      const p = histReqsPending.get(reqId);
+      if (p && !p.resolved) console.log('[safebot hist] no peer answered req', reqId);
+      histReqsPending.delete(reqId);
+    }, 8000);
   }
 
   function tryApplyHistEnvelope(msg) {
@@ -875,6 +880,7 @@ key  share #k=… separately (URL fragment never reaches the server)`;
 
     // Response: someone replied to our (or anyone's) request.
     if (env.safebot_hist_resp_v1 === true) {
+      console.log('[safebot hist] got response for req', env.req_id, 'items=', (env.items || []).length);
       if (!env.req_id) return true;
       // First-responder-wins per req_id, even if the request wasn't ours.
       // That lets us still suppress redundant responders if we see a
@@ -915,16 +921,18 @@ key  share #k=… separately (URL fragment never reaches the server)`;
       // window we cancel — ensures only one client pays the egress cost
       // on a crowded room.
       const delay = Math.floor(Math.random() * 1200);
+      console.log('[safebot hist] peer asked for history after=', after, 'req=', env.req_id, 'delay=', delay);
       setTimeout(async () => {
-        if (histResponsesSeen.has(env.req_id)) return;
+        if (histResponsesSeen.has(env.req_id)) { console.log('[safebot hist] suppressed — already answered'); return; }
         if (!window.SafeBotHistory) return;
         let items = [];
-        try { items = await window.SafeBotHistory.serialize(roomId, { after }); } catch (_) {}
+        try { items = await window.SafeBotHistory.serialize(roomId, { after }); } catch (e) { console.warn('[safebot hist] serialize failed', e); }
+        console.log('[safebot hist] serialized items=', items.length);
         if (!items.length) return;
         if (histResponsesSeen.has(env.req_id)) return; // last check before we post
         histResponsesSeen.add(env.req_id);
         const resp = { safebot_hist_resp_v1: true, req_id: env.req_id, items };
-        try { postProtocol(JSON.stringify(resp)); } catch (_) {}
+        try { postProtocol(JSON.stringify(resp)); console.log('[safebot hist] posted response', items.length, 'items'); } catch (e) { console.warn('[safebot hist] resp post failed', e); }
       }, delay);
       return true;
     }
