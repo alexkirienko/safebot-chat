@@ -480,7 +480,7 @@ class Room:
         }
         return self._session.post(f"{self._base}{path}", json=body, headers=headers, timeout=timeout_s)
 
-    def claim(self, identity, timeout: int = 30) -> Optional[dict]:
+    def claim(self, identity, timeout: int = 30, ttl_ms: Optional[int] = None) -> Optional[dict]:
         """Pull the next foreign message via server-tracked cursor.
 
         Returns `{"claim_id": str, "message": Message, "cursor": int}` when a
@@ -488,10 +488,19 @@ class Room:
         is decrypted but the server still considers it in-flight until you
         call `ack_claim(identity, claim_id, seq)`.
 
+        `ttl_ms` lets the caller request a longer in-flight window (server
+        clamps to [60_000, 300_000] ms; default 60 s). Bump this when your
+        handler runs longer than 60 s — without it the same `seq` becomes
+        reclaimable while you're still working, and at-least-once degrades
+        to at-most-once. A 4-min LLM turn → ttl_ms=300_000.
+
         If you crash before ack'ing, the same message becomes reclaimable
-        (new claim_id, same seq) after ~60 s — at-least-once semantics.
+        (new claim_id, same seq) after the TTL — at-least-once semantics.
         """
-        url_part = f"/claim?timeout={int(timeout)}"
+        qs = [f"timeout={int(timeout)}"]
+        if ttl_ms is not None:
+            qs.append(f"ttl_ms={int(ttl_ms)}")
+        url_part = "/claim?" + "&".join(qs)
         # Also exclude the Room's sender label so that in a plain room where
         # the caller posted under a random/aliased name (not identity.handle),
         # their own messages don't come back through /claim. Server already

@@ -527,7 +527,14 @@ setInterval(() => {
 // handle. Handles that never claim anything never allocate.
 const ROOM_CURSORS = new Map(); // handle → Map<roomId, {cursor, inflight}>
 const ROOM_CURSORS_PER_HANDLE_MAX = Number(process.env.ROOM_CURSORS_PER_HANDLE_MAX || 64);
-const CLAIM_TTL_MS = Number(process.env.CLAIM_TTL_MS || 60_000);
+const CLAIM_TTL_MS_DEFAULT = Number(process.env.CLAIM_TTL_MS || 60_000);
+const CLAIM_TTL_MS_MIN = 60_000;
+const CLAIM_TTL_MS_MAX = 300_000;
+function clampClaimTtl(raw) {
+  const n = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(n) || n <= 0) return CLAIM_TTL_MS_DEFAULT;
+  return Math.max(CLAIM_TTL_MS_MIN, Math.min(CLAIM_TTL_MS_MAX, n));
+}
 function getCursorRec(handle, roomId) {
   let perHandle = ROOM_CURSORS.get(handle);
   if (!perHandle) {
@@ -553,7 +560,9 @@ function getCursorRec(handle, roomId) {
   return rec;
 }
 function claimExpired(inflight) {
-  return !inflight || (Date.now() - inflight.claimed_at) > CLAIM_TTL_MS;
+  if (!inflight) return true;
+  const ttl = Number.isFinite(inflight.ttl_ms) ? inflight.ttl_ms : CLAIM_TTL_MS_DEFAULT;
+  return (Date.now() - inflight.claimed_at) > ttl;
 }
 function findNextForeign(room, cursor, handle, excludeSet) {
   // In signed-sender rooms, sender is authoritative (server stamps @handle).
@@ -2233,6 +2242,7 @@ app.post('/api/rooms/:roomId/claim', (req, res) => {
   }
   if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
   const timeout = Math.max(1, Math.min(90, parseInt(String(req.query.timeout || '30'), 10) || 30));
+  const ttlMs = clampClaimTtl(req.query.ttl_ms);
   const excludeSet = buildExcludeSet(handle, (req.body && req.body.exclude_senders) || []);
   const room = rooms.get(roomId);
   if (!room) return res.json({ ok: true, empty: true, last_seq: 0, cursor: 0, exists: false });
@@ -2255,7 +2265,7 @@ app.post('/api/rooms/:roomId/claim', (req, res) => {
   if (rec.inflight && claimExpired(rec.inflight)) rec.inflight = null;
   const next = findNextForeign(room, rec.cursor, handle, excludeSet);
   if (next) {
-    rec.inflight = { claim_id: crypto.randomUUID(), seq: next.seq, claimed_at: Date.now() };
+    rec.inflight = { claim_id: crypto.randomUUID(), seq: next.seq, claimed_at: Date.now(), ttl_ms: ttlMs };
     return res.json({ ok: true, claim_id: rec.inflight.claim_id, message: buildClaimEnvelope(next), cursor: rec.cursor, last_seq: roomLastSeq(room) });
   }
   // Empty — park a claim-waiter on the room. Wake via broadcast when a
@@ -2286,7 +2296,7 @@ app.post('/api/rooms/:roomId/claim', (req, res) => {
     }
     const nx = findNextForeign(r2, rec.cursor, handle, excludeSet);
     if (nx) {
-      rec.inflight = { claim_id: crypto.randomUUID(), seq: nx.seq, claimed_at: Date.now() };
+      rec.inflight = { claim_id: crypto.randomUUID(), seq: nx.seq, claimed_at: Date.now(), ttl_ms: ttlMs };
       return res.json({ ok: true, claim_id: rec.inflight.claim_id, message: buildClaimEnvelope(nx), cursor: rec.cursor, last_seq: roomLastSeq(r2) });
     }
     res.json({ ok: true, empty: true, last_seq: roomLastSeq(r2), cursor: rec.cursor });

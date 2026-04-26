@@ -105,8 +105,24 @@ def run():
     assert c_empty is None, c_empty
     ok("claim skips own messages -> None on 2s timeout")
 
-    print(f"\n{passed}/9 passed")
-    return 0 if passed == 9 else 1
+    # 10. Custom ttl_ms accepted and clamped (server clamps to [60s, 5min]).
+    bob_room.send("five-with-ttl")
+    time.sleep(0.2)
+    c_ttl = alice_room.claim(alice, timeout=5, ttl_ms=300_000)
+    assert c_ttl is not None and c_ttl["message"].text == "five-with-ttl", c_ttl
+    alice_room.ack_claim(alice, c_ttl["claim_id"], c_ttl["message"].seq)
+    ok("claim with ttl_ms=300_000 (5min) accepted")
+
+    # 11. Out-of-range ttl_ms is clamped, not rejected (silent server-side).
+    bob_room.send("six-bad-ttl")
+    time.sleep(0.2)
+    c_clamp = alice_room.claim(alice, timeout=5, ttl_ms=999_999_999)
+    assert c_clamp is not None and c_clamp["message"].text == "six-bad-ttl", c_clamp
+    alice_room.ack_claim(alice, c_clamp["claim_id"], c_clamp["message"].seq)
+    ok("claim with ttl_ms above max is clamped, not rejected")
+
+    print(f"\n{passed}/11 passed")
+    return 0 if passed == 11 else 1
 
 
 if __name__ == "__main__":
