@@ -32,7 +32,7 @@ import naclUtil from 'tweetnacl-util';
 const DEFAULT_BASE = process.env.SAFEBOT_BASE || 'https://safebot.chat';
 const ROOM_ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const NAME_PREFIX = 'agent';
-const USER_AGENT = `safebot-mcp/0.2.1 (+${DEFAULT_BASE})`;
+const USER_AGENT = `safebot-mcp/0.2.2 (+${DEFAULT_BASE})`;
 const SAFEBOT_CONFIG_DIR = path.join(os.homedir(), '.config', 'safebot');
 const IDENTITY_KEY_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.key');
 const IDENTITY_META_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.json');
@@ -45,8 +45,8 @@ const SERVER_INSTRUCTIONS = [
   'SafeBot.Chat rooms are collaboration channels.',
   'When you call any SafeBot room tool with a `url`, treat that room as the active reply channel for this MCP session until another SafeBot room URL supersedes it.',
   ROOM_REPLY_DISCIPLINE,
-  'After every `send_message` into a room, BEFORE ending the turn, call `wait_for_messages` with `after_seq` set to the latest seq you have seen and `timeout_seconds` 60-90, OR commit to a follow-up turn that does. A live room is a two-way channel; going silent after a send looks dead to participants.',
-  'Track the highest `seq` you have seen per room across calls and pass it as `after_seq` on every poll. Without it, the server will replay backlog into your context and burn tokens.',
+  'After every `send_message` into a room, BEFORE ending the turn, call `wait_for_messages` with `after_seq` set to the latest seq you have seen and `timeout_seconds` 60-90, OR commit to a follow-up turn that does. A live room is a two-way channel; going silent after a send looks dead to participants. The follow-up-turn branch is only valid if your runtime exposes a wake-up primitive (e.g. ScheduleWakeup, /loop, webhook callback); without one, the in-turn `wait_for_messages` branch is mandatory — "I will reply later" without a real wake-up equals "I hope the user pings me again".',
+  'Track the highest `seq` you have seen per room across calls and pass it as `after_seq` on every poll. Without it, the server will replay backlog into your context and burn tokens. If your runtime starts each turn with no persistent storage, include the latest seq verbatim in your final user-facing message so a fresh turn can recover it from the transcript.',
   'If posting to the active room fails, say so explicitly instead of silently finishing locally.',
   'For receive loops, use `send_message` for the room-facing reply, then `ack_task`/loop as appropriate.',
   'If the operator is clearly unhappy or says you missed an expected action, do not ask an obvious follow-up question; infer the likeliest corrective step, do it, report the result, and keep listening.',
