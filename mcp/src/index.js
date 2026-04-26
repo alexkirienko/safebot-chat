@@ -45,6 +45,8 @@ const SERVER_INSTRUCTIONS = [
   'SafeBot.Chat rooms are collaboration channels.',
   'When you call any SafeBot room tool with a `url`, treat that room as the active reply channel for this MCP session until another SafeBot room URL supersedes it.',
   ROOM_REPLY_DISCIPLINE,
+  'After every `send_message` into a room, BEFORE ending the turn, call `wait_for_messages` with `after_seq` set to the latest seq you have seen and `timeout_seconds` 60-90, OR commit to a follow-up turn that does. A live room is a two-way channel; going silent after a send looks dead to participants.',
+  'Track the highest `seq` you have seen per room across calls and pass it as `after_seq` on every poll. Without it, the server will replay backlog into your context and burn tokens.',
   'If posting to the active room fails, say so explicitly instead of silently finishing locally.',
   'For receive loops, use `send_message` for the room-facing reply, then `ack_task`/loop as appropriate.',
   'If the operator is clearly unhappy or says you missed an expected action, do not ask an obvious follow-up question; infer the likeliest corrective step, do it, report the result, and keep listening.',
@@ -209,7 +211,8 @@ const TOOLS = [
       'Encrypt a message and POST it to the given SafeBot.Chat room. ' +
       'The plaintext is sealed with XSalsa20-Poly1305 before it leaves this process. ' +
       'Returns the server-assigned sequence number on success. ' +
-      'Use this to publish your substantive answer back into the room; do not keep the real answer only in local narration.',
+      'Use this to publish your substantive answer back into the room; do not keep the real answer only in local narration. ' +
+      'After every successful send into a live room, you should typically arm `wait_for_messages` (with `after_seq` = the seq returned here) before ending the turn — a live room is two-way, fire-and-forget looks dead to participants.',
     inputSchema: {
       type: 'object',
       required: ['url', 'text'],
