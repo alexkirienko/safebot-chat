@@ -195,8 +195,82 @@ def test_sdk_auto_reconnect():
     print(f"✓ SDK: auto_reconnect recovered from forced disconnect ({len(received)} msgs)")
 
 
+def test_sdk_stream_after_param():
+    """Room.stream(after=N) skips backlog with seq <= N on the first connect.
+
+    Regression for the bug in advice_26_04_2026.md §7: listeners that resume
+    after a process restart had no way to seed the cursor — every restart
+    started at seq=0 and the server replayed the full room backlog.
+    """
+    room_id, _key, url = fresh_room()
+    sender = Room(url, name="primer")
+    for i in range(5):
+        sender.send(f"b{i}")
+    transcript = sender._get_retry("/transcript", params={"after": 0, "limit": 50}).json()
+    seqs = [m["seq"] for m in transcript["messages"]]
+    assert len(seqs) == 5
+    cutoff = seqs[2]
+
+    listener = Room(url, name="late-joiner")
+    received: list[tuple[int, str]] = []
+    stop_event = threading.Event()
+
+    def run():
+        try:
+            for msg in listener.stream(
+                include_self=True, auto_reconnect=False, after=cutoff,
+            ):
+                if msg.text is not None:
+                    received.append((msg.seq, msg.text))
+                if len(received) >= 4 or stop_event.is_set():
+                    return
+        except Exception as e:
+            print(f"stream raised: {e!r}")
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(1.0)
+    sender.send("after-cutoff-1")
+    sender.send("after-cutoff-2")
+
+    for _ in range(40):
+        if len(received) >= 2:
+            break
+        time.sleep(0.2)
+
+    stop_event.set()
+
+    pre_cutoff = [s for s, _ in received if s <= cutoff]
+    assert not pre_cutoff, f"after=N should have skipped these: {pre_cutoff}"
+    texts = {t for _, t in received}
+    assert "after-cutoff-1" in texts and "after-cutoff-2" in texts, (
+        f"new messages not received: {received}"
+    )
+    print(f"✓ SDK: stream(after=N) skipped backlog, got post-cutoff: {sorted(texts)}")
+
+
+def test_make_unique_name():
+    """make_unique_name() suffixes base with hostname and pid."""
+    from safebot import make_unique_name
+    n = make_unique_name("helper")
+    assert n.startswith("helper-"), n
+    pid = n.rsplit("-", 1)[1]
+    assert pid.isdigit(), f"pid must be numeric: {n!r}"
+    # Two calls in the same process produce the same suffix (same host+pid).
+    assert make_unique_name("helper") == n
+    # Different bases give different names.
+    assert make_unique_name("other") != n
+    print(f"✓ make_unique_name: {n}")
+
+
 if __name__ == "__main__":
-    tests = [test_server_after_param, test_sdk_resume_after_restart, test_sdk_auto_reconnect]
+    tests = [
+        test_server_after_param,
+        test_sdk_resume_after_restart,
+        test_sdk_auto_reconnect,
+        test_sdk_stream_after_param,
+        test_make_unique_name,
+    ]
     failed = 0
     for fn in tests:
         try:

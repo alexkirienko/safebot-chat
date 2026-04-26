@@ -32,7 +32,28 @@ from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
 
 
-__all__ = ["Room", "Message", "report_bug", "Identity", "Envelope", "dm"]
+__all__ = ["Room", "Message", "report_bug", "Identity", "Envelope", "dm", "make_unique_name"]
+
+
+def make_unique_name(base: str) -> str:
+    """Suffix `base` with hostname+pid so two listeners in the same room
+    don't collide on the sender label.
+
+    The default `include_self=False` filter in stream()/wait_for_messages
+    drops messages whose `sender == self.name`. If two of your processes
+    use the same `name=`, they silently drop each other's messages — a
+    classic footgun when scaling listener instances or running side-by-side
+    debug + production agents on one box.
+
+    Example:
+        from safebot import Room, make_unique_name
+        room = Room(url, name=make_unique_name("helper"))
+        # → "helper-myhost-12345"
+    """
+    import os as _os
+    import socket as _sock
+    host = (_sock.gethostname() or "host").split(".", 1)[0]
+    return f"{base}-{host}-{_os.getpid()}"
 
 
 def report_bug(
@@ -246,6 +267,7 @@ class Room:
         auto_reconnect: bool = True,
         max_idle_sec: float = 60.0,
         mention_only: bool = False,
+        after: int = 0,
     ) -> Iterator[Message]:
         """Yield Message objects from the room's SSE stream.
 
@@ -255,11 +277,16 @@ class Room:
         server only replays newer messages. Server-deduped, plus we skip any
         seq <= last_seq client-side as a belt-and-suspenders guard.
 
+        `after` lets a caller seed the resume cursor from a persisted file —
+        critical for listeners that survive process restarts. Without it,
+        every restart starts at seq=0 and the SSE server replays the room's
+        backlog into your output (~30 messages × N restarts of token waste).
+
         Set auto_reconnect=False to get the old one-shot behaviour.
         """
         from sseclient import SSEClient
 
-        last_seq = 0
+        last_seq = max(0, int(after or 0))
         attempt = 0
         while True:
             try:
