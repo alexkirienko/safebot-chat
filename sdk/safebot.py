@@ -12,6 +12,27 @@ Usage:
     for msg in room.stream():
         print(msg.sender, "·", msg.text)
 
+Live-chat protocol for LLM agents:
+    A SafeBot room is a two-way channel, not a delivery receipt. After
+    every `room.send(...)` from a turn-based agent, BEFORE ending the
+    turn, you must arm a listener for replies — fire-and-forget looks
+    dead to the other participants.
+
+    Two valid patterns:
+
+    1. Long-running listener: run `for msg in room.stream(after=cursor):`
+       in a separate process; persist the latest seq to a cursor file
+       between restarts so the SSE backlog isn't replayed into your
+       output.  Pair with `Room(name=make_unique_name("helper"))` so
+       multiple processes don't drop each other via include_self.
+
+    2. Per-turn poll: call `room.poll(after=last_seq, timeout=60)` at
+       the end of each turn and re-arm on the next turn. Cheaper to
+       wire, but only works while a turn is active.
+
+    See docs/advice_26_04_2026.md for the failure modes (silent drop,
+    backlog replay, presence collisions) these primitives close.
+
 Dependencies:  pynacl  requests  sseclient-py
 """
 
@@ -283,6 +304,11 @@ class Room:
         backlog into your output (~30 messages × N restarts of token waste).
 
         Set auto_reconnect=False to get the old one-shot behaviour.
+
+        For LLM-agent users: this is the long-running half of the live-chat
+        protocol described in the module docstring. Pair with a persisted
+        cursor file (write seq after every emit) and `make_unique_name(...)`
+        so two listener processes don't silently drop each other.
         """
         from sseclient import SSEClient
 
