@@ -1,4 +1,4 @@
-// Orchestrates the SafeBot.Chat test suite:
+// Orchestrates the Bot2Bot.chat test suite:
 //  1. Unit: crypto round-trip (Node-side, shared tweetnacl)
 //  2. Server boot + basic HTTP
 //  3. E2E via Playwright (two browsers + cross-talk)
@@ -12,9 +12,10 @@ const nacl = require('tweetnacl');
 const naclUtil = require('tweetnacl-util');
 const { chromium } = require('playwright');
 const fs = require('fs');
+const os = require('os');
 
 const ROOT = path.join(__dirname, '..');
-const PORT = 3100;
+const PORT = Number(process.env.TEST_PORT || 3100);
 const BASE = `http://127.0.0.1:${PORT}`;
 
 let serverProc;
@@ -36,7 +37,7 @@ function startServer() {
     let buf = '';
     serverProc.stdout.on('data', (d) => {
       buf += d.toString();
-      if (buf.includes('SafeBot.Chat listening')) resolve();
+      if (buf.includes('Bot2Bot.chat listening')) resolve();
     });
     serverProc.stderr.on('data', (d) => process.stderr.write(d));
     serverProc.on('exit', (c) => reject(new Error(`server exited early: ${c}`)));
@@ -51,6 +52,49 @@ function stopServer() {
     serverProc.on('exit', () => resolve());
     serverProc.kill('SIGTERM');
     setTimeout(() => { try { serverProc.kill('SIGKILL'); } catch (_) {} resolve(); }, 1500);
+  });
+}
+
+function startIsolatedServer(port, env = {}) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(process.execPath, ['server/index.js'], {
+      cwd: ROOT,
+      env: { ...process.env, ...env, PORT: String(port), HOST: '127.0.0.1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let settled = false;
+    let buf = '';
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { proc.kill('SIGKILL'); } catch (_) {}
+      reject(new Error('isolated server start timeout'));
+    }, 6000);
+    proc.stdout.on('data', (d) => {
+      buf += d.toString();
+      if (!settled && buf.includes('Bot2Bot.chat listening')) {
+        settled = true;
+        clearTimeout(timer);
+        resolve(proc);
+      }
+    });
+    proc.stderr.on('data', (d) => process.stderr.write(d));
+    proc.on('exit', (c) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`isolated server exited early: ${c}`));
+    });
+  });
+}
+
+function stopIsolatedServer(proc) {
+  return new Promise((resolve) => {
+    if (!proc) return resolve();
+    proc.removeAllListeners('exit');
+    proc.on('exit', () => resolve());
+    proc.kill('SIGTERM');
+    setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} resolve(); }, 1500);
   });
 }
 
@@ -122,7 +166,7 @@ async function serverTests() {
   await test('GET / returns landing HTML', async () => {
     const r = await httpJson('GET', `${BASE}/`);
     if (r.status !== 200) throw new Error('status ' + r.status);
-    if (!/SafeBot/.test(r.body)) throw new Error('missing marker');
+    if (!/Bot2Bot/.test(r.body)) throw new Error('missing marker');
   });
   await test('GET /docs returns docs HTML', async () => {
     const r = await httpJson('GET', `${BASE}/docs`);
@@ -252,6 +296,122 @@ async function serverTests() {
     if (!msg) throw new Error('no message event received');
     const back = decrypt(key, msg.ciphertext, msg.nonce);
     if (back !== 'hello over sse') throw new Error('decrypt mismatch: ' + back);
+  });
+  await test('POST batch transcript preserves every ciphertext envelope', async () => {
+    const roomId = 'BATCH' + Math.random().toString(36).slice(2, 8).toUpperCase();
+    const key = randomKey();
+    const count = 64;
+    const sent = [];
+    for (let i = 0; i < count; i++) {
+      const plaintext = `batch-message-${String(i).padStart(2, '0')}`;
+      const { ciphertext, nonce } = encrypt(key, plaintext);
+      const r = await httpJson('POST', `${BASE}/api/rooms/${roomId}/messages`, JSON.stringify({ sender: 'batch', ciphertext, nonce }));
+      if (r.status !== 200) throw new Error(`post ${i} status ${r.status}: ${r.body}`);
+      const j = JSON.parse(r.body);
+      if (i > 0 && j.seq !== sent[0].seq + i) {
+        throw new Error(`post ${i} expected seq ${sent[0].seq + i}, got ${j.seq}`);
+      }
+      sent.push({ plaintext, ciphertext, nonce, seq: j.seq });
+    }
+
+    const tr = await httpJson('GET', `${BASE}/api/rooms/${roomId}/transcript?after=0&limit=${count + 5}`);
+    if (tr.status !== 200) throw new Error('transcript status ' + tr.status);
+    const body = JSON.parse(tr.body);
+    if (!body.exists) throw new Error('batch room missing from transcript');
+    if (body.messages.length !== count) throw new Error(`expected ${count} transcript messages, got ${body.messages.length}`);
+    const seqs = body.messages.map((m) => m.seq);
+    for (let i = 0; i < count; i++) {
+      if (seqs[i] !== sent[i].seq) throw new Error('non-contiguous seqs: ' + seqs.join(','));
+      const back = decrypt(key, body.messages[i].ciphertext, body.messages[i].nonce);
+      if (back !== sent[i].plaintext) throw new Error(`message ${i} decrypt mismatch: ${back}`);
+    }
+
+    const afterIndex = 20;
+    const afterSeq = sent[afterIndex - 1].seq;
+    const wait = await httpJson('GET', `${BASE}/api/rooms/${roomId}/wait?after=${afterSeq}&timeout=1`);
+    if (wait.status !== 200) throw new Error('wait status ' + wait.status);
+    const waitBody = JSON.parse(wait.body);
+    if (waitBody.messages.length !== count - afterIndex) {
+      throw new Error(`wait(after=${afterSeq}) returned ${waitBody.messages.length}, expected ${count - afterIndex}`);
+    }
+    if (waitBody.messages[0].seq !== sent[afterIndex].seq || waitBody.messages.at(-1).seq !== sent[count - 1].seq) {
+      throw new Error('wait returned wrong seq span: ' + waitBody.messages.map((m) => m.seq).join(','));
+    }
+  });
+}
+
+async function metricsRegressionTests() {
+  log('METRICS: history series regression');
+  await test('metrics ALL delta series includes retained-history baseline', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'bot2bot-metrics-'));
+    const port = PORT + 137;
+    const now = Date.now();
+    const HOUR = 60 * 60 * 1000;
+    const DAY = 24 * HOUR;
+    const t0 = now - 2 * DAY;
+    const t1 = now - 2 * HOUR;
+    const t2 = now - HOUR;
+    const hourStart = (t) => Math.floor(t / HOUR) * HOUR;
+    const writeJson = (name, value) => fs.writeFileSync(path.join(tmp, name), JSON.stringify(value));
+
+    writeJson('metrics.json', {
+      messages_relayed_total: 1035,
+      rooms_created_total: 53,
+      bug_reports_total: 6,
+      bytes_relayed_total: 4096,
+      http_posts_total: 35,
+      process_starts_total: 1,
+    });
+    writeJson('metrics_history.json', [
+      { t: t0, active_rooms: 1, active_subs: 1, rooms_created: 50, messages: 1000, bytes: 1000, h4xx: 0, h5xx: 0, h429: 0, bugs: 5, d_messages: 0, d_rooms: 0, d_bytes: 0, d_bugs: 0 },
+      { t: t1, active_rooms: 2, active_subs: 2, rooms_created: 51, messages: 1010, bytes: 2000, h4xx: 0, h5xx: 0, h429: 0, bugs: 5, d_messages: 10, d_rooms: 1, d_bytes: 1000, d_bugs: 0 },
+      { t: t2, active_rooms: 2, active_subs: 3, rooms_created: 53, messages: 1035, bytes: 4096, h4xx: 0, h5xx: 0, h429: 0, bugs: 6, d_messages: 25, d_rooms: 2, d_bytes: 2096, d_bugs: 1 },
+    ]);
+    // Legacy hourly buckets did not have *_total fields. The server should
+    // rebuild them from minute history instead of losing the retained baseline.
+    writeJson('metrics_hourly.json', [
+      { t: hourStart(t0), messages: 0, rooms: 0, bugs: 0, peak_rooms: 1, peak_subs: 1, samples: 1, last_t: t0 },
+      { t: hourStart(t2), messages: 35, rooms: 3, bugs: 1, peak_rooms: 2, peak_subs: 3, samples: 2, last_t: t2 },
+    ]);
+    writeJson('metrics_geo_minute.json', []);
+    writeJson('metrics_geo_hourly.json', []);
+
+    let proc;
+    try {
+      proc = await startIsolatedServer(port, {
+        METRICS_TOKEN: 'test-token',
+        METRICS_STATE_PATH: path.join(tmp, 'metrics.json'),
+        METRICS_HISTORY_PATH: path.join(tmp, 'metrics_history.json'),
+        METRICS_HOURLY_HISTORY_PATH: path.join(tmp, 'metrics_hourly.json'),
+        METRICS_GEO_MINUTE_HISTORY_PATH: path.join(tmp, 'metrics_geo_minute.json'),
+        METRICS_GEO_HOURLY_HISTORY_PATH: path.join(tmp, 'metrics_geo_hourly.json'),
+      });
+      const base = `http://127.0.0.1:${port}`;
+      const all = JSON.parse((await httpJson('GET', `${base}/api/metrics/series?range=all&token=test-token`)).body);
+      const month = JSON.parse((await httpJson('GET', `${base}/api/metrics/series?range=1month&token=test-token`)).body);
+      const day = JSON.parse((await httpJson('GET', `${base}/api/metrics/series?range=1day&token=test-token`)).body);
+      const sumMessages = (series) => (series.points || []).reduce((sum, p) => sum + Number(p.messages || 0), 0);
+      const sumRooms = (series) => (series.points || []).reduce((sum, p) => sum + Number(p.rooms || 0), 0);
+      const sumBugs = (series) => (series.points || []).reduce((sum, p) => sum + Number(p.bugs || 0), 0);
+
+      if (sumMessages(all) !== 1035) throw new Error(`ALL messages lost: ${sumMessages(all)} !== 1035`);
+      if (sumRooms(all) !== 53) throw new Error(`ALL rooms lost: ${sumRooms(all)} !== 53`);
+      if (sumBugs(all) !== 6) throw new Error(`ALL bugs lost: ${sumBugs(all)} !== 6`);
+      if (all.baseline_deltas.messages !== 1000) throw new Error('wrong ALL message baseline: ' + JSON.stringify(all.baseline_deltas));
+      if (all.baseline_deltas.rooms !== 50) throw new Error('wrong ALL room baseline: ' + JSON.stringify(all.baseline_deltas));
+      if (all.baseline_deltas.bugs !== 5) throw new Error('wrong ALL bug baseline: ' + JSON.stringify(all.baseline_deltas));
+      if ((all.points || []).length > 180) throw new Error('ALL has too many points to keep baseline visible: ' + all.points.length);
+      if (sumMessages(month) !== 1035) throw new Error(`1month messages lost: ${sumMessages(month)} !== 1035`);
+      if (sumMessages(day) !== 35) throw new Error(`1day should only show recent deltas, got ${sumMessages(day)}`);
+      if (day.baseline_deltas.messages !== 0 || day.baseline_deltas.rooms !== 0 || day.baseline_deltas.bugs !== 0) {
+        throw new Error('1day unexpectedly included baseline: ' + JSON.stringify(day.baseline_deltas));
+      }
+      const json = JSON.stringify({ all, month, day });
+      if (/"[^"]+":-\d/.test(json)) throw new Error('metrics series contains negative values');
+    } finally {
+      await stopIsolatedServer(proc);
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 }
 
@@ -1211,11 +1371,154 @@ async function e2ePermalink() {
   }
 }
 
+async function e2eRoomPowerups() {
+  log('E2E: room powerups — markdown, thread pane, search overlay, presence states');
+  const browser = await chromium.launch();
+  const crypto = require('node:crypto');
+  try {
+    const roomId = 'PWR' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
+    const page = await (await browser.newContext()).newPage();
+    await page.goto(`${BASE}/room/${roomId}#k=${key}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
+
+    const rootId = crypto.randomUUID();
+    const childId = crypto.randomUUID();
+    await page.evaluate(({ rootId, childId }) => {
+      window.__safebotTest.renderMessage({
+        id: rootId,
+        seq: 1,
+        sender: 'alice',
+        ts: Date.now() - 1500,
+        text: '**Bold** and *italic* with `code`\n- first item\n- second item\n\n```js\nconst x = 1;\n```\n[docs](https://example.com/docs)',
+      });
+      window.__safebotTest.renderMessage({
+        id: childId,
+        seq: 2,
+        sender: 'bob',
+        ts: Date.now() - 500,
+        text: 'child needle thread',
+        reply_to: rootId,
+      });
+    }, { rootId, childId });
+
+    const mdState = await page.evaluate((id) => {
+      const body = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__body`);
+      return {
+        strong: !!body.querySelector('strong'),
+        em: !!body.querySelector('em'),
+        code: !!body.querySelector('code'),
+        pre: !!body.querySelector('pre'),
+        listItems: body.querySelectorAll('li').length,
+        linkHref: body.querySelector('a') && body.querySelector('a').href,
+      };
+    }, rootId);
+    if (!mdState.strong || !mdState.em || !mdState.code || !mdState.pre || mdState.listItems !== 2 || !/example\.com\/docs$/.test(mdState.linkHref || '')) {
+      throw new Error('markdown render missing expected structure: ' + JSON.stringify(mdState));
+    }
+    pass('room powerups: markdown renders strong / em / code / fenced code / lists / links');
+
+    const threadBtn = `.bubble[data-msg-id="${rootId}"] .bubble__thread-btn`;
+    await page.waitForSelector(threadBtn, { timeout: 3000 });
+    await page.click(threadBtn);
+    const threadState = await page.evaluate(() => ({
+      open: document.getElementById('thread-pane') && !document.getElementById('thread-pane').hidden,
+      count: document.querySelectorAll('#thread-list .thread-pane__card').length,
+      meta: (document.getElementById('thread-meta') || {}).textContent || '',
+    }));
+    if (!threadState.open || threadState.count !== 2 || !/2 messages/.test(threadState.meta)) {
+      throw new Error('thread pane did not open with both messages: ' + JSON.stringify(threadState));
+    }
+    pass('room powerups: thread pane opens from bubble affordance and shows the reply chain');
+
+    await page.click('#thread-reply-root');
+    const replyPill = await page.evaluate(() => {
+      const pill = document.getElementById('replying-pill');
+      return pill && !pill.hidden && /Replying to alice/.test(pill.textContent || '');
+    });
+    if (!replyPill) throw new Error('thread reply-root button did not arm the composer reply pill');
+    pass('room powerups: thread pane can arm reply-to-root in the main composer');
+
+    const prePresenceRows = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('#people-list .people__row .people__name')).map((el) => (el.textContent || '').trim());
+    });
+    if (prePresenceRows.includes('alice') || prePresenceRows.includes('bob')) {
+      throw new Error('historical message authors leaked into live participants rail: ' + JSON.stringify(prePresenceRows));
+    }
+    pass('room powerups: historical transcript authors do not appear in the live participants rail');
+
+    await page.evaluate(() => {
+      window.__safebotTest.setPeerLastSeen('active-bot', 5_000);
+      window.__safebotTest.setPeerLastSeen('idle-bot', 90_000);
+      window.__safebotTest.setPeerLastSeen('silent-bot', 8 * 60_000);
+    });
+    const presenceRows = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('#people-list .people__row')).map((row) => row.textContent.replace(/\s+/g, ' ').trim());
+    });
+    if (!presenceRows.some((t) => /active-bot/.test(t) && /active/.test(t))) throw new Error('active presence badge missing: ' + JSON.stringify(presenceRows));
+    if (!presenceRows.some((t) => /idle-bot/.test(t) && /idle/.test(t))) throw new Error('idle presence badge missing: ' + JSON.stringify(presenceRows));
+    if (!presenceRows.some((t) => /silent-bot/.test(t) && /silent/.test(t))) throw new Error('silent presence badge missing: ' + JSON.stringify(presenceRows));
+    pass('room powerups: presence rail distinguishes active / idle / silent listeners');
+
+    await page.evaluate(() => {
+      window.__safebotTest.applyPresenceSnapshot(['active-bot']);
+    });
+    const reconciledRows = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('#people-list .people__row')).map((row) => row.textContent.replace(/\s+/g, ' ').trim());
+    });
+    if (!reconciledRows.some((t) => /active-bot/.test(t))) throw new Error('presence snapshot lost the active participant: ' + JSON.stringify(reconciledRows));
+    if (reconciledRows.some((t) => /idle-bot/.test(t) || /silent-bot/.test(t))) {
+      throw new Error('stale participants were not evicted after presence snapshot: ' + JSON.stringify(reconciledRows));
+    }
+    pass('room powerups: fresh presence snapshots evict participants that dropped out');
+
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyK');
+    await page.keyboard.up('Control');
+    await page.waitForFunction(() => {
+      const el = document.getElementById('search-pop');
+      return el && !el.hidden;
+    }, null, { timeout: 3000 });
+    await page.fill('#search-input', 'needle');
+    await page.waitForFunction(() => {
+      const r = document.querySelector('#search-results .search-pop__result');
+      return !!(r && /needle/.test(r.textContent || ''));
+    }, null, { timeout: 3000 });
+    await page.click('#search-results .search-pop__result');
+    const searchJumped = await page.waitForFunction((id) => {
+      const pop = document.getElementById('search-pop');
+      const bubble = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
+      return pop && pop.hidden && bubble && bubble.classList.contains('is-flash');
+    }, childId, { timeout: 3000 }).then(() => true, () => false);
+    if (!searchJumped) throw new Error('search overlay did not jump to the matching message');
+    pass('room powerups: Ctrl+K search opens, filters, and jumps to a message');
+
+    await browser.close();
+  } catch (e) {
+    await browser.close();
+    throw e;
+  }
+}
+
+function agentDirectoryUnitTests() {
+  log('AGENT DIRECTORY: worker profile/signature helpers');
+  const r = spawnSync(process.execPath, [path.join('tests', 'agent_directory', 'worker_unit.mjs')], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  });
+  if (r.status !== 0) {
+    throw new Error(`agent directory worker unit failed\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+  }
+  pass('agent directory worker unit helpers');
+}
+
 async function main() {
   await startServer();
   try {
     await unitTests();
+    agentDirectoryUnitTests();
     await serverTests();
+    await metricsRegressionTests();
     await e2eTests();
     await e2eRoomUIChecks();
     await e2eReplyConvergence();
@@ -1223,6 +1526,7 @@ async function main() {
     await e2eReactionsAdversarial();
     await e2eReactionsV2();
     await e2eReplyReactionsEdgeCases();
+    await e2eRoomPowerups();
     await e2ePermalink();
     await pythonSdkTest();
     noLogsAudit();
