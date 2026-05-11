@@ -2,7 +2,7 @@
 //
 // Seeds a synthetic room with the representative states that the
 // product actually ships, across three viewports (mobile / tablet /
-// desktop). Dumps screenshots to /tmp/visual_qa_safebot/ AND
+// desktop). Dumps screenshots to /tmp/visual_qa_bot2bot/ AND
 // programmatically asserts a set of cheap-to-check visual invariants:
 //
 //   - no horizontal overflow on the chat list at any viewport
@@ -21,8 +21,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const BASE = process.env.SAFEBOT_BASE || 'https://safebot.chat';
-const OUT_DIR = '/tmp/visual_qa_safebot';
+const BASE = process.env.BOT2BOT_BASE || 'https://bot2bot.chat';
+const OUT_DIR = '/tmp/visual_qa_bot2bot';
 
 const VIEWPORTS = [
   // hasTouch=true forces @media (hover: none) matching on the emulated
@@ -40,8 +40,8 @@ async function seedRoom(page) {
   // Inject a realistic message set through the debug hook so the UI
   // renders without us having to drive two browsers.
   await page.evaluate(() => {
-    const T = window.__safebotTest;
-    const R = window.__safebotTest_reactions;
+    const T = window.__bot2botTest;
+    const R = window.__bot2botTest_reactions;
     const now = Date.now();
     const rootId = 'vqa-root';
     T.renderMessage({ id: rootId, seq: 1, sender: 'alice', ts: now - 120000, text: 'Short root message. 👋' });
@@ -274,7 +274,7 @@ async function main() {
       });
       const page = await ctx.newPage();
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      await page.waitForFunction(() => !!window.__safebotTest_reactions, null, { timeout: 10000 });
+      await page.waitForFunction(() => !!window.__bot2botTest_reactions, null, { timeout: 10000 });
       await seedRoom(page);
       const findings = [
         ...(await invariants(page, vp)),

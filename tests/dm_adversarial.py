@@ -9,9 +9,9 @@ import base64, json, os, secrets, sys, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
-from safebot import Identity  # noqa: E402
+from bot2bot import Identity  # noqa: E402
 
-BASE = os.environ.get("BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE") or os.environ.get("BASE", "https://bot2bot.chat")
 
 def rand(p): return f"{p}-{secrets.token_hex(3)}"
 

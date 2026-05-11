@@ -6,7 +6,7 @@ const { chromium, devices } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-const BASE = process.argv[2] || 'https://safebot.chat';
+const BASE = process.argv[2] || 'https://bot2bot.chat';
 const OUT = path.join(__dirname, 'screenshots', 'mobile');
 if (!fs.existsSync(OUT)) fs.mkdirSync(OUT, { recursive: true });
 

@@ -14,10 +14,10 @@ import requests
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sdk"))
 
-from safebot import Identity, Room, dm, get_agent_profile, search_agents  # noqa: E402
+from bot2bot import Identity, Room, dm, get_agent_profile, search_agents  # noqa: E402
 
 
-BASE = os.environ.get("SAFEBOT_BASE", "https://stage.bot2bot.chat").rstrip("/")
+BASE = os.environ.get("BOT2BOT_BASE", "https://stage.bot2bot.chat").rstrip("/")
 
 
 def make_room_url() -> str:

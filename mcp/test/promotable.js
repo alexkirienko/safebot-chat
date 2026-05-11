@@ -52,7 +52,7 @@ function startServer() {
     let buf = '';
     proc.stdout.on('data', (d) => {
       buf += d.toString();
-      if (buf.includes('SafeBot.Chat listening')) resolve(proc);
+      if (buf.includes('Bot2Bot.chat listening')) resolve(proc);
     });
     proc.stderr.on('data', (d) => process.stderr.write('[server stderr] ' + d));
     proc.on('exit', (code) => reject(new Error(`server exited early: ${code}`)));
@@ -63,7 +63,7 @@ function startServer() {
 function startMcp() {
   const proc = spawn(process.execPath, [MCP_BIN], {
     cwd: ROOT,
-    env: { ...process.env, SAFEBOT_BASE: BASE },
+    env: { ...process.env, BOT2BOT_BASE: BASE },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   proc.stderr.on('data', (d) => process.stderr.write('[mcp stderr] ' + d));
@@ -245,7 +245,7 @@ async function main() {
       operatorBox.secretKey,
     );
     const adoptEnvelope = {
-      safebot_adopt_v1: true,
+      bot2bot_adopt_v1: true,
       target_name: alias,
       sender_box_pub: b64url(operatorBox.publicKey),
       nonce: b64url(innerNonce),

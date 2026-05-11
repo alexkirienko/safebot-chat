@@ -1,10 +1,10 @@
 """
-Pre-Moltbook stress test for the @safebot greeter + demo room.
+Pre-Moltbook stress test for the @bot2bot greeter + demo room.
 
 Simulates realistic first-post traffic:
   - Scenario A: 20 concurrent visitors land in the demo room over 30s. Each
     sends 3 messages. Greeter must echo each and the room must stay alive.
-  - Scenario B: 15 concurrent agents each DM @safebot in parallel, some
+  - Scenario B: 15 concurrent agents each DM @bot2bot in parallel, some
     reply-capable (with from_handle), some anonymous. Greeter must reply to
     the reply-capable ones within 5s and ack.
   - Scenario C: size edge — one DM near the 60 KiB plaintext cap. Greeter
@@ -12,7 +12,7 @@ Simulates realistic first-post traffic:
   - Scenario D: reply-loop guard — if someone keeps replying to every
     greeter message, we shouldn't spiral. Send 5 DMs, verify greeter replies
     ≤ 5 (not exponential).
-  - Scenario E: systemd health — verify safebot and safebot-greeter stay
+  - Scenario E: systemd health — verify bot2bot and bot2bot-greeter stay
     active throughout.
 
 Pass criteria: zero 5xx, zero greeter crashes, greeter replies to all
@@ -33,10 +33,10 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
 
-from safebot import Identity, Room, dm  # noqa: E402
+from bot2bot import Identity, Room, dm  # noqa: E402
 
-BASE = os.environ.get("BASE", "https://safebot.chat")
-DEMO_URL = open("/etc/safebot/greeter/demo_room.url").read().strip()
+BASE = os.environ.get("BOT2BOT_BASE") or os.environ.get("BASE", "https://bot2bot.chat")
+DEMO_URL = open("/etc/bot2bot/greeter/demo_room.url").read().strip()
 
 failures: list[str] = []
 def fail(msg: str) -> None:
@@ -73,7 +73,7 @@ def scenario_a():
             try:
                 for msg in room.stream(include_self=False, auto_reconnect=False):
                     if done.is_set(): return
-                    if msg.sender == "safebot" and msg.text and name in msg.text:
+                    if msg.sender == "bot2bot" and msg.text and name in msg.text:
                         with lock:
                             echoes[name] += 1
             except Exception:
@@ -101,10 +101,10 @@ def scenario_a():
         fail(f"A: only {total_echoes}/{total_msgs} messages echoed by greeter")
 
 
-# ---- Scenario B: 15 concurrent DMs to @safebot ---------------------------
+# ---- Scenario B: 15 concurrent DMs to @bot2bot ---------------------------
 
 def scenario_b():
-    print("\n▶ B: 15 concurrent DMs to @safebot (mixed reply-capable + anon)")
+    print("\n▶ B: 15 concurrent DMs to @bot2bot (mixed reply-capable + anon)")
 
     # Pre-register 8 reply-capable identities in parallel.
     identities = []
@@ -126,7 +126,7 @@ def scenario_b():
             except Exception:
                 continue
             for m in msgs:
-                if m.from_handle == "safebot":
+                if m.from_handle == "bot2bot":
                     with lock:
                         replies[idn.handle] = m.text
                     return
@@ -137,9 +137,9 @@ def scenario_b():
 
     # Fire 15 DMs in parallel: 8 reply-capable + 7 anonymous.
     def send_reply_capable(idn: Identity):
-        dm("@safebot", f"ping from {idn.handle}", from_identity=idn, base_url=BASE)
+        dm("@bot2bot", f"ping from {idn.handle}", from_identity=idn, base_url=BASE)
     def send_anon(_i):
-        dm("@safebot", f"anon ping {_i}", base_url=BASE)
+        dm("@bot2bot", f"anon ping {_i}", base_url=BASE)
 
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=15) as ex:
@@ -161,20 +161,20 @@ def scenario_b():
 # ---- Scenario C: large DM ------------------------------------------------
 
 def scenario_c():
-    print("\n▶ C: 40 KiB plaintext DM to @safebot")
+    print("\n▶ C: 40 KiB plaintext DM to @bot2bot")
     idn = Identity(rand_handle("stress-c"), base_url=BASE)
     idn.register(bio="stress C")
 
     # 40 KiB plaintext — well within the 60 KiB cap, enough to exercise size.
     big = "X" * (40 * 1024)
-    dm("@safebot", big, from_identity=idn, base_url=BASE)
+    dm("@bot2bot", big, from_identity=idn, base_url=BASE)
 
     got = None
     deadline = time.time() + 10
     while time.time() < deadline and got is None:
         msgs = idn.inbox_wait(after=0, timeout=2)
         for m in msgs:
-            if m.from_handle == "safebot":
+            if m.from_handle == "bot2bot":
                 got = m; break
     if got and got.text and "received your message" in got.text:
         ok(f"C: greeter acknowledged a {len(big)}-char DM")
@@ -193,12 +193,12 @@ def scenario_d():
         idn.ack(m)
 
     for i in range(5):
-        dm("@safebot", f"loop test {i}", from_identity=idn, base_url=BASE)
+        dm("@bot2bot", f"loop test {i}", from_identity=idn, base_url=BASE)
         time.sleep(0.2)
 
     time.sleep(4)
     msgs = idn.inbox_wait(after=0, timeout=3)
-    greeter_replies = [m for m in msgs if m.from_handle == "safebot"]
+    greeter_replies = [m for m in msgs if m.from_handle == "bot2bot"]
     if 5 <= len(greeter_replies) <= 8:  # allow some slack for dups
         ok(f"D: greeter replied {len(greeter_replies)} times to 5 DMs (no amplification)")
     else:
@@ -208,15 +208,15 @@ def scenario_d():
 # ---- Scenario E: systemd health -----------------------------------------
 
 def scenario_e():
-    print("\n▶ E: systemd safebot + safebot-greeter stayed active")
-    if systemd_active("safebot"):
-        ok("E: safebot.service active")
+    print("\n▶ E: systemd bot2bot + bot2bot-greeter stayed active")
+    if systemd_active("bot2bot"):
+        ok("E: bot2bot.service active")
     else:
-        fail("E: safebot.service not active")
-    if systemd_active("safebot-greeter"):
-        ok("E: safebot-greeter.service active")
+        fail("E: bot2bot.service not active")
+    if systemd_active("bot2bot-greeter"):
+        ok("E: bot2bot-greeter.service active")
     else:
-        fail("E: safebot-greeter.service not active")
+        fail("E: bot2bot-greeter.service not active")
 
 
 # ---- Main ---------------------------------------------------------------

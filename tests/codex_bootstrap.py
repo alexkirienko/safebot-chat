@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke tests for sdk/codex_safebot.py without touching real Codex config."""
+"""Smoke tests for sdk/codex_bot2bot.py without touching real Codex config."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "sdk" / "codex_safebot.py"
+SCRIPT = ROOT / "sdk" / "codex_bot2bot.py"
 
 
 FAKE_CODEX = r"""#!/usr/bin/env python3
@@ -24,11 +24,11 @@ with open(log, "a", encoding="utf-8") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 
 args = sys.argv[1:]
-if args[:3] == ["mcp", "get", "safebot"]:
+if args[:3] == ["mcp", "get", "bot2bot"]:
     raise SystemExit(0 if os.environ.get("TEST_HAS_MCP") == "1" else 1)
-if args[:3] == ["mcp", "remove", "safebot"]:
+if args[:3] == ["mcp", "remove", "bot2bot"]:
     raise SystemExit(0)
-if args[:3] == ["mcp", "add", "safebot"]:
+if args[:3] == ["mcp", "add", "bot2bot"]:
     raise SystemExit(0)
 # In persistent mode the wrapper relaunches us after every exec. Tests can
 # stop the loop either by forcing a non-zero exit after N invocations or by
@@ -94,32 +94,32 @@ def ok(msg: str) -> None:
 
 def main() -> int:
     calls = run_case(["--install-only"], has_mcp=False)
-    if calls != [["mcp", "get", "safebot"], ["mcp", "add", "safebot", "--", "npx", "-y", "safebot-mcp"]]:
+    if calls != [["mcp", "get", "bot2bot"], ["mcp", "add", "bot2bot", "--", "npx", "-y", "bot2bot-mcp"]]:
         raise SystemExit(f"unexpected install calls: {calls!r}")
-    ok("install-only configures safebot MCP when missing")
+    ok("install-only configures bot2bot MCP when missing")
 
     calls = run_case(["--install-only"], has_mcp=True)
-    if calls != [["mcp", "get", "safebot"]]:
+    if calls != [["mcp", "get", "bot2bot"]]:
         raise SystemExit(f"unexpected existing-config calls: {calls!r}")
-    ok("install-only leaves existing safebot MCP entry in place")
+    ok("install-only leaves existing bot2bot MCP entry in place")
 
-    calls = run_case(["--once", "https://safebot.chat/room/TEST#k=abc", "--", "-m", "gpt-5.4"], has_mcp=False)
-    if calls[:2] != [["mcp", "get", "safebot"], ["mcp", "add", "safebot", "--", "npx", "-y", "safebot-mcp"]]:
+    calls = run_case(["--once", "https://bot2bot.chat/room/TEST#k=abc", "--", "-m", "gpt-5.4"], has_mcp=False)
+    if calls[:2] != [["mcp", "get", "bot2bot"], ["mcp", "add", "bot2bot", "--", "npx", "-y", "bot2bot-mcp"]]:
         raise SystemExit(f"unexpected launch prelude: {calls!r}")
     launch = calls[2]
     if launch[:2] != ["-m", "gpt-5.4"]:
         raise SystemExit(f"codex args were not forwarded: {launch!r}")
     if (
-        "https://safebot.chat/room/TEST#k=abc" not in launch[-1]
+        "https://bot2bot.chat/room/TEST#k=abc" not in launch[-1]
         or "claim_task" not in launch[-1]
-        or "SAFEBOT_RELEASED_BY_ROOM" not in launch[-1]
+        or "BOT2BOT_RELEASED_BY_ROOM" not in launch[-1]
         or "operator is clearly dissatisfied" not in launch[-1]
         or "Do NOT send a startup" not in launch[-1]
         or "Reflex turn pattern" not in launch[-1]
         or "Worked example of a correct sequence" not in launch[-1]
     ):
         raise SystemExit(f"launch prompt missing room URL / claim_task guidance: {launch[-1]!r}")
-    ok("single-shot launch path forwards Codex args and injects the SafeBot prompt")
+    ok("single-shot launch path forwards Codex args and injects the Bot2Bot prompt")
 
     # Default wrapper test: fake-codex exits 42 on its 3rd invocation,
     # wrapper should relaunch across those exits (we kill it with a timeout
@@ -139,7 +139,7 @@ def main() -> int:
         env["TEST_EXEC_MAX"] = "3"
         try:
             subprocess.run(
-                [sys.executable, str(SCRIPT), "https://safebot.chat/room/TEST#k=abc"],
+                [sys.executable, str(SCRIPT), "https://bot2bot.chat/room/TEST#k=abc"],
                 cwd=ROOT, env=env, text=True, capture_output=True, timeout=15,
             )
         except subprocess.TimeoutExpired:
@@ -163,9 +163,9 @@ def main() -> int:
         env["TEST_HAS_MCP"] = "1"
         env["TEST_EXEC_COUNT"] = str(counter)
         env["TEST_RELEASE_AT"] = "2"
-        env["TEST_RELEASE_SENTINEL"] = "SAFEBOT_RELEASED_BY_ROOM"
+        env["TEST_RELEASE_SENTINEL"] = "BOT2BOT_RELEASED_BY_ROOM"
         proc = subprocess.run(
-            [sys.executable, str(SCRIPT), "https://safebot.chat/room/TEST#k=abc"],
+            [sys.executable, str(SCRIPT), "https://bot2bot.chat/room/TEST#k=abc"],
             cwd=ROOT, env=env, text=True, capture_output=True, timeout=15,
         )
         if proc.returncode != 0:
@@ -178,12 +178,12 @@ def main() -> int:
             raise SystemExit(f"release sentinel should have stopped after 2 launches, got {len(launches)}: {calls!r}")
         ok("release sentinel stops the persistent wrapper without another relaunch")
 
-    # Per-room pidfile lock exercised through the codex_safebot.py shim
+    # Per-room pidfile lock exercised through the codex_bot2bot.py shim
     # so the "shared guardrail" claim has direct coverage on both
-    # entrypoints, not just agent_safebot.py.
+    # entrypoints, not just agent_bot2bot.py.
     import secrets
     room = "CODEXLOCK" + secrets.token_hex(3).upper()
-    url = f"https://safebot.chat/room/{room}#k=abc"
+    url = f"https://bot2bot.chat/room/{room}#k=abc"
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bindir = tmp / "bin"; bindir.mkdir()
@@ -213,13 +213,13 @@ def main() -> int:
                 if "ONLY listener" in line:
                     break
             if "ONLY listener" not in banner:
-                raise SystemExit(f"first codex_safebot did not print ownership banner: {banner!r}")
+                raise SystemExit(f"first codex_bot2bot did not print ownership banner: {banner!r}")
             second = subprocess.run(
                 [sys.executable, str(SCRIPT), "--once", url],
                 cwd=ROOT, env=env, text=True, capture_output=True, timeout=10,
             )
             if second.returncode == 0:
-                raise SystemExit(f"second codex_safebot should have refused, got rc=0: {second.stderr!r}")
+                raise SystemExit(f"second codex_bot2bot should have refused, got rc=0: {second.stderr!r}")
             if "already attached" not in second.stderr:
                 raise SystemExit(f"refusal msg missing 'already attached': {second.stderr!r}")
             if str(first.pid) not in second.stderr:

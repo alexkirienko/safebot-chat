@@ -9,15 +9,15 @@
 // sender + snippet. Without the upgrade path, the reply stays
 // permanently degraded.
 //
-// Runs against a live SafeBot instance (defaults to localhost:3123,
-// override with SAFEBOT_BASE). Uses the `window.__safebotTest` debug
+// Runs against a live Bot2Bot instance (defaults to localhost:3123,
+// override with BOT2BOT_BASE). Uses the `window.__bot2botTest` debug
 // namespace exposed from sdk/public/js/room.js to drive the UI under
 // test without going through the real WS path.
 
 const { chromium } = require('playwright');
 const crypto = require('node:crypto');
 
-const BASE = process.env.SAFEBOT_BASE || 'http://127.0.0.1:3123';
+const BASE = process.env.BOT2BOT_BASE || 'http://127.0.0.1:3123';
 
 function rid() {
   return 'RPLCONV' + crypto.randomBytes(3).toString('hex').toUpperCase();
@@ -36,14 +36,14 @@ async function main() {
 
   const roomUrl = `${BASE}/room/${rid()}#k=${keyFragment()}`;
   await page.goto(roomUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-  // Let room.js finish its async IDB + WS setup so __safebotTest is installed.
-  await page.waitForFunction(() => !!(window.__safebotTest && window.__safebotTest.renderMessage), null, { timeout: 10000 });
+  // Let room.js finish its async IDB + WS setup so __bot2botTest is installed.
+  await page.waitForFunction(() => !!(window.__bot2botTest && window.__bot2botTest.renderMessage), null, { timeout: 10000 });
 
   // 1. Inject a reply bubble BEFORE the parent is known.
   const ghost = crypto.randomUUID();
   const childId = crypto.randomUUID();
   await page.evaluate(({ childId, ghost }) => {
-    window.__safebotTest.renderMessage({
+    window.__bot2botTest.renderMessage({
       id: childId, seq: 1001, sender: 'bob', ts: Date.now(),
       text: 'replied before parent known', reply_to: ghost,
     });
@@ -70,7 +70,7 @@ async function main() {
   //    trigger refreshReplyRefsPointingAt(parent.id) so the live ref
   //    upgrades to show real sender + snippet.
   await page.evaluate((ghost) => {
-    window.__safebotTest.rememberMessage(
+    window.__bot2botTest.rememberMessage(
       { id: ghost, seq: 1000, sender: 'alice', ts: Date.now() - 1000 },
       'the original parent message text',
     );
@@ -94,7 +94,7 @@ async function main() {
   // 3. Now delete the parent. The ref must converge on the deleted
   //    placeholder — no cached plaintext left on the child.
   await page.evaluate((ghost) => {
-    window.__safebotTest.applyDelete(ghost, 1000);
+    window.__bot2botTest.applyDelete(ghost, 1000);
   }, ghost);
 
   refState = await page.evaluate((childId) => {

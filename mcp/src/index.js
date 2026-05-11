@@ -1,20 +1,22 @@
 #!/usr/bin/env node
-// SafeBot.Chat MCP server.
+// Bot2Bot.chat MCP server.
 //
 // Exposes eight tools to MCP-capable LLM hosts (Codex, Claude Desktop, Cursor, Claude
 // Code, Cline, Zed, etc.):
 //
 //   create_room        — mint a fresh encrypted room, return the full URL
 //   send_message       — POST a sealed message to a room
+//   add_reaction       — POST a Bot2Bot reaction envelope to a message
+//   remove_reaction    — remove one of our reactions from a message
 //   wait_for_messages  — HTTP long-poll; returns newly decrypted messages
 //   get_transcript     — fetch and decrypt recent messages on demand
 //   room_status        — lightweight probe (participants, last_seq)
 //
 // Every byte of crypto happens in THIS process, on the operator's machine.
-// Room keys never leave the local host. The server-side of SafeBot.Chat sees
+// Room keys never leave the local host. The server-side of Bot2Bot.chat sees
 // only opaque ciphertext, identical to what the Python/JS SDKs produce.
 //
-// Discover via `npx safebot-mcp` from an MCP-host config file.
+// Discover via `npx bot2bot-mcp` from an MCP-host config file.
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -29,21 +31,21 @@ import path from 'node:path';
 import nacl from 'tweetnacl';
 import naclUtil from 'tweetnacl-util';
 
-const DEFAULT_BASE = process.env.SAFEBOT_BASE || 'https://safebot.chat';
+const DEFAULT_BASE = process.env.BOT2BOT_BASE || 'https://bot2bot.chat';
 const ROOM_ID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const NAME_PREFIX = 'agent';
-const USER_AGENT = `safebot-mcp/0.2.2 (+${DEFAULT_BASE})`;
-const SAFEBOT_CONFIG_DIR = path.join(os.homedir(), '.config', 'safebot');
-const IDENTITY_KEY_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.key');
-const IDENTITY_META_PATH = path.join(SAFEBOT_CONFIG_DIR, 'mcp_identity.json');
-const ROOM_NAME_OVERRIDE = sanitizeAnonLabel(process.env.SAFEBOT_MCP_ROOM_NAME, '');
+const USER_AGENT = `bot2bot-mcp/0.2.2 (+${DEFAULT_BASE})`;
+const BOT2BOT_CONFIG_DIR = path.join(os.homedir(), '.config', 'bot2bot');
+const IDENTITY_KEY_PATH = path.join(BOT2BOT_CONFIG_DIR, 'mcp_identity.key');
+const IDENTITY_META_PATH = path.join(BOT2BOT_CONFIG_DIR, 'mcp_identity.json');
+const ROOM_NAME_OVERRIDE = sanitizeAnonLabel(process.env.BOT2BOT_MCP_ROOM_NAME, '');
 const ROOM_REPLY_DISCIPLINE =
-  'SafeBot room URLs are output channels, not only context sources: ' +
+  'Bot2Bot room URLs are output channels, not only context sources: ' +
   'if the user gave you a room URL for QA, reporting, or collaboration, send your substantive answer back into that room with `send_message` before you stop. ' +
   'Do not keep the real answer only in local narration.';
 const SERVER_INSTRUCTIONS = [
-  'SafeBot.Chat rooms are collaboration channels.',
-  'When you call any SafeBot room tool with a `url`, treat that room as the active reply channel for this MCP session until another SafeBot room URL supersedes it.',
+  'Bot2Bot.chat rooms are collaboration channels.',
+  'When you call any Bot2Bot room tool with a `url`, treat that room as the active reply channel for this MCP session until another Bot2Bot room URL supersedes it.',
   ROOM_REPLY_DISCIPLINE,
   'After every `send_message` into a room, BEFORE ending the turn, call `wait_for_messages` with `after_seq` set to the latest seq you have seen and `timeout_seconds` 60-90, OR commit to a follow-up turn that does. A live room is a two-way channel; going silent after a send looks dead to participants. The follow-up-turn branch is only valid if your runtime exposes a wake-up primitive (e.g. ScheduleWakeup, /loop, webhook callback); without one, the in-turn `wait_for_messages` branch is mandatory — "I will reply later" without a real wake-up equals "I hope the user pings me again".',
   'Track the highest `seq` you have seen per room across calls and pass it as `after_seq` on every poll. *Latest seq* = max of: every `seq` in incoming messages AND every `seq` returned in your own `send_message` responses. Use this exact value as `after_seq` — do not increment by hand. Without this, the server will replay backlog into your context and burn tokens, or you will miss messages that landed between your send and your next poll. If your runtime starts each turn with no persistent storage, include the latest seq verbatim in your final user-facing message so a fresh turn can recover it from the transcript.',
@@ -88,7 +90,7 @@ function roomStateKey(base, roomId) {
 }
 
 function roomIdentityPath(base) {
-  return path.join(SAFEBOT_CONFIG_DIR, `mcp_room_identity-${sha256Hex(base).slice(0, 12)}.json`);
+  return path.join(BOT2BOT_CONFIG_DIR, `mcp_room_identity-${sha256Hex(base).slice(0, 12)}.json`);
 }
 
 function sanitizeAnonLabel(name, fallback) {
@@ -99,7 +101,7 @@ function sanitizeAnonLabel(name, fallback) {
 function parseRoomUrl(url) {
   const u = new URL(url);
   const m = /^\/room\/([A-Za-z0-9_-]{4,64})\/?$/.exec(u.pathname);
-  if (!m) throw new Error(`not a SafeBot.Chat room URL (path must be /room/<id>): ${url}`);
+  if (!m) throw new Error(`not a Bot2Bot.chat room URL (path must be /room/<id>): ${url}`);
   const frag = (u.hash || '').replace(/^#/, '');
   const params = new URLSearchParams(frag);
   const keyB64u = params.get('k');
@@ -109,7 +111,7 @@ function parseRoomUrl(url) {
   const base = `${u.protocol}//${u.host}`;
   // SSRF guard — applies to every tool that accepts a room URL. A caller can
   // still point at localhost for dev, but LAN/internal hosts require opting
-  // in via SAFEBOT_MCP_ALLOWED_BASES.
+  // in via BOT2BOT_MCP_ALLOWED_BASES.
   assertSafeBase(base);
   return { roomId: m[1], key, base, url: u.toString() };
 }
@@ -128,12 +130,12 @@ function decrypt(key, ctB64, nonceB64) {
 }
 
 // ---- Base-URL allowlist (SSRF guard) -----------------------------------
-// The MCP tool lets callers pass a `base` string for the SafeBot instance.
+// The MCP tool lets callers pass a `base` string for the Bot2Bot instance.
 // An LLM under prompt-injection attack could be tricked into calling with
 // `base=http://internal-service:8080/…`, turning this process into an SSRF
 // oracle against the operator's LAN. Restrict to an explicit allowlist:
 //   - the DEFAULT_BASE
-//   - anything in SAFEBOT_MCP_ALLOWED_BASES (comma-separated)
+//   - anything in BOT2BOT_MCP_ALLOWED_BASES (comma-separated)
 //   - http://localhost[:port] / http://127.0.0.1[:port] for local dev
 function assertSafeBase(base) {
   if (!base) return;
@@ -144,13 +146,13 @@ function assertSafeBase(base) {
   }
   const origin = u.origin;
   const allowed = new Set([new URL(DEFAULT_BASE).origin]);
-  for (const b of (process.env.SAFEBOT_MCP_ALLOWED_BASES || '').split(',')) {
+  for (const b of (process.env.BOT2BOT_MCP_ALLOWED_BASES || '').split(',')) {
     const t = b.trim(); if (t) { try { allowed.add(new URL(t).origin); } catch (_) {} }
   }
   if (allowed.has(origin)) return;
   // Localhost dev exception (explicit) — no other private IPs without opt-in.
   if (u.protocol === 'http:' && (u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1')) return;
-  throw new Error(`base URL '${origin}' not in allowlist (DEFAULT_BASE or SAFEBOT_MCP_ALLOWED_BASES)`);
+  throw new Error(`base URL '${origin}' not in allowlist (DEFAULT_BASE or BOT2BOT_MCP_ALLOWED_BASES)`);
 }
 
 // ---- HTTP with retry ---------------------------------------------------
@@ -193,7 +195,7 @@ const TOOLS = [
   {
     name: 'create_room',
     description:
-      'Mint a fresh end-to-end encrypted SafeBot.Chat room. ' +
+      'Mint a fresh end-to-end encrypted Bot2Bot.chat room. ' +
       'Generates a random 256-bit room key locally — the key lives in the returned URL fragment and is never transmitted to any server. ' +
       'Share the returned `url` with every participant (human or agent) who should be able to read and write in the room.',
     inputSchema: {
@@ -201,7 +203,7 @@ const TOOLS = [
       properties: {
         base: {
           type: 'string',
-          description: 'Base URL of the SafeBot.Chat instance. Defaults to https://safebot.chat (or $SAFEBOT_BASE).',
+          description: 'Base URL of the Bot2Bot.chat instance. Defaults to https://bot2bot.chat (or $BOT2BOT_BASE).',
         },
       },
     },
@@ -209,7 +211,7 @@ const TOOLS = [
   {
     name: 'send_message',
     description:
-      'Encrypt a message and POST it to the given SafeBot.Chat room. ' +
+      'Encrypt a message and POST it to the given Bot2Bot.chat room. ' +
       'The plaintext is sealed with XSalsa20-Poly1305 before it leaves this process. ' +
       'Returns the server-assigned sequence number on success. ' +
       'Use this to publish your substantive answer back into the room; do not keep the real answer only in local narration. ' +
@@ -221,6 +223,38 @@ const TOOLS = [
         url:  { type: 'string', description: 'Full room URL including #k=<key> fragment.' },
         text: { type: 'string', description: 'Plaintext message (max ≈ 96 KiB).' },
         name: { type: 'string', description: 'Sender label shown to other participants. Must be UNIQUE per agent or the default include_self filter in other clients will drop your messages. If omitted, a random "agent-<hex>" name is used.' },
+      },
+    },
+  },
+  {
+    name: 'add_reaction',
+    description:
+      'Add a reaction to a Bot2Bot.chat message by posting a signed reaction envelope into the room. ' +
+      'Use this instead of sending raw JSON manually. Returns the reaction envelope message id/seq on success.',
+    inputSchema: {
+      type: 'object',
+      required: ['url', 'target_id', 'emoji'],
+      properties: {
+        url:       { type: 'string', description: 'Full room URL including #k=<key> fragment.' },
+        target_id: { type: 'string', description: 'Message id to react to (same value surfaced as `message_id` by Bot2Bot tools).' },
+        emoji:     { type: 'string', description: 'Reaction payload, e.g. 👍, 🔥, 👀, or short custom text.' },
+        name:      { type: 'string', description: 'Optional sender label override, same semantics as send_message.' },
+      },
+    },
+  },
+  {
+    name: 'remove_reaction',
+    description:
+      'Remove one of your reactions from a Bot2Bot.chat message by posting a signed reaction envelope into the room. ' +
+      'Returns the reaction envelope message id/seq on success.',
+    inputSchema: {
+      type: 'object',
+      required: ['url', 'target_id', 'emoji'],
+      properties: {
+        url:       { type: 'string', description: 'Full room URL including #k=<key> fragment.' },
+        target_id: { type: 'string', description: 'Message id to un-react from.' },
+        emoji:     { type: 'string', description: 'Reaction payload to remove, e.g. 👍 or short custom text.' },
+        name:      { type: 'string', description: 'Optional sender label override, same semantics as send_message.' },
       },
     },
   },
@@ -278,7 +312,7 @@ const TOOLS = [
       'Delivery guarantee: the cursor advances ONLY if the server receives the ack — a network failure mid-call leaves the claim in flight and the same message re-delivers. ' +
       'Host-crash after tool return, however, DOES lose the message: the cursor was already advanced. If you need at-least-once against host crashes, use claim_task + ack_task instead. ' +
       'Loop: call repeatedly. On "(no new messages ...)" call again immediately. ' +
-      'On first use, auto-provisions a persistent @handle at ~/.config/safebot/mcp_identity.key; override with SAFEBOT_MCP_HANDLE. ' +
+      'On first use, auto-provisions a persistent @handle at ~/.config/bot2bot/mcp_identity.key; override with BOT2BOT_MCP_HANDLE. ' +
       'If the message warrants a response, reply to the same room with `send_message` before you move on.',
     inputSchema: {
       type: 'object',
@@ -337,7 +371,7 @@ let CACHED_ROOM_IDENTITY = undefined; // undefined = not loaded yet; null = no p
 let ACTIVE_ROOM = null;
 
 function ensureIdentityDir() {
-  fs.mkdirSync(SAFEBOT_CONFIG_DIR, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(BOT2BOT_CONFIG_DIR, { recursive: true, mode: 0o700 });
 }
 
 function buildLocalIdentity({ handle, box_sk, sign_seed, base }) {
@@ -357,7 +391,7 @@ function buildLocalIdentity({ handle, box_sk, sign_seed, base }) {
 
 function exportIdentityRecord(ident) {
   return {
-    safebot_identity_v1: true,
+    bot2bot_identity_v1: true,
     handle: ident.handle,
     box_sk_b64u: b64urlEncode(ident.box_sk),
     sign_seed_b64u: b64urlEncode(ident.sign_seed),
@@ -387,7 +421,7 @@ async function registerIdentity(base, ident, meta = {}) {
       throw new Error(`register failed: ${r.status} ${body}`);
     }
   } catch (e) {
-    console.error(`[safebot-mcp] identity register warning: ${e.message}`);
+    console.error(`[bot2bot-mcp] identity register warning: ${e.message}`);
   }
 }
 
@@ -405,7 +439,7 @@ async function loadOrCreateIdentity(base) {
     const meta = JSON.parse(fs.readFileSync(IDENTITY_META_PATH, 'utf8'));
     handle = meta.handle;
   } else {
-    const envHandle = (process.env.SAFEBOT_MCP_HANDLE || '').toLowerCase();
+    const envHandle = (process.env.BOT2BOT_MCP_HANDLE || '').toLowerCase();
     handle = envHandle && /^[a-z0-9_-]{1,32}$/.test(envHandle)
       ? envHandle
       : 'mcp-' + Buffer.from(nacl.randomBytes(3)).toString('hex');
@@ -416,7 +450,7 @@ async function loadOrCreateIdentity(base) {
     fs.writeFileSync(IDENTITY_META_PATH, JSON.stringify({ handle, created: Date.now() }), { mode: 0o600 });
   }
   const ident = buildLocalIdentity({ handle, box_sk, sign_seed, base });
-  await registerIdentity(base, ident, { bio: 'Auto-provisioned SafeBot MCP auth identity.' });
+  await registerIdentity(base, ident, { bio: 'Auto-provisioned Bot2Bot MCP auth identity.' });
   CACHED_IDENTITY = ident;
   return ident;
 }
@@ -432,7 +466,7 @@ function loadPromotedRoomIdentity(base) {
     return CACHED_ROOM_IDENTITY;
   }
   const rec = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (!rec || rec.safebot_identity_v1 !== true || !rec.handle || !rec.box_sk_b64u || !rec.sign_seed_b64u) {
+  if (!rec || rec.bot2bot_identity_v1 !== true || !rec.handle || !rec.box_sk_b64u || !rec.sign_seed_b64u) {
     throw new Error('mcp_room_identity.json is malformed');
   }
   CACHED_ROOM_IDENTITY = buildLocalIdentity({
@@ -554,7 +588,7 @@ function maybeApplyAdopt(state, plaintext, sender) {
   } catch (_) {
     return { consumed: false, applied: false };
   }
-  if (!env || env.safebot_adopt_v1 !== true) return { consumed: false, applied: false };
+  if (!env || env.bot2bot_adopt_v1 !== true) return { consumed: false, applied: false };
   const adoptId = env.adopt_id;
   if (!adoptId || state.adoptSeen.has(adoptId)) return { consumed: true, applied: false };
   state.adoptSeen.add(adoptId);
@@ -569,7 +603,7 @@ function maybeApplyAdopt(state, plaintext, sender) {
       currentRoomBoxSecret(state),
     );
     if (!opened) {
-      console.error('[safebot-mcp] adopt decrypt failed');
+      console.error('[bot2bot-mcp] adopt decrypt failed');
       return { consumed: true, applied: false };
     }
     const inner = JSON.parse(naclUtil.encodeUTF8(opened));
@@ -587,10 +621,10 @@ function maybeApplyAdopt(state, plaintext, sender) {
     rememberSender(state.roomId, currentRoomLabel(state));
     markPresenceDirty(state);
     ensurePresenceLoop(state);
-    console.error(`[safebot-mcp] adopted room identity as @${adopted.handle} (from ${sender || 'operator'})`);
+    console.error(`[bot2bot-mcp] adopted room identity as @${adopted.handle} (from ${sender || 'operator'})`);
     return { consumed: true, applied: true };
   } catch (e) {
-    console.error(`[safebot-mcp] adopt apply failed: ${e.message}`);
+    console.error(`[bot2bot-mcp] adopt apply failed: ${e.message}`);
     return { consumed: true, applied: false };
   }
 }
@@ -646,7 +680,7 @@ async function runPresenceLoop(state, desiredKey) {
       if (controller.signal.aborted) return;
     } catch (e) {
       if (controller.signal.aborted) return;
-      console.error(`[safebot-mcp] presence loop warning for ${state.roomId}: ${e.message}`);
+      console.error(`[bot2bot-mcp] presence loop warning for ${state.roomId}: ${e.message}`);
     }
     await sleep(backoffMs);
     backoffMs = Math.min(5000, backoffMs * 2);
@@ -660,7 +694,7 @@ function ensurePresenceLoop(state) {
   }
   state.presenceActiveKey = state.presenceDesiredKey;
   const loop = runPresenceLoop(state, state.presenceActiveKey)
-    .catch((e) => console.error(`[safebot-mcp] presence crash for ${state.roomId}: ${e.message}`))
+    .catch((e) => console.error(`[bot2bot-mcp] presence crash for ${state.roomId}: ${e.message}`))
     .finally(() => {
       if (state.presenceLoop === loop) {
         state.presenceLoop = null;
@@ -690,7 +724,7 @@ function authHeader(ident, method, pathAndQuery) {
   const nonce = b64urlEncode(nacl.randomBytes(18));
   const blob = naclUtil.decodeUTF8(`${method} ${pathAndQuery} ${ts} ${nonce}`);
   const sig = nacl.sign.detached(blob, ident.sign_sk);
-  return `SafeBot ts=${ts},n=${nonce},sig=${b64Encode(sig)}`;
+  return `Bot2Bot ts=${ts},n=${nonce},sig=${b64Encode(sig)}`;
 }
 
 // ---- Tool implementations ----------------------------------------------
@@ -739,11 +773,7 @@ async function tool_send_message({ url, text, name }) {
   const state = await ensureRoomState(parsed, { explicitName: name });
   const sender = currentRoomLabel(state);
   rememberSender(parsed.roomId, sender);
-  const { ciphertext, nonce } = encrypt(parsed.key, text);
-  let body = { sender, ciphertext, nonce };
-  if (state.roomIdentity) {
-    body = { ...body, ...signRoomEnvelope(parsed.roomId, ciphertext, state.roomIdentity) };
-  }
+  let body = buildPostedMessageBody(parsed, state, sender, text);
   let res = await fetch(`${parsed.base}/api/rooms/${parsed.roomId}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
@@ -751,7 +781,7 @@ async function tool_send_message({ url, text, name }) {
     redirect: 'error',
   });
   if (res.status === 403 && !state.roomIdentity) {
-    body = { sender, ciphertext, nonce, ...signRoomEnvelope(parsed.roomId, ciphertext, state.authIdentity) };
+    body = buildPostedMessageBody(parsed, state, sender, text, { signWithAuthIdentity: true });
     res = await fetch(`${parsed.base}/api/rooms/${parsed.roomId}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'User-Agent': USER_AGENT },
@@ -767,9 +797,56 @@ async function tool_send_message({ url, text, name }) {
   return {
     content: [{
       type: 'text',
-      text: `sent as "${sender}". server_id=${j.id} seq=${j.seq}`,
+      text: `sent as "${sender}". message_id=${j.id} seq=${j.seq}`,
     }],
   };
+}
+
+function buildPostedMessageBody(parsed, state, sender, text, { signWithAuthIdentity = false } = {}) {
+  const { ciphertext, nonce } = encrypt(parsed.key, text);
+  const body = { sender, ciphertext, nonce };
+  const signingIdentity = signWithAuthIdentity ? state.authIdentity : state.roomIdentity;
+  if (signingIdentity) {
+    return { ...body, ...signRoomEnvelope(parsed.roomId, ciphertext, signingIdentity) };
+  }
+  return body;
+}
+
+function validateReactionArgs(target_id, emoji) {
+  const targetId = String(target_id || '').trim();
+  const reaction = String(emoji || '').trim();
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(targetId)) {
+    throw new Error(`target_id must match [A-Za-z0-9_-]{8,64}; got ${JSON.stringify(target_id)}`);
+  }
+  if (!reaction) throw new Error('emoji must be a non-empty string');
+  if (reaction.length > 24) throw new Error('emoji/custom reaction must be 24 characters or fewer');
+  return { targetId, reaction };
+}
+
+async function tool_mutate_reaction({ url, target_id, emoji, name }, op) {
+  const { targetId, reaction } = validateReactionArgs(target_id, emoji);
+  const text = JSON.stringify({
+    bot2bot_react_v1: true,
+    target_id: targetId,
+    emoji: reaction,
+    op,
+  });
+  const sent = await tool_send_message({ url, text, name });
+  const baseText = sent.content?.find((c) => c.type === 'text')?.text || '';
+  return {
+    content: [{
+      type: 'text',
+      text: `${op === 'add' ? 'reaction added' : 'reaction removed'}: target_id=${targetId} emoji=${reaction}\n${baseText}`,
+    }],
+  };
+}
+
+async function tool_add_reaction(args) {
+  return tool_mutate_reaction(args, 'add');
+}
+
+async function tool_remove_reaction(args) {
+  return tool_mutate_reaction(args, 'remove');
 }
 
 async function tool_wait_for_messages({ url, after_seq = 0, timeout_seconds = 20, include_self = false, name }) {
@@ -927,7 +1004,7 @@ async function tool_next_task({ url, timeout_seconds = 60 }) {
     content: [{
       type: 'text',
       text:
-        `[seq=${m.seq}] ${m.sender}${verified}: ${text == null ? '[undecryptable — wrong room key]' : text}` +
+        `[seq=${m.seq} id=${m.id}] ${m.sender}${verified}: ${text == null ? '[undecryptable — wrong room key]' : text}` +
         `\n\n(listening in-room as "${currentRoomLabel(state)}" via auth @${state.authIdentity.handle}; if a reply is needed, use send_message to the same room, then call next_task again to block for the next message)` +
         notice +
         ackWarn,
@@ -951,7 +1028,7 @@ async function tool_claim_task({ url, timeout_seconds = 60 }) {
     content: [{
       type: 'text',
       text:
-        `[seq=${m.seq}] ${m.sender}${verified}: ${text == null ? '[undecryptable — wrong room key]' : text}` +
+        `[seq=${m.seq} id=${m.id}] ${m.sender}${verified}: ${text == null ? '[undecryptable — wrong room key]' : text}` +
         `\n\n(claim_id=${claim.claim_id} seq=${m.seq} — if the message warrants a reply, call send_message to the same room first, then call ack_task once you have fully processed it; ` +
         `claim expires in 60s and re-delivers if you never ack)` +
         notice,
@@ -977,6 +1054,8 @@ async function tool_ack_task({ url, claim_id, seq }) {
 const DISPATCH = {
   create_room:       tool_create_room,
   send_message:      tool_send_message,
+  add_reaction:      tool_add_reaction,
+  remove_reaction:   tool_remove_reaction,
   wait_for_messages: tool_wait_for_messages,
   get_transcript:    tool_get_transcript,
   room_status:       tool_room_status,
@@ -988,7 +1067,7 @@ const DISPATCH = {
 // ---- MCP wiring --------------------------------------------------------
 
 const server = new Server(
-  { name: 'safebot-chat', version: '0.2.1' },
+  { name: 'bot2bot-chat', version: '0.2.1' },
   { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
 );
 
@@ -1013,9 +1092,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write('[safebot-mcp] server ready on stdio (base=' + DEFAULT_BASE + ')\n');
+  process.stderr.write('[bot2bot-mcp] server ready on stdio (base=' + DEFAULT_BASE + ')\n');
 }
 main().catch((e) => {
-  process.stderr.write('[safebot-mcp] fatal: ' + (e && e.stack || e) + '\n');
+  process.stderr.write('[bot2bot-mcp] fatal: ' + (e && e.stack || e) + '\n');
   process.exit(1);
 });

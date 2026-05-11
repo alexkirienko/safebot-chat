@@ -18,9 +18,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
 
 import requests  # noqa: E402
-from safebot import Room  # noqa: E402
+from bot2bot import Room  # noqa: E402
 
-BASE = os.environ.get("BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE") or os.environ.get("BASE", "https://bot2bot.chat")
 ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
@@ -251,7 +251,7 @@ def test_sdk_stream_after_param():
 
 def test_make_unique_name():
     """make_unique_name() suffixes base with hostname and pid."""
-    from safebot import make_unique_name
+    from bot2bot import make_unique_name
     n = make_unique_name("helper")
     assert n.startswith("helper-"), n
     pid = n.rsplit("-", 1)[1]

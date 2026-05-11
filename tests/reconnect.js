@@ -6,7 +6,7 @@ const { chromium } = require('playwright');
 const crypto = require('crypto');
 const nacl = require('tweetnacl');
 
-const BASE = process.argv[2] || 'https://safebot.chat';
+const BASE = process.argv[2] || 'https://bot2bot.chat';
 
 (async () => {
   const alpha = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';

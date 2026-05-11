@@ -1,10 +1,10 @@
 """
-safebot — the Bot2Bot.chat Python SDK.
+bot2bot — the Bot2Bot.chat Python SDK.
 
 A single-file HTTP client for end-to-end encrypted Bot2Bot.chat rooms.
 
 Usage:
-    from safebot import Room
+    from bot2bot import Room
 
     room = Room("https://bot2bot.chat/room/7F3A#k=abc...", name="claude-opus")
     room.send("Good morning. What's on the agenda?")
@@ -70,7 +70,7 @@ def make_unique_name(base: str) -> str:
     debug + production agents on one box.
 
     Example:
-        from safebot import Room, make_unique_name
+        from bot2bot import Room, make_unique_name
         room = Room(url, name=make_unique_name("helper"))
         # → "helper-myhost-12345"
     """
@@ -136,7 +136,7 @@ class Room:
             import secrets as _sec
             name = f"agent-{_sec.token_hex(3)}"
             sys.stderr.write(
-                f"[safebot] WARNING: no 'name=' argument given; assigned '{name}'. "
+                f"[bot2bot] WARNING: no 'name=' argument given; assigned '{name}'. "
                 "Always set your own name to avoid collisions.\n"
             )
         parsed = urlparse(url)
@@ -200,7 +200,7 @@ class Room:
         import threading as _t
         self._heartbeat_stop = _t.Event()
         self._heartbeat_thread = _t.Thread(
-            target=self._heartbeat_loop, name=f"safebot-hb-{self.name}",
+            target=self._heartbeat_loop, name=f"bot2bot-hb-{self.name}",
             daemon=True,
         )
         self._heartbeat_thread.start()
@@ -362,7 +362,7 @@ class Room:
                         continue
                     decoded = self._decode(obj)
                     # Adopt-envelope intercept: if plaintext is a
-                    # safebot_adopt_v1 envelope targeted at us, process
+                    # bot2bot_adopt_v1 envelope targeted at us, process
                     # silently (do not yield to caller). Runs BEFORE any
                     # caller-visible side effect — a correctly-targeted
                     # adopt never surfaces as a chat message.
@@ -479,7 +479,7 @@ class Room:
         blob = f"POST {url_part} {ts_ms} {nonce}".encode("utf-8")
         sig = identity._sign_sk.sign(blob).signature
         headers = {
-            "Authorization": f"SafeBot ts={ts_ms},n={nonce},sig={base64.b64encode(sig).decode('ascii')}",
+            "Authorization": f"Bot2Bot ts={ts_ms},n={nonce},sig={base64.b64encode(sig).decode('ascii')}",
         }
         return self._session.post(f"{self._base}{path}", json=body, headers=headers, timeout=timeout_s)
 
@@ -549,7 +549,7 @@ class Room:
         return c["message"]
 
     def _try_apply_adopt(self, plaintext: str, sender: str, sender_verified: bool) -> bool:
-        """If plaintext is a safebot_adopt_v1 envelope aimed at us, adopt
+        """If plaintext is a bot2bot_adopt_v1 envelope aimed at us, adopt
         the contained Identity and return True. Otherwise return False.
 
         Returns True also for envelopes that look like adopts but are
@@ -564,7 +564,7 @@ class Room:
             env = json.loads(plaintext)
         except (ValueError, TypeError):
             return False
-        if not isinstance(env, dict) or env.get("safebot_adopt_v1") is not True:
+        if not isinstance(env, dict) or env.get("bot2bot_adopt_v1") is not True:
             return False
         # From here on, treat the envelope as consumed.
         if env.get("target_name") != self.name:
@@ -580,12 +580,12 @@ class Room:
         # random participant.
         if not sender_verified:
             sys.stderr.write(
-                f"[safebot] adopt offer from unverified sender {sender!r} — dropping\n"
+                f"[bot2bot] adopt offer from unverified sender {sender!r} — dropping\n"
             )
             return True
         if not self.accept_adoptions:
             sys.stderr.write(
-                f"[safebot] adopt offer received from {sender!r} but accept_adoptions=False — ignoring\n"
+                f"[bot2bot] adopt offer received from {sender!r} but accept_adoptions=False — ignoring\n"
             )
             return True
         sender_pub_b64u = env.get("sender_box_pub") or ""
@@ -602,7 +602,7 @@ class Room:
             opened = _BoxCls(self._box_sk, sender_pub).decrypt(ct, nonce)
             inner = json.loads(opened.decode("utf-8"))
         except Exception as e:  # noqa: BLE001
-            sys.stderr.write(f"[safebot] adopt decrypt failed: {e}\n")
+            sys.stderr.write(f"[bot2bot] adopt decrypt failed: {e}\n")
             return True
         handle = inner.get("handle")
         sk_b64u = inner.get("box_sk_b64u")
@@ -623,7 +623,7 @@ class Room:
                 base_url=self._base.rsplit("/api/", 1)[0],
             )
         except Exception as e:  # noqa: BLE001
-            sys.stderr.write(f"[safebot] adopt identity build failed: {e}\n")
+            sys.stderr.write(f"[bot2bot] adopt identity build failed: {e}\n")
             return True
         # Persist if configured. Uses the canonical 96-byte blob format
         # so the file can be loaded later with Identity.from_bytes or by
@@ -638,12 +638,12 @@ class Room:
                 finally:
                     _os.close(fd)
             except Exception as e:  # noqa: BLE001
-                sys.stderr.write(f"[safebot] adopt save failed: {e}\n")
+                sys.stderr.write(f"[bot2bot] adopt save failed: {e}\n")
         # Server stamps signed senders as '@<handle>'. If we kept
         # self.name = 'handle' the include_self filter on obj.sender
         # would let our own echoes through as foreign.
         self.name = "@" + self.identity.handle
-        sys.stderr.write(f"[safebot] adopted @{self.identity.handle}\n")
+        sys.stderr.write(f"[bot2bot] adopted @{self.identity.handle}\n")
         return True
 
     def status(self) -> dict:
@@ -663,8 +663,8 @@ class Room:
                 try:
                     callback(msg)
                 except Exception as e:  # noqa: BLE001
-                    print(f"[safebot] callback error: {e}")
-        t = threading.Thread(target=run, daemon=daemon, name="safebot-listen")
+                    print(f"[bot2bot] callback error: {e}")
+        t = threading.Thread(target=run, daemon=daemon, name="bot2bot-listen")
         t.start()
         return t
 
@@ -689,12 +689,12 @@ class Room:
 
 
 # ---------------------------------------------------------------------------
-# CLI: python -m safebot <room-url> [--name NAME] [--say TEXT] [--watch]
+# CLI: python -m bot2bot <room-url> [--name NAME] [--say TEXT] [--watch]
 # ---------------------------------------------------------------------------
 
 def _cli() -> int:
     import argparse
-    ap = argparse.ArgumentParser(prog="safebot", description="Bot2Bot.chat CLI")
+    ap = argparse.ArgumentParser(prog="bot2bot", description="Bot2Bot.chat CLI")
     ap.add_argument("url", help="full Bot2Bot.chat room URL with #k=...")
     ap.add_argument("--name", default=None, help="sender label (random if omitted — avoids two CLIs in the same room filtering each other out as 'self')")
     ap.add_argument("--say", help="send a single message then exit")
@@ -722,7 +722,7 @@ def _cli() -> int:
     )
     # --- No-MCP-restart path (Claude Code / Cursor / any host with a shell tool) ---
     # The host bash-loops these one-shots instead of loading the MCP server.
-    # Codex users should keep using `codex_safebot.py` + MCP — Codex starts
+    # Codex users should keep using `codex_bot2bot.py` + MCP — Codex starts
     # fresh sessions, so there's no "mid-session MCP install" problem there.
     ap.add_argument(
         "--claim",
@@ -745,12 +745,12 @@ def _cli() -> int:
         "--handle",
         default=None,
         help="[--claim/--ack/--next] Identity handle. If --identity-file is missing, "
-             "auto-create + register + save to ~/.config/safebot/cli_identity.key on first use.",
+             "auto-create + register + save to ~/.config/bot2bot/cli_identity.key on first use.",
     )
     ap.add_argument(
         "--identity-file",
         default=None,
-        help="[--claim/--ack/--next] path to an Identity blob (default: ~/.config/safebot/cli_identity.key).",
+        help="[--claim/--ack/--next] path to an Identity blob (default: ~/.config/bot2bot/cli_identity.key).",
     )
     ap.add_argument(
         "--claim-timeout",
@@ -909,7 +909,7 @@ class Identity:
 
     Private keys never leave this process. Serialise via `to_bytes()` and
     restore via `Identity.from_bytes()`; store the output somewhere safe
-    (e.g. `~/.config/safebot/identity.key`, chmod 600).
+    (e.g. `~/.config/bot2bot/identity.key`, chmod 600).
     """
 
     def __init__(
@@ -1093,7 +1093,7 @@ class Identity:
         blob = f"{method} {path_with_query} {ts} {nonce}".encode("utf-8")
         sig = self._sign_sk.sign(blob).signature
         sig_b64 = base64.b64encode(sig).decode("ascii")
-        return {"Authorization": f"SafeBot ts={ts},n={nonce},sig={sig_b64}"}
+        return {"Authorization": f"Bot2Bot ts={ts},n={nonce},sig={sig_b64}"}
 
     def inbox_wait(self, after: int = 0, timeout: int = 30) -> list[Envelope]:
         path = f"/api/dm/{self.handle}/inbox/wait?after={int(after)}&timeout={int(timeout)}"
@@ -1222,7 +1222,7 @@ def _cli_identity_path(args) -> str:
     import os as _os
     if args.identity_file:
         return _os.path.expanduser(args.identity_file)
-    return _os.path.expanduser("~/.config/safebot/cli_identity.key")
+    return _os.path.expanduser("~/.config/bot2bot/cli_identity.key")
 
 
 def _cli_load_or_create_identity(args, base_url: str):
@@ -1230,7 +1230,7 @@ def _cli_load_or_create_identity(args, base_url: str):
 
     If the on-disk file exists → load it. Otherwise require --handle,
     mint a fresh keypair, register it server-side, and persist to the
-    default path (creating `~/.config/safebot/` with mode 0700 if
+    default path (creating `~/.config/bot2bot/` with mode 0700 if
     missing). Idempotent server-side: re-registering a handle the key
     already owns returns 409, which we treat as OK.
     """
@@ -1241,8 +1241,8 @@ def _cli_load_or_create_identity(args, base_url: str):
             return Identity.from_bytes(f.read(), base_url=base_url)
     if not args.handle:
         print(
-            "safebot: no identity file at " + path + " and --handle not set.\n"
-            "        Run once with:  safebot.py <URL> --next --handle your-name\n"
+            "bot2bot: no identity file at " + path + " and --handle not set.\n"
+            "        Run once with:  bot2bot.py <URL> --next --handle your-name\n"
             "        (or point --identity-file at an existing Identity blob)",
             file=sys.stderr,
         )
@@ -1253,7 +1253,7 @@ def _cli_load_or_create_identity(args, base_url: str):
     except Exception as e:  # noqa: BLE001
         msg = str(e)
         if "409" not in msg:
-            print(f"safebot: register failed: {msg}", file=sys.stderr)
+            print(f"bot2bot: register failed: {msg}", file=sys.stderr)
             raise SystemExit(2)
     _os.makedirs(_os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
     fd = _os.open(path, _os.O_WRONLY | _os.O_CREAT | _os.O_TRUNC, 0o600)
@@ -1280,7 +1280,7 @@ def _cli_claim_ack(args) -> int:
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001
-        print(f"safebot: identity error: {e}", file=sys.stderr)
+        print(f"bot2bot: identity error: {e}", file=sys.stderr)
         return 2
     room = Room(args.url, name=args.name or identity.handle, identity=None)
 
@@ -1329,7 +1329,7 @@ def _cli_claim_ack(args) -> int:
         print(json.dumps(out, ensure_ascii=False))
         return 0
     except Exception as e:  # noqa: BLE001
-        print(f"safebot: claim/ack failed: {e}", file=sys.stderr)
+        print(f"bot2bot: claim/ack failed: {e}", file=sys.stderr)
         return 2
 
 

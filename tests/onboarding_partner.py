@@ -1,5 +1,5 @@
 """
-Partner process for onboarding test. Joins the given SafeBot.Chat room URL,
+Partner process for onboarding test. Joins the given Bot2Bot.chat room URL,
 waits for any message from the subagent under test, and replies once.
 Prints JSON events to stdout for the outer harness.
 
@@ -17,7 +17,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
 
-from safebot import Room  # noqa: E402
+from bot2bot import Room  # noqa: E402
 
 
 def log(event, **kw):
@@ -30,7 +30,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("url")
     ap.add_argument("--name", default="partner")
-    ap.add_argument("--reply", default="Hello back, welcome to SafeBot.Chat. Say something and I'll echo it.")
+    ap.add_argument("--reply", default="Hello back, welcome to Bot2Bot.chat. Say something and I'll echo it.")
     ap.add_argument("--seconds", type=float, default=180.0)
     args = ap.parse_args()
 

@@ -1,10 +1,10 @@
-// SafeBot.Chat — browser Identity (Ed25519 + X25519).
+// Bot2Bot.chat — browser Identity (Ed25519 + X25519).
 //
 // Generates, persists, and signs with a local Identity scoped to this
 // browser origin. The private keys never leave the browser; register()
 // only publishes the two public keys under the chosen @handle.
 //
-// Storage: localStorage key `safebot-identity` — a JSON blob with the
+// Storage: localStorage key `bot2bot-identity` — a JSON blob with the
 // handle and the 32-byte seeds (base64url). Small surface, easy for the
 // user to clear via "Forget identity" (implemented in the UI).
 (function (global) {
@@ -13,12 +13,12 @@
   const nacl = global.nacl;
   const util = global.nacl && global.nacl.util;
   if (!nacl || !util) {
-    console.error('[safebot] Identity init failed — TweetNaCl missing');
+    console.error('[bot2bot] Identity init failed — TweetNaCl missing');
     return;
   }
-  const SBC = global.SafeBotCrypto;
+  const SBC = global.Bot2BotCrypto;
   if (!SBC || !SBC.b64urlEncode || !SBC.b64urlDecode) {
-    console.error('[safebot] Identity init failed — SafeBotCrypto must load first');
+    console.error('[bot2bot] Identity init failed — Bot2BotCrypto must load first');
     return;
   }
   // crypto.js only exposes base64url; standard base64 is needed for wire
@@ -30,7 +30,7 @@
     return btoa(s);
   }
 
-  const LS_KEY = 'safebot-identity';
+  const LS_KEY = 'bot2bot-identity';
   const HANDLE_REGEX = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 
   function loadFromStorage() {
@@ -119,7 +119,7 @@
     const rec = loadFromStorage();
     if (!rec) return null;
     return JSON.stringify(
-      { safebot_identity_v1: true, ...rec },
+      { bot2bot_identity_v1: true, ...rec },
       null,
       2,
     );
@@ -131,7 +131,7 @@
   function importJson(text) {
     let j;
     try { j = JSON.parse(text); } catch (_) { throw new Error('not valid JSON'); }
-    if (!j.safebot_identity_v1) throw new Error('missing safebot_identity_v1 marker');
+    if (!j.bot2bot_identity_v1) throw new Error('missing bot2bot_identity_v1 marker');
     if (!j.handle || !HANDLE_REGEX.test(j.handle)) throw new Error('bad handle');
     if (!j.box_sk_b64u || !j.sign_seed_b64u) throw new Error('missing key fields');
     const rec = { handle: j.handle, box_sk_b64u: j.box_sk_b64u, sign_seed_b64u: j.sign_seed_b64u };
@@ -197,7 +197,7 @@
   // JSON-ready to be wrapped into an adopt envelope.
   async function mintForAdopt(handle, baseUrl) {
     const { rec } = await _mintAndRegister(handle, baseUrl);
-    return { safebot_identity_v1: true, ...rec };
+    return { bot2bot_identity_v1: true, ...rec };
   }
 
   function load() {
@@ -205,7 +205,7 @@
     return rec ? new Identity(rec) : null;
   }
 
-  global.SafeBotIdentity = {
+  global.Bot2BotIdentity = {
     load,
     createAndRegister,
     forget: clearStorage,

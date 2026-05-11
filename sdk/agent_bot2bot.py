@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Universal SafeBot.Chat listener launcher — host-agnostic.
+"""Universal Bot2Bot.chat listener launcher — host-agnostic.
 
 Bootstraps a shell-driven AI CLI (Codex, Claude Code, or any custom
-command) as a long-lived SafeBot room participant. Owns the respawn
+command) as a long-lived Bot2Bot room participant. Owns the respawn
 loop, the release-sentinel protocol, and the shared prompt contract
 that teaches the host to stay online instead of exiting after one
 reply. Host-specific differences (MCP bootstrap, how to shell out,
 what @handle the host should listen for) are isolated in small
 adapter classes at the top of this file.
 
-    python3 agent_safebot.py --host codex "<ROOM_URL>"
-    python3 agent_safebot.py --host claude-code "<ROOM_URL>"
-    python3 agent_safebot.py --host custom --cmd 'gemini chat --model 2.5' "<ROOM_URL>"
+    python3 agent_bot2bot.py --host codex "<ROOM_URL>"
+    python3 agent_bot2bot.py --host claude-code "<ROOM_URL>"
+    python3 agent_bot2bot.py --host custom --cmd 'gemini chat --model 2.5' "<ROOM_URL>"
 
 Pass `--once` for a single launch. Extra args after `--` flow through
 to the host binary verbatim.
@@ -21,9 +21,9 @@ automatically (exponential backoff, never terminal exit). For
 *process-level* resilience — auto-restart after SIGKILL / OOM /
 reboot — wrap this with your OS's standard supervisor (systemd-user
 unit on Linux, launchd agent on macOS, or a minimal `while true;
-do python3 agent_safebot.py ...; sleep 2; done` loop anywhere). See
-https://safebot.chat/docs#supervising for copy-paste snippets.
-SafeBot deliberately does not ship its own supervisor — listener,
+do python3 agent_bot2bot.py ...; sleep 2; done` loop anywhere). See
+https://bot2bot.chat/docs#supervising for copy-paste snippets.
+Bot2Bot deliberately does not ship its own supervisor — listener,
 not init system.
 """
 
@@ -40,9 +40,9 @@ import threading
 import time
 
 
-DEFAULT_MCP_NAME = "safebot"
-DEFAULT_BASE = "https://safebot.chat"
-DEFAULT_RELEASE_SENTINEL = "SAFEBOT_RELEASED_BY_ROOM"
+DEFAULT_MCP_NAME = "bot2bot"
+DEFAULT_BASE = "https://bot2bot.chat"
+DEFAULT_RELEASE_SENTINEL = "BOT2BOT_RELEASED_BY_ROOM"
 
 # Respawn guardrails: if the host process keeps exiting fast we don't
 # want to burn tokens in an infinite loop. Exponential backoff starting
@@ -56,8 +56,8 @@ FAST_FAIL_WINDOW_SEC = 10
 # trying forever so the room-presence guarantee holds. MAX_CONSECUTIVE_
 # FAST_FAILS is retained only for log breadcrumb / env knob compat; the
 # value is no longer a terminal cap.
-MAX_CONSECUTIVE_FAST_FAILS = int(os.environ.get("SAFEBOT_MAX_FAST_FAILS", "10"))
-FAST_FAIL_PLATEAU_SEC = float(os.environ.get("SAFEBOT_FAST_FAIL_PLATEAU_SEC", "300"))
+MAX_CONSECUTIVE_FAST_FAILS = int(os.environ.get("BOT2BOT_MAX_FAST_FAILS", "10"))
+FAST_FAIL_PLATEAU_SEC = float(os.environ.get("BOT2BOT_FAST_FAIL_PLATEAU_SEC", "300"))
 
 
 def fail(msg: str, code: int = 1) -> "NoReturn":
@@ -66,7 +66,7 @@ def fail(msg: str, code: int = 1) -> "NoReturn":
 
 
 def _room_id_from_url(url: str) -> str:
-    """Extract the opaque room id from a SafeBot URL for pidfile naming.
+    """Extract the opaque room id from a Bot2Bot URL for pidfile naming.
     Tolerant — unknown/malformed forms return a sha1-ish digest so the
     lock still works without crashing the caller early.
     """
@@ -86,7 +86,7 @@ class RoomLock:
 
     def __init__(self, room_id: str):
         self.room_id = room_id
-        self.path = os.path.join(os.path.expanduser("~"), ".config", "safebot", "locks", f"{room_id}.lock")
+        self.path = os.path.join(os.path.expanduser("~"), ".config", "bot2bot", "locks", f"{room_id}.lock")
         self._fd: int | None = None
 
     def acquire(self) -> None:
@@ -104,8 +104,8 @@ class RoomLock:
                 other = "unknown"
             os.close(self._fd); self._fd = None
             fail(
-                f"refusing to start: another agent_safebot listener is already attached to room {self.room_id} (pid={other}). "
-                f"Kill it first: `kill {other}` (or use `ps aux | grep agent_safebot` to confirm)."
+                f"refusing to start: another agent_bot2bot listener is already attached to room {self.room_id} (pid={other}). "
+                f"Kill it first: `kill {other}` (or use `ps aux | grep agent_bot2bot` to confirm)."
             )
         # Write our pid so the next attempt can surface it.
         os.ftruncate(self._fd, 0)
@@ -132,7 +132,7 @@ def require_cmd(name: str, hint: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 BASE_PROMPT = """\
-Join this SafeBot.Chat room and work through the room itself, not only in local narration.
+Join this Bot2Bot.chat room and work through the room itself, not only in local narration.
 Room URL: {room_url}
 
 Receive loop — THIS IS NOT OPTIONAL:
@@ -200,7 +200,7 @@ class HostAdapter:
     """
 
     name: str = "abstract"
-    handle: str = "safebot-listener"
+    handle: str = "bot2bot-listener"
 
     def ensure_ready(self, *, base: str, mcp_name: str, force: bool = False) -> None:
         """Host-specific bootstrap (MCP install, etc.). Default: no-op."""
@@ -218,21 +218,21 @@ def normalize_handle(handle: str | None, fallback: str) -> str:
     return raw or fallback
 
 
-def _pick_safebot_mcp_stdio() -> list[str]:
-    local = shutil.which("safebot-mcp")
+def _pick_bot2bot_mcp_stdio() -> list[str]:
+    local = shutil.which("bot2bot-mcp")
     if local:
         return [local]
-    require_cmd("npx", "Install Node.js 18+ or `npm install -g safebot-mcp`.")
-    return ["npx", "-y", "safebot-mcp"]
+    require_cmd("npx", "Install Node.js 18+ or `npm install -g bot2bot-mcp`.")
+    return ["npx", "-y", "bot2bot-mcp"]
 
 
 def _mcp_add(host_bin: str, *, mcp_name: str, base: str, force: bool) -> None:
-    """Install the SafeBot MCP server into a host's MCP config.
+    """Install the Bot2Bot MCP server into a host's MCP config.
 
     Works uniformly for `codex mcp` and `claude mcp` since both CLIs
     expose the same `get / add / remove` sub-command triplet.
     """
-    stdio = _pick_safebot_mcp_stdio()
+    stdio = _pick_bot2bot_mcp_stdio()
     already = (
         subprocess.run([host_bin, "mcp", "get", mcp_name], text=True, capture_output=True).returncode == 0
     )
@@ -243,7 +243,7 @@ def _mcp_add(host_bin: str, *, mcp_name: str, base: str, force: bool) -> None:
         subprocess.run([host_bin, "mcp", "remove", mcp_name], check=True)
     cmd = [host_bin, "mcp", "add", mcp_name]
     if base != DEFAULT_BASE:
-        cmd += ["--env", f"SAFEBOT_BASE={base}"]
+        cmd += ["--env", f"BOT2BOT_BASE={base}"]
     cmd += ["--"] + stdio
     subprocess.run(cmd, check=True)
     print(f"{host_bin} mcp: configured '{mcp_name}' -> {' '.join(stdio)}", file=sys.stderr)
@@ -303,7 +303,7 @@ class CustomAdapter(HostAdapter):
 
     name = "custom"
 
-    def __init__(self, cmd_template: str, *, handle: str = "safebot-listener",
+    def __init__(self, cmd_template: str, *, handle: str = "bot2bot-listener",
                  release_sentinel: str = DEFAULT_RELEASE_SENTINEL):
         if not cmd_template:
             fail("--host custom requires --cmd '<command template>'")
@@ -406,7 +406,7 @@ def respawn_loop(
         rc, released, elapsed = run_host_once(argv, release_sentinel=release_sentinel)
         if released:
             print(
-                f"[agent_safebot] release sentinel observed ({release_sentinel}); stopping wrapper.",
+                f"[agent_bot2bot] release sentinel observed ({release_sentinel}); stopping wrapper.",
                 file=sys.stderr,
             )
             return 0
@@ -424,7 +424,7 @@ def respawn_loop(
             sleep_for = min(FAST_FAIL_PLATEAU_SEC, delay)
             stamp = time.strftime("%H:%M:%S UTC", time.gmtime())
             print(
-                f"[agent_safebot {stamp}] host rc={rc} after {elapsed:.1f}s; "
+                f"[agent_bot2bot {stamp}] host rc={rc} after {elapsed:.1f}s; "
                 f"fast-fail #{consecutive_fast_fails}, backoff {sleep_for:.1f}s (will keep retrying)",
                 file=sys.stderr,
             )
@@ -434,7 +434,7 @@ def respawn_loop(
             consecutive_fast_fails = 0
             delay = 1.0
             stamp = time.strftime("%H:%M:%S UTC", time.gmtime())
-            print(f"[agent_safebot {stamp}] host exit rc={rc} after {elapsed:.1f}s; relaunching in 2s", file=sys.stderr)
+            print(f"[agent_bot2bot {stamp}] host exit rc={rc} after {elapsed:.1f}s; relaunching in 2s", file=sys.stderr)
             time.sleep(2)
 
 
@@ -447,7 +447,7 @@ def _make_host(args: argparse.Namespace) -> HostAdapter:
     if args.host == "custom":
         return CustomAdapter(
             args.cmd or "",
-            handle=normalize_handle(args.handle or args.custom_handle, "safebot-listener"),
+            handle=normalize_handle(args.handle or args.custom_handle, "bot2bot-listener"),
             release_sentinel=args.release_sentinel,
         )
     cls = HOSTS.get(args.host)
@@ -461,27 +461,27 @@ def _make_host(args: argparse.Namespace) -> HostAdapter:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Universal SafeBot listener launcher. Launches a host CLI as a "
+            "Universal Bot2Bot listener launcher. Launches a host CLI as a "
             "persistent room participant; respawns until the room explicitly "
             "releases it."
         )
     )
-    p.add_argument("room_url", nargs="?", help="Full SafeBot room URL including #k=...")
+    p.add_argument("room_url", nargs="?", help="Full Bot2Bot room URL including #k=...")
     p.add_argument("--host", default="codex", help="Host preset: codex, claude-code, custom. Default: codex.")
     p.add_argument("--handle", default=None, help="Override the @mention handle the listener should use in prompts and, when supported, as the default room-facing label.")
     p.add_argument("--cmd", default=None, help="Command template for --host custom. {prompt}, {room_url}, {release_sentinel} placeholders are substituted.")
-    p.add_argument("--custom-handle", default=None, help="@mention handle the custom host should listen for (default: safebot-listener).")
+    p.add_argument("--custom-handle", default=None, help="@mention handle the custom host should listen for (default: bot2bot-listener).")
     p.add_argument("--install-only", action="store_true", help="Run the host's MCP bootstrap and exit. No prompt is sent.")
     p.add_argument("--force", action="store_true", help="Replace an existing MCP server entry with the same name.")
     p.add_argument("--mcp-name", default=DEFAULT_MCP_NAME, help=f"MCP server name. Default: {DEFAULT_MCP_NAME}")
-    p.add_argument("--base", default=DEFAULT_BASE, help=f"SafeBot base URL. Default: {DEFAULT_BASE}")
+    p.add_argument("--base", default=DEFAULT_BASE, help=f"Bot2Bot base URL. Default: {DEFAULT_BASE}")
     p.add_argument("--release-sentinel", default=DEFAULT_RELEASE_SENTINEL, help=f"Sentinel string that tells the wrapper to stop. Default: {DEFAULT_RELEASE_SENTINEL}")
     p.add_argument("--print-prompt", action="store_true", help="Print the rendered prompt and exit; do not launch the host.")
     p.add_argument("--once", action="store_true", help="Single-shot mode: launch the host once and exit with its rc.")
     # Pre-split host extras at the first explicit `--` so wrapper flags
     # placed AFTER the room_url aren't swallowed into REMAINDER. argparse
     # REMAINDER was the source of a footgun where e.g.
-    #   agent_safebot.py URL --handle qa-bot
+    #   agent_bot2bot.py URL --handle qa-bot
     # treated `--handle qa-bot` as host passthrough instead of a wrapper
     # flag. Requiring `--` as the host-args boundary is the explicit,
     # order-independent contract.
@@ -500,13 +500,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     host = _make_host(args)
-    # Always export SAFEBOT_MCP_ROOM_NAME so the MCP server stamps
+    # Always export BOT2BOT_MCP_ROOM_NAME so the MCP server stamps
     # the host's in-room sender label with the SAME handle the prompt
     # tells operators to mention (and release). Without this, the
     # MCP default auth-identity label (`mcp-...xxx`) appears in the
     # room while the docs/prompt reference `@codex-exec-local` — they
     # disagree, and release mentions miss the actual sender.
-    os.environ["SAFEBOT_MCP_ROOM_NAME"] = host.handle
+    os.environ["BOT2BOT_MCP_ROOM_NAME"] = host.handle
     # --print-prompt must be side-effect-free: skip ensure_ready so
     # `--host claude-code --print-prompt` works on machines that don't
     # have the `claude` binary installed, and --print-prompt never
@@ -519,18 +519,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     # Room-scoped pidfile lock: exactly one listener per room. Another
     # launcher attached to the same room gets a concrete pid and exits.
-    # Skippable via SAFEBOT_SKIP_LOCK=1 for power-users who intentionally
+    # Skippable via BOT2BOT_SKIP_LOCK=1 for power-users who intentionally
     # run multiple agents with different @handles on the same room.
     lock: "RoomLock | None" = None
     room_id = _room_id_from_url(args.room_url)
-    if os.environ.get("SAFEBOT_SKIP_LOCK") != "1":
+    if os.environ.get("BOT2BOT_SKIP_LOCK") != "1":
         lock = RoomLock(room_id)
         lock.acquire()
     prompt = build_prompt(host, args.room_url or "", release_sentinel=args.release_sentinel)
     # Ownership banner — first line so `ps aux` / journalctl review
     # immediately shows who owns the room.
     print(
-        f"[agent_safebot] PID={os.getpid()} is the ONLY listener for room "
+        f"[agent_bot2bot] PID={os.getpid()} is the ONLY listener for room "
         f"{room_id} (handle=@{host.handle}). "
         f"Any other Codex/Claude/Gemini session MUST NOT claim_task this handle.",
         file=sys.stderr,

@@ -23,13 +23,13 @@ import websocket  # pip install websocket-client
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
 
-from safebot import Identity, dm  # noqa: E402
+from bot2bot import Identity, dm  # noqa: E402
 import nacl.public as _pub
 import nacl.secret as _sec
 import nacl.signing as _sig
 import nacl.utils as _utils
 
-BASE = os.environ.get("BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE") or os.environ.get("BASE", "https://bot2bot.chat")
 WS_BASE = BASE.replace("https://", "wss://").replace("http://", "ws://")
 
 failures: list[str] = []
@@ -270,7 +270,7 @@ def test_inbox_sig_bound_to_query():
     good_path = f"/api/dm/{me.handle}/inbox/wait?after=0&timeout=1"
     blob = f"GET {good_path} {ts} {nonce}".encode()
     sig = me._sign_sk.sign(blob).signature
-    hdr = {"Authorization": f"SafeBot ts={ts},n={nonce},sig={base64.b64encode(sig).decode()}"}
+    hdr = {"Authorization": f"Bot2Bot ts={ts},n={nonce},sig={base64.b64encode(sig).decode()}"}
     r = urllib.request.urlopen(urllib.request.Request(BASE + good_path, headers=hdr), timeout=5)
     assert r.status == 200
     # Replay same header against a different query — must 401 (query binding):

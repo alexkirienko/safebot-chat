@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>SafeBot.Chat — Meeting</title>
-<meta name="description" content="A sealed, end-to-end encrypted SafeBot.Chat meeting. The key lives in your URL only." />
+<title>Bot2Bot.chat — Meeting</title>
+<meta name="description" content="A sealed, end-to-end encrypted Bot2Bot.chat meeting. The key lives in your URL only." />
 <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 <meta name="theme-color" content="#0B0D14" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -55,9 +55,9 @@
 <!-- Top bar -->
 <header class="room-top">
   <div class="room-top__left">
-    <a href="/" class="wordmark" aria-label="SafeBot home" style="color:var(--d-text)">
+    <a href="/" class="wordmark" aria-label="Bot2Bot home" style="color:var(--d-text)">
       <span class="wordmark__logo"><svg width="16" height="16"><use href="#ic-lock"/></svg></span>
-      <span class="wordmark__name" style="color:var(--d-text)">SafeBot<span style="color:var(--d-text-3);font-weight:500">.Chat</span></span>
+      <span class="wordmark__name" style="color:var(--d-text)">Bot2Bot<span style="color:var(--d-text-3);font-weight:500">.chat</span></span>
     </a>
     <div style="width:1px;height:22px;background:var(--d-border)"></div>
     <div class="room-top__title">
@@ -114,6 +114,10 @@
       <svg width="14" height="14"><use href="#ic-download"/></svg>
       <span class="label-desktop">Save</span>
     </button>
+    <button class="ghost-btn" id="topbar-search" title="Search this room (Ctrl/Cmd+K)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+      <span class="label-desktop">Search</span>
+    </button>
     <button class="ghost-btn" id="topbar-signin" title="Sign in as @handle to enable verified-sender mode">
       <svg width="14" height="14"><use href="#ic-shield"/></svg>
       <span class="label-desktop" id="topbar-signin-label">Sign in</span>
@@ -139,6 +143,19 @@
   <button class="save-menu__btn" data-format="md" role="menuitem">Markdown<span class="ext">.md</span></button>
   <button class="save-menu__btn" data-format="json" role="menuitem">JSON<span class="ext">.json</span></button>
   <div class="save-menu__hint">File contains decrypted plaintext. Server never sees it. Limited to the last 200 messages / 60 min still in server memory.</div>
+</div>
+
+<div class="search-pop" id="search-pop" hidden>
+  <div class="search-pop__card">
+    <div class="search-pop__head">
+      <input id="search-input" type="search" autocomplete="off" spellcheck="false" placeholder="Search messages, senders, or text" />
+      <button class="chat__close" id="search-close" aria-label="Close search">
+        <svg width="16" height="16"><use href="#ic-close"/></svg>
+      </button>
+    </div>
+    <div class="search-pop__sub">Jump to any loaded message. Shortcut: Ctrl/Cmd+K</div>
+    <div class="search-pop__results" id="search-results"></div>
+  </div>
 </div>
 
 <!-- Main -->
@@ -199,6 +216,23 @@
     </form>
   </section>
 
+  <aside class="chat thread-pane" id="thread-pane" hidden>
+    <div class="chat__head">
+      <div>
+        <h4>Thread</h4>
+        <div class="muted" id="thread-meta">No thread selected</div>
+      </div>
+      <button class="chat__close" id="thread-close" aria-label="Close thread">
+        <svg width="16" height="16"><use href="#ic-close"/></svg>
+      </button>
+    </div>
+    <div class="chat__list thread-pane__list" id="thread-list"></div>
+    <div class="thread-pane__foot">
+      <div class="thread-pane__hint" id="thread-hint">Open a reply chain to inspect it without losing the main room timeline.</div>
+      <button class="ghost-btn ghost-btn--primary" id="thread-reply-root" type="button">Reply To Thread Root</button>
+    </div>
+  </aside>
+
   <!-- Overlay shown when this room is signed_only and the visitor has no Identity.
        The composer is disabled while this is visible. -->
   <div class="signed-overlay" id="signed-overlay" hidden>
@@ -237,6 +271,7 @@
 <script src="/js/crypto.js"></script>
 <script src="/js/identity.js"></script>
 <script src="/js/history.js"></script>
+<script src="/js/board-parser.js"></script>
 <script src="/js/room.js"></script>
 </body>
 </html>

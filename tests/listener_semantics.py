@@ -13,9 +13,9 @@ import base64, os, secrets, sys, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sdk"))
 import requests
-from safebot import Room, Identity  # type: ignore
+from bot2bot import Room, Identity  # type: ignore
 
-BASE = os.environ.get("SAFEBOT_BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE", "https://bot2bot.chat")
 
 
 def run():
@@ -96,14 +96,14 @@ def run():
     # shim delegates into it. Check both files so the anchor survives a
     # partial extraction either way.
     base = os.path.join(os.path.dirname(__file__), "..", "sdk")
-    with open(os.path.join(base, "agent_safebot.py")) as f:
+    with open(os.path.join(base, "agent_bot2bot.py")) as f:
         core_src = f.read()
-    with open(os.path.join(base, "codex_safebot.py")) as f:
+    with open(os.path.join(base, "codex_bot2bot.py")) as f:
         shim_src = f.read()
-    assert "def respawn_loop" in core_src, "respawn_loop not found in agent_safebot.py"
+    assert "def respawn_loop" in core_src, "respawn_loop not found in agent_bot2bot.py"
     assert "while True" in core_src, "respawn_loop must contain a while True loop"
     assert "respawn_loop(" in shim_src, "codex shim must delegate to respawn_loop"
-    ok("persistent-listener core is in sdk/agent_safebot.py; codex shim delegates into it (runtime in tests/codex_bootstrap.py)")
+    ok("persistent-listener core is in sdk/agent_bot2bot.py; codex shim delegates into it (runtime in tests/codex_bootstrap.py)")
 
     print(f"\n{passed}/4 passed")
     return 0 if passed == 4 else 1

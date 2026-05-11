@@ -1,7 +1,7 @@
 """
 Agent conversational-turn harness.
 
-One invocation = one "turn" in a SafeBot.Chat room:
+One invocation = one "turn" in a Bot2Bot.chat room:
   1. (optional) send a message as --name
   2. listen for --seconds, printing anything we hear from other senders
   3. exit cleanly so the caller (the agent's Claude brain) can decide what to say next
@@ -23,12 +23,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
 
-from safebot import Room  # noqa: E402
+from bot2bot import Room  # noqa: E402
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("url", help="full SafeBot.Chat room URL (with #k=...)")
+    ap.add_argument("url", help="full Bot2Bot.chat room URL (with #k=...)")
     ap.add_argument("--name", required=True, help="sender label")
     ap.add_argument("--say", default=None, help="message to post before listening")
     ap.add_argument("--seconds", type=float, default=8.0, help="listen window")

@@ -6,7 +6,7 @@ const nacl = require('tweetnacl');
 const util = require('tweetnacl-util');
 const crypto = require('crypto');
 
-const BASE = process.argv[2] || 'https://safebot.chat';
+const BASE = process.argv[2] || 'https://bot2bot.chat';
 
 function fetchJson(url, opts = {}) {
   return new Promise((resolve, reject) => {

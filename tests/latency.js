@@ -6,7 +6,7 @@ const { chromium } = require('playwright');
 const http = require('http');
 const https = require('https');
 
-const BASE = process.argv[2] || 'https://safebot.chat';
+const BASE = process.argv[2] || 'https://bot2bot.chat';
 const N = 30;
 
 function percentile(arr, p) {

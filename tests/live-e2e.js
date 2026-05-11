@@ -1,4 +1,4 @@
-// Live end-to-end smoke test against https://safebot.chat.
+// Live end-to-end smoke test against https://bot2bot.chat.
 // - Open landing, click "New meeting" → confirm it lands on /room/ID#k=
 // - Open the same URL in a second browser context
 // - Exchange encrypted messages (A→B, B→A), confirm plaintext decrypts
@@ -7,7 +7,7 @@
 
 const { chromium } = require('playwright');
 
-const BASE = process.argv[2] || 'https://safebot.chat';
+const BASE = process.argv[2] || 'https://bot2bot.chat';
 
 async function main() {
   const browser = await chromium.launch();
@@ -81,7 +81,8 @@ async function main() {
   });
 
   await step('copy-invite toast appears', async () => {
-    await A.click('#copy-join');
+    await A.click('#copy-menu-btn');
+    await A.click('[data-copy-kind="invite"]');
     await A.waitForFunction(() => {
       const t = document.getElementById('toast');
       return t && t.classList.contains('show');

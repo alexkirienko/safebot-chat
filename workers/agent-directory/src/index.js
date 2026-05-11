@@ -7,10 +7,21 @@ const TAG_MAX = 40;
 const TAGS_MAX = 32;
 const PROFILE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SIG_SKEW_MS = 5 * 60 * 1000;
+const AUTH_SIG_SKEW_MS = 60 * 1000;
 const HANDLE_RE = /^[a-z0-9][a-z0-9_-]{1,31}$/;
 const FRAMEWORK_RE = /^[a-z0-9][a-z0-9_-]{1,31}$/;
+const AUTH_REPLAY_MAX = 10_000;
+const AUTH_REPLAY_PER_HANDLE_MAX = 256;
 
 const textEncoder = new TextEncoder();
+const authReplaySeen = new Map(); // handle -> Map<nonce, ts>
+let authReplaySeenSize = 0;
+
+// Best-effort token buckets for Cloudflare Worker isolates. This state is
+// intentionally in-process only: Cloudflare may run multiple isolates, so this
+// limits bursts per warm instance and reduces expensive DB/signature work, but
+// it is not a durable globally-shared quota.
+const rateBuckets = new Map(); // `${ip}|${scope}` -> { tokens, last }
 
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
@@ -41,12 +52,78 @@ function nowMs() {
   return Date.now();
 }
 
-function b64ToBytes(value) {
-  if (typeof value !== 'string' || !value) throw new Error('bad base64');
+function bytesToB64(bytes) {
+  let raw = '';
+  for (let i = 0; i < bytes.length; i += 1) raw += String.fromCharCode(bytes[i]);
+  return btoa(raw);
+}
+
+function isCanonicalBase64(value, expectedBytes) {
+  if (typeof value !== 'string' || value.length === 0) return false;
+  if (!/^[A-Za-z0-9+/_-]*={0,2}$/.test(value)) return false;
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  if (normalized.length % 4 !== 0) return false;
+  let raw;
+  try { raw = atob(normalized); } catch (_) { return false; }
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) out[i] = raw.charCodeAt(i);
+  if (expectedBytes !== undefined && out.length !== expectedBytes) return false;
+  return bytesToB64(out) === normalized;
+}
+
+function b64ToBytes(value, expectedBytes) {
+  if (!isCanonicalBase64(value, expectedBytes)) throw new Error('bad base64');
   const raw = atob(value.replace(/-/g, '+').replace(/_/g, '/'));
   const out = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i += 1) out[i] = raw.charCodeAt(i);
   return out;
+}
+
+function numberEnv(env, key, fallback) {
+  const n = Number(env && env[key]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function clientIp(request) {
+  const cfIp = request.headers.get('cf-connecting-ip');
+  if (cfIp) return cfIp;
+  const xff = request.headers.get('x-forwarded-for');
+  if (xff) return xff.split(',')[0].trim();
+  return 'unknown';
+}
+
+function rateLimitPolicy(env, kind) {
+  if (kind === 'search') {
+    return {
+      cap: numberEnv(env, 'AGENT_DIRECTORY_SEARCH_RL_CAP', 120),
+      refill: numberEnv(env, 'AGENT_DIRECTORY_SEARCH_RL_REFILL_PER_SEC', 30),
+    };
+  }
+  return {
+    cap: numberEnv(env, 'AGENT_DIRECTORY_MUTATE_RL_CAP', 60),
+    refill: numberEnv(env, 'AGENT_DIRECTORY_MUTATE_RL_REFILL_PER_SEC', 10),
+  };
+}
+
+function rateLimitOk(request, env, scope, kind = 'mutate') {
+  const { cap, refill } = rateLimitPolicy(env, kind);
+  const key = `${clientIp(request)}|${scope}`;
+  const now = nowMs();
+  let bucket = rateBuckets.get(key);
+  if (!bucket) {
+    bucket = { tokens: cap, last: now };
+    rateBuckets.set(key, bucket);
+  }
+  const elapsed = Math.max(0, (now - bucket.last) / 1000);
+  bucket.tokens = Math.min(cap, bucket.tokens + elapsed * refill);
+  bucket.last = now;
+  if (bucket.tokens < 1) return false;
+  bucket.tokens -= 1;
+  return true;
+}
+
+function rateLimited() {
+  return json({ error: 'rate limited' }, 429, { 'retry-after': '5' });
 }
 
 function normalizeHandle(value) {
@@ -93,10 +170,13 @@ async function profileSigningText(profile) {
 }
 
 function verifySignature(text, sigB64, signPubB64) {
-  const sig = b64ToBytes(sigB64);
-  const pk = b64ToBytes(signPubB64);
-  if (sig.length !== 64 || pk.length !== 32) return false;
-  return nacl.sign.detached.verify(textEncoder.encode(text), sig, pk);
+  try {
+    const sig = b64ToBytes(sigB64, 64);
+    const pk = b64ToBytes(signPubB64, 32);
+    return nacl.sign.detached.verify(textEncoder.encode(text), sig, pk);
+  } catch (_) {
+    return false;
+  }
 }
 
 function rejectPrivateData(profile) {
@@ -185,6 +265,9 @@ async function fetchIdentity(env, handle) {
   if (!data || data.handle !== handle || !data.box_pub || !data.sign_pub) {
     throw new Error('identity response mismatch');
   }
+  if (!isCanonicalBase64(data.box_pub, 32) || !isCanonicalBase64(data.sign_pub, 32)) {
+    throw new Error('identity response has non-canonical keys');
+  }
   return data;
 }
 
@@ -192,6 +275,9 @@ async function upsertProfile(request, env, handle) {
   let body;
   try { body = await request.json(); } catch (_) { return json({ error: 'invalid json' }, 400); }
   if (!body || typeof body.profile_sig !== 'string') return json({ error: 'profile and profile_sig required' }, 400);
+  if (!isCanonicalBase64(body.profile_sig, 64)) {
+    return json({ error: 'profile_sig must be strict canonical base64 of 64 bytes' }, 400);
+  }
   let profile;
   try { profile = cleanProfile(body.profile, handle); } catch (e) { return json({ error: e.message }, 400); }
   const identity = await fetchIdentity(env, handle).catch(async (e) => {
@@ -250,7 +336,7 @@ async function upsertProfile(request, env, handle) {
 
 function authHeaderParts(request) {
   const raw = request.headers.get('authorization') || '';
-  if (!raw.toLowerCase().startsWith('safebot ')) return null;
+  if (!raw.toLowerCase().startsWith('bot2bot ')) return null;
   const out = {};
   for (const part of raw.slice(8).split(',')) {
     const [k, ...rest] = part.trim().split('=');
@@ -259,20 +345,72 @@ function authHeaderParts(request) {
   return out.ts && out.n && out.sig ? out : null;
 }
 
-async function verifySafeBotAuth(request, env, handle) {
+async function verifyBot2BotAuth(request, env, handle) {
   const parts = authHeaderParts(request);
   if (!parts) return false;
   const ts = Number(parts.ts);
-  if (!Number.isFinite(ts) || Math.abs(nowMs() - ts) > 60_000) return false;
+  if (!Number.isFinite(ts) || Math.abs(nowMs() - ts) > AUTH_SIG_SKEW_MS) return false;
+  const nonce = String(parts.n || '');
+  if (nonce.length < 16 || nonce.length > 64) return false;
+  if (!/^[A-Za-z0-9+/=_-]+$/.test(nonce)) return false;
+  if (!isCanonicalBase64(parts.sig, 64)) return false;
+  const existing = authReplaySeen.get(handle);
+  if (existing && existing.has(nonce)) return false;
   const identity = await fetchIdentity(env, handle);
   const url = new URL(request.url);
   const pathWithQuery = url.pathname + url.search;
-  const text = `${request.method.toUpperCase()} ${pathWithQuery} ${Math.trunc(ts)} ${parts.n}`;
-  return verifySignature(text, parts.sig, identity.sign_pub);
+  const text = `${request.method.toUpperCase()} ${pathWithQuery} ${Math.trunc(ts)} ${nonce}`;
+  if (!verifySignature(text, parts.sig, identity.sign_pub)) return false;
+  rememberAuthNonce(handle, nonce);
+  return true;
+}
+
+function pruneAuthReplay() {
+  const cutoff = nowMs() - AUTH_SIG_SKEW_MS * 2;
+  for (const [handle, inner] of authReplaySeen) {
+    for (const [nonce, ts] of inner) {
+      if (ts < cutoff) {
+        inner.delete(nonce);
+        authReplaySeenSize -= 1;
+      }
+    }
+    if (inner.size === 0) authReplaySeen.delete(handle);
+  }
+}
+
+function rememberAuthNonce(handle, nonce) {
+  pruneAuthReplay();
+  let inner = authReplaySeen.get(handle);
+  if (!inner) {
+    inner = new Map();
+    authReplaySeen.set(handle, inner);
+  }
+  if (inner.size >= AUTH_REPLAY_PER_HANDLE_MAX) {
+    const oldest = inner.keys().next().value;
+    if (oldest !== undefined) {
+      inner.delete(oldest);
+      authReplaySeenSize -= 1;
+    }
+  }
+  while (authReplaySeenSize >= AUTH_REPLAY_MAX) {
+    const firstHandle = authReplaySeen.keys().next().value;
+    if (firstHandle === undefined) break;
+    const firstInner = authReplaySeen.get(firstHandle);
+    const firstNonce = firstInner && firstInner.keys().next().value;
+    if (firstNonce === undefined) {
+      authReplaySeen.delete(firstHandle);
+      continue;
+    }
+    firstInner.delete(firstNonce);
+    authReplaySeenSize -= 1;
+    if (firstInner.size === 0) authReplaySeen.delete(firstHandle);
+  }
+  inner.set(nonce, nowMs());
+  authReplaySeenSize += 1;
 }
 
 async function deleteProfile(request, env, handle) {
-  if (!(await verifySafeBotAuth(request, env, handle))) return json({ error: 'bad or missing signature' }, 401);
+  if (!(await verifyBot2BotAuth(request, env, handle))) return json({ error: 'bad or missing signature' }, 401);
   await env.DB.batch([
     env.DB.prepare('DELETE FROM agent_profiles WHERE handle = ?').bind(handle),
     env.DB.prepare('DELETE FROM agent_tags WHERE handle = ?').bind(handle),
@@ -282,7 +420,7 @@ async function deleteProfile(request, env, handle) {
 }
 
 async function heartbeatProfile(request, env, handle) {
-  if (!(await verifySafeBotAuth(request, env, handle))) return json({ error: 'bad or missing signature' }, 401);
+  if (!(await verifyBot2BotAuth(request, env, handle))) return json({ error: 'bad or missing signature' }, 401);
   const expires = nowMs() + PROFILE_TTL_MS;
   const result = await env.DB.prepare('UPDATE agent_profiles SET last_seen_at = ?, expires_at = ? WHERE handle = ?')
     .bind(nowMs(), expires, handle)
@@ -377,18 +515,39 @@ async function route(request, env) {
   if (request.method === 'OPTIONS') return new Response('', { status: 204, headers: corsHeaders() });
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
-  if (request.method === 'GET' && (path === '/agents.json' || path === '/.well-known/bot2bot-agents')) return agentsJson(env);
-  if (path === '/api/agents' && request.method === 'GET') return listAgents(env, url);
-  if (path === '/api/agents/matches' && request.method === 'GET') return matchAgents(env, url);
+  if (request.method === 'GET' && (path === '/agents.json' || path === '/.well-known/bot2bot-agents')) {
+    if (!rateLimitOk(request, env, 'agents:search', 'search')) return rateLimited();
+    return agentsJson(env);
+  }
+  if (path === '/api/agents' && request.method === 'GET') {
+    if (!rateLimitOk(request, env, 'agents:search', 'search')) return rateLimited();
+    return listAgents(env, url);
+  }
+  if (path === '/api/agents/matches' && request.method === 'GET') {
+    if (!rateLimitOk(request, env, 'agents:matches', 'search')) return rateLimited();
+    return matchAgents(env, url);
+  }
   const m = /^\/api\/agents\/([^/]+)(?:\/(profile|heartbeat))?$/.exec(path);
   if (!m) return notFound();
   const handle = normalizeHandle(m[1]);
   if (!HANDLE_RE.test(handle)) return json({ error: 'invalid handle' }, 400);
   const suffix = m[2] || '';
-  if (!suffix && request.method === 'GET') return getAgent(env, handle);
-  if (suffix === 'profile' && request.method === 'PUT') return upsertProfile(request, env, handle);
-  if (suffix === 'profile' && request.method === 'DELETE') return deleteProfile(request, env, handle);
-  if (suffix === 'heartbeat' && request.method === 'POST') return heartbeatProfile(request, env, handle);
+  if (!suffix && request.method === 'GET') {
+    if (!rateLimitOk(request, env, 'agents:search', 'search')) return rateLimited();
+    return getAgent(env, handle);
+  }
+  if (suffix === 'profile' && request.method === 'PUT') {
+    if (!rateLimitOk(request, env, `agents:${handle}:profile`, 'mutate')) return rateLimited();
+    return upsertProfile(request, env, handle);
+  }
+  if (suffix === 'profile' && request.method === 'DELETE') {
+    if (!rateLimitOk(request, env, `agents:${handle}:profile-delete`, 'mutate')) return rateLimited();
+    return deleteProfile(request, env, handle);
+  }
+  if (suffix === 'heartbeat' && request.method === 'POST') {
+    if (!rateLimitOk(request, env, `agents:${handle}:heartbeat`, 'mutate')) return rateLimited();
+    return heartbeatProfile(request, env, handle);
+  }
   return notFound();
 }
 
@@ -398,6 +557,16 @@ export const internals = {
   cleanProfile,
   normalizeTagList,
   ftsQuery,
+  isCanonicalBase64,
+  b64ToBytes,
+  verifySignature,
+  verifyBot2BotAuth,
+  rateLimitOk,
+  resetForTests() {
+    authReplaySeen.clear();
+    authReplaySeenSize = 0;
+    rateBuckets.clear();
+  },
 };
 
 export default {

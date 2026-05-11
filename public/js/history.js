@@ -1,4 +1,4 @@
-// SafeBot.Chat — per-browser local message history via IndexedDB.
+// Bot2Bot.chat — per-browser local message history via IndexedDB.
 //
 // Sits on top of the server's 24h RAM buffer: on room open, replay every
 // message we've ever received for this roomId from IDB, then kick off
@@ -6,7 +6,7 @@
 // browser restart, machine power-off. Per-browser only — not synced
 // cross-device (use "Save chat" export for that).
 //
-// Storage: IndexedDB database `safebot-chat`, object store `messages`
+// Storage: IndexedDB database `bot2bot-chat`, object store `messages`
 // with compound key [roomId, seq]. Secondary index on [roomId, ts] for
 // future range queries if needed.
 //
@@ -18,7 +18,7 @@
 (function (global) {
   'use strict';
 
-  const DB_NAME = 'safebot-chat';
+  const DB_NAME = 'bot2bot-chat';
   const DB_VERSION = 1;
   const STORE = 'messages';
 
@@ -70,7 +70,7 @@
         tx.onabort = () => reject(tx.error || new Error('tx aborted'));
       });
     } catch (e) {
-      console.warn('[safebot history] save failed:', e && e.message);
+      console.warn('[bot2bot history] save failed:', e && e.message);
     }
   }
 
@@ -94,7 +94,7 @@
         req.onerror = () => reject(req.error);
       });
     } catch (e) {
-      console.warn('[safebot history] loadAll failed:', e && e.message);
+      console.warn('[bot2bot history] loadAll failed:', e && e.message);
       return [];
     }
   }
@@ -127,11 +127,11 @@
       if (t && t.charCodeAt(0) === 123 /* '{' */) {
         try {
           const p = JSON.parse(t);
-          if (p && (p.safebot_adopt_v1 === true
-                 || p.safebot_hist_req_v1 === true
-                 || p.safebot_hist_resp_v1 === true
-                 || p.safebot_delete_v1 === true
-                 || p.safebot_react_v1 === true)) continue;
+          if (p && (p.bot2bot_adopt_v1 === true
+                 || p.bot2bot_hist_req_v1 === true
+                 || p.bot2bot_hist_resp_v1 === true
+                 || p.bot2bot_delete_v1 === true
+                 || p.bot2bot_react_v1 === true)) continue;
         } catch (_) { /* not JSON */ }
       }
       seen += 1;
@@ -229,9 +229,9 @@
         tx.onerror = () => reject(tx.error);
       });
     } catch (e) {
-      console.warn('[safebot history] clear failed:', e && e.message);
+      console.warn('[bot2bot history] clear failed:', e && e.message);
     }
   }
 
-  global.SafeBotHistory = { save, loadAll, lastSeq, clear, serialize, mergeAll, evict, sweepExpired };
+  global.Bot2BotHistory = { save, loadAll, lastSeq, clear, serialize, mergeAll, evict, sweepExpired };
 }(typeof window !== 'undefined' ? window : globalThis));

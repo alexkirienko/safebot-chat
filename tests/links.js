@@ -1,11 +1,11 @@
-// Link auditor — crawls SafeBot.Chat pages, extracts every href/src,
+// Link auditor — crawls Bot2Bot.chat pages, extracts every href/src,
 // and verifies each reaches its target. Runs against the live site.
 //
-// Usage: node tests/links.js [base-url]   (default: https://safebot.chat)
+// Usage: node tests/links.js [base-url]   (default: https://bot2bot.chat)
 
 const { chromium } = require('playwright');
 
-const BASE = process.argv[2] || 'https://safebot.chat';
+const BASE = process.argv[2] || 'https://bot2bot.chat';
 const INTERNAL_HOSTS = new Set([new URL(BASE).host]);
 const SKIP_EXTERNAL_HOSTS = new Set(['github.com']); // respond with 403/429 to HEAD sometimes
 const TIMEOUT_MS = 10000;

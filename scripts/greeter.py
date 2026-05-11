@@ -1,5 +1,5 @@
 """
-SafeBot.Chat greeter — a regular E2E client that holds @safebot's keys and
+Bot2Bot.chat greeter — a regular E2E client that holds @bot2bot's keys and
 auto-replies. This is NOT part of the relay server process and does not
 share memory with it; from the relay's perspective it's just another HTTP
 client. The operator may run it on the same VPS as the relay (as we do)
@@ -10,14 +10,14 @@ unaffected either way. Root on the VPS compromises both regardless.
 
   1. Keeps the persistent demo room alive (stays subscribed via the SDK's
      auto-reconnecting SSE stream) and echoes visitor messages.
-  2. Replies to DMs sent to @safebot (or whatever handle is configured),
+  2. Replies to DMs sent to @bot2bot (or whatever handle is configured),
      and acks each one so the inbox doesn't fill up.
 
-Run under systemd as `safebot-greeter.service`. State lives in
-/etc/safebot/greeter/:
+Run under systemd as `bot2bot-greeter.service`. State lives in
+/etc/bot2bot/greeter/:
 
   identity.key   — 96-byte serialised Identity (box_sk + sign_sk + handle)
-  demo_room.url  — full SafeBot.Chat room URL with #k= fragment
+  demo_room.url  — full Bot2Bot.chat room URL with #k= fragment
 
 Both files are created by `scripts/provision_greeter.py` on first run.
 """
@@ -32,10 +32,10 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
 
-from safebot import Room, Identity, dm  # noqa: E402
+from bot2bot import Room, Identity, dm  # noqa: E402
 
-CONFIG_DIR = os.environ.get("SAFEBOT_GREETER_DIR", "/etc/safebot/greeter")
-BASE_URL = os.environ.get("SAFEBOT_BASE", "https://safebot.chat")
+CONFIG_DIR = os.environ.get("BOT2BOT_GREETER_DIR", "/etc/bot2bot/greeter")
+BASE_URL = os.environ.get("BOT2BOT_BASE", "https://bot2bot.chat")
 
 
 def log(*args):
@@ -52,12 +52,12 @@ def room_loop():
     except FileNotFoundError:
         log("no demo_room.url; skipping room greeter")
         return
-    room = Room(room_url, name="safebot")
+    room = Room(room_url, name="bot2bot")
     log(f"demo room greeter online: {room_url}")
     room.send(
-        "Hi, I'm @safebot. This is the persistent demo room. "
+        "Hi, I'm @bot2bot. This is the persistent demo room. "
         "Say anything and I'll echo it back. "
-        "Full docs: https://safebot.chat/docs"
+        "Full docs: https://bot2bot.chat/docs"
     )
     try:
         for msg in room.stream(include_self=False, auto_reconnect=True):
@@ -69,7 +69,7 @@ def room_loop():
             if msg.sender == room.name:
                 continue
             try:
-                room.send(f"Echo from @safebot · heard {msg.sender}: {text[:400]}")
+                room.send(f"Echo from @bot2bot · heard {msg.sender}: {text[:400]}")
             except Exception as e:  # noqa: BLE001
                 log(f"room reply error: {e}")
     except Exception as e:  # noqa: BLE001
@@ -103,7 +103,7 @@ def dm_loop(identity: Identity):
                     f"Hi @{env.from_handle}, this is @{identity.handle}. "
                     f"I received your message ({len(env.text or '')} chars). "
                     f"This is an automated greeter — "
-                    f"docs: https://safebot.chat/docs · source: https://github.com/alexkirienko/safebot-chat",
+                    f"docs: https://bot2bot.chat/docs · source: https://github.com/alexkirienko/bot2bot-chat",
                 )
             elif env.from_handle and not env.from_verified:
                 log(f"skipping reply to unverified from_handle={env.from_handle!r}")

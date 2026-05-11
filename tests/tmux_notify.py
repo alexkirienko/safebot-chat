@@ -55,11 +55,11 @@ FAKE_MSGS = [
 
 
 def _build_fake_room_module(tmpdir: Path) -> Path:
-    """Create a minimal safebot.py shim that replaces Room.stream() with
+    """Create a minimal bot2bot.py shim that replaces Room.stream() with
     a canned iterator of FAKE_MSGS. We copy the real module and append
     an override — less fragile than monkey-patching inside tmux_notify.
     """
-    fake = tmpdir / "safebot.py"
+    fake = tmpdir / "bot2bot.py"
     fake.write_text(textwrap.dedent("""
         class _M:
             def __init__(self, d):
@@ -100,9 +100,9 @@ def run_with_fake_tmux(test_dir: Path, argv: list[str], extra_env: dict) -> tupl
     env["TMUX_LOG"] = str(log)
     env.update(extra_env)
     # Copy tmux_notify.py into a staging dir alongside the fake
-    # safebot.py. Running the script from that dir makes sys.path[0]
+    # bot2bot.py. Running the script from that dir makes sys.path[0]
     # (= script dir) contain the fake module, which is the only way to
-    # reliably shadow the real sdk/safebot.py whose import path would
+    # reliably shadow the real sdk/bot2bot.py whose import path would
     # otherwise dominate — Python inserts the script's dir at path[0]
     # before PYTHONPATH is consulted.
     staging = test_dir / "staging"
@@ -124,7 +124,7 @@ def case_only_direct_mentions() -> None:
         rc, _out, err, calls = run_with_fake_tmux(
             Path(td),
             ["--pane", "codex:0.0", "--mention", "@alex",
-             "https://safebot.chat/room/FAKE#k=" + "a" * 43],
+             "https://bot2bot.chat/room/FAKE#k=" + "a" * 43],
             {"FAKE_STREAM_JSON": json.dumps(FAKE_MSGS)},
         )
         assert rc == 0, (rc, err)
@@ -148,7 +148,7 @@ def case_literal_mode_and_enter_commit() -> None:
         rc, _out, err, calls = run_with_fake_tmux(
             Path(td),
             ["--pane", "codex:0.0", "--mention", "@alex",
-             "https://safebot.chat/room/FAKE#k=" + "a" * 43],
+             "https://bot2bot.chat/room/FAKE#k=" + "a" * 43],
             {"FAKE_STREAM_JSON": json.dumps(FAKE_MSGS)},
         )
         assert rc == 0, (rc, err)
@@ -161,7 +161,7 @@ def case_literal_mode_and_enter_commit() -> None:
                 assert idx + 1 < len(c), f"no payload after -l: {c!r}"
                 payload = c[idx + 1]
                 # Payload is a single argv element — shell-specials stay intact.
-                assert "[SafeBot inbox]" in payload
+                assert "[Bot2Bot inbox]" in payload
         # Enter is a SEPARATE send-keys call (i.e. not inside the literal
         # block), so tmux actually commits the line.
         enter_calls = [c for c in calls if c[-1] == "Enter"]
@@ -179,7 +179,7 @@ def case_never_interrupts_never_ctrl_c() -> None:
         rc, _out, err, calls = run_with_fake_tmux(
             Path(td),
             ["--pane", "codex:0.0", "--mention", "@alex",
-             "https://safebot.chat/room/FAKE#k=" + "a" * 43],
+             "https://bot2bot.chat/room/FAKE#k=" + "a" * 43],
             {"FAKE_STREAM_JSON": json.dumps(FAKE_MSGS)},
         )
         assert rc == 0, (rc, err)
@@ -201,7 +201,7 @@ def case_refuses_current_tmux_pane_without_explicit_opt_in() -> None:
         rc, _out, err, calls = run_with_fake_tmux(
             Path(td),
             ["--mention", "@alex",
-             "https://safebot.chat/room/FAKE#k=" + "a" * 43],
+             "https://bot2bot.chat/room/FAKE#k=" + "a" * 43],
             {
                 "FAKE_STREAM_JSON": json.dumps(FAKE_MSGS),
                 "TMUX_PANE": "%77",
@@ -219,7 +219,7 @@ def case_uses_current_tmux_pane_with_explicit_opt_in() -> None:
         rc, _out, err, calls = run_with_fake_tmux(
             Path(td),
             ["--allow-current-pane", "--mention", "@alex",
-             "https://safebot.chat/room/FAKE#k=" + "a" * 43],
+             "https://bot2bot.chat/room/FAKE#k=" + "a" * 43],
             {
                 "FAKE_STREAM_JSON": json.dumps(FAKE_MSGS),
                 "TMUX_PANE": "%77",
@@ -237,7 +237,7 @@ def case_from_now_skips_buffer_replay_by_default() -> None:
         rc, _out, err, calls = run_with_fake_tmux(
             Path(td),
             ["--pane", "codex:0.0", "--mention", "@alex",
-             "https://safebot.chat/room/FAKE#k=" + "a" * 43],
+             "https://bot2bot.chat/room/FAKE#k=" + "a" * 43],
             {
                 "FAKE_STREAM_JSON": json.dumps(FAKE_MSGS),
                 "FAKE_STATUS_LAST_SEQ": "4",

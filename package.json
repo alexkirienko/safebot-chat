@@ -1,8 +1,8 @@
 {
-  "name": "safebot-chat",
+  "name": "bot2bot-chat",
   "version": "1.0.0",
   "private": true,
-  "description": "SafeBot.Chat — end-to-end encrypted, zero-chat-log multi-agent chat rooms.",
+  "description": "Bot2Bot.chat — end-to-end encrypted, zero-chat-log multi-agent chat rooms.",
   "main": "server/index.js",
   "type": "commonjs",
   "scripts": {
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "express": "^4.21.1",
+    "jsvectormap": "^1.7.0",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1",
     "ws": "^8.18.0"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Experimental: hard-push SafeBot room messages into a tmux pane.
+"""Experimental: hard-push Bot2Bot room messages into a tmux pane.
 
-Standalone helper, NOT part of the agent_safebot.py launcher path. The
+Standalone helper, NOT part of the agent_bot2bot.py launcher path. The
 core launcher stays clean; this is an opt-in operational tool for the
 specific case of "I'm running Codex in a tmux pane and want room
 mentions to surface as operator input without me pulling the inbox."
@@ -11,7 +11,7 @@ Usage:
     python3 sdk/tmux_notify.py \\
         --pane codex:0.0 \\
         --mention @alex \\
-        'https://safebot.chat/room/<ID>#k=<KEY>'
+        'https://bot2bot.chat/room/<ID>#k=<KEY>'
 
 If you intentionally want to target the CURRENT tmux pane, pass
 `--allow-current-pane`. This is dangerous because it injects text into
@@ -108,7 +108,7 @@ def run_notifier(
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.append(here)
-    from safebot import Room  # noqa: E402
+    from bot2bot import Room  # noqa: E402
 
     regex = _mention_regex(mention)
     # Use a distinctive default name so agents see the notifier itself
@@ -134,7 +134,7 @@ def run_notifier(
                 continue
             if not regex.search(text):
                 continue
-            payload = f"[SafeBot inbox] {msg.sender}: {text}"
+            payload = f"[Bot2Bot inbox] {msg.sender}: {text}"
             ts = time.strftime("%H:%M:%S", time.localtime())
             print(f"[tmux_notify {ts}] push to {pane}: {payload[:120]}", file=sys.stderr)
             _send_to_pane(tmux_bin, pane, payload)
@@ -146,12 +146,12 @@ def run_notifier(
 def parse_args(argv: list[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "EXPERIMENTAL: forward @mention matches from a SafeBot room into "
+            "EXPERIMENTAL: forward @mention matches from a Bot2Bot room into "
             "a tmux pane via `tmux send-keys -l`. Opt-in only; not wired into "
-            "the main agent_safebot.py launcher."
+            "the main agent_bot2bot.py launcher."
         )
     )
-    p.add_argument("room_url", help="Full SafeBot room URL including #k=...")
+    p.add_argument("room_url", help="Full Bot2Bot room URL including #k=...")
     p.add_argument("--pane", default=None, help="tmux target-pane identifier (e.g. codex:0.0, mysession:1.2, or %% pane-id).")
     p.add_argument("--allow-current-pane", action="store_true", help="Allow targeting the current tmux pane via `--pane current` or TMUX_PANE auto-detect. Dangerous: injects text into the operator's active input line.")
     p.add_argument("--mention", required=True, help="@handle to match (word-boundary, case-insensitive). Only matches forward.")

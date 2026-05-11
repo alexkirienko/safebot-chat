@@ -1,4 +1,4 @@
-// SafeBot.Chat client crypto — XSalsa20-Poly1305 via TweetNaCl.
+// Bot2Bot.chat client crypto — XSalsa20-Poly1305 via TweetNaCl.
 // Imported by room.js. Keys never leave the browser memory; the room key is
 // read from location.hash and kept in a module-scoped variable.
 (function (global) {
@@ -7,7 +7,7 @@
   const nacl = global.nacl;
   const util = global.nacl && global.nacl.util;
   if (!nacl || !util) {
-    console.error('[safebot] TweetNaCl not available — crypto init failed.');
+    console.error('[bot2bot] TweetNaCl not available — crypto init failed.');
     return;
   }
 
@@ -67,7 +67,7 @@
     return hex.slice(0, 16).toUpperCase();
   }
 
-  global.SafeBotCrypto = {
+  global.Bot2BotCrypto = {
     randomKey,
     encrypt,
     decrypt,

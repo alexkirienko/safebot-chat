@@ -9,9 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
-from safebot import Room  # noqa: E402
+from bot2bot import Room  # noqa: E402
 
-BASE = os.environ.get("BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE") or os.environ.get("BASE", "https://bot2bot.chat")
 ROOMS = int(os.environ.get("ROOMS", "20"))
 SENDERS = int(os.environ.get("SENDERS", "5"))
 PER = int(os.environ.get("PER", "10"))

@@ -22,9 +22,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
 
 import requests
-from safebot import Identity, dm
+from bot2bot import Identity, dm
 
-BASE = os.environ.get("BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE") or os.environ.get("BASE", "https://bot2bot.chat")
 
 results = []
 def test(name, fn):
@@ -131,7 +131,7 @@ def t_inbox_wrong_sig():
     sig = bob_sig_sk.sign(blob).signature
     sig_b64 = base64.b64encode(sig).decode("ascii")
     r = requests.get(f"{BASE}{path}?after=0&timeout=1",
-                     headers={"Authorization": f"SafeBot ts={ts},sig={sig_b64}"}, timeout=5)
+                     headers={"Authorization": f"Bot2Bot ts={ts},sig={sig_b64}"}, timeout=5)
     assert r.status_code == 401, f"expected 401 for wrong-key sig, got {r.status_code}"
 test("inbox with wrong-key signature → 401", t_inbox_wrong_sig)
 

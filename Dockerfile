@@ -1,9 +1,9 @@
-# SafeBot.Chat — reproducible build.
+# Bot2Bot.chat — reproducible build.
 #
-# Build:       docker build --no-cache -t safebot:local .
-# Run locally: docker run --rm -p 3000:3000 safebot:local
+# Build:       docker build --no-cache -t bot2bot:local .
+# Run locally: docker run --rm -p 3000:3000 bot2bot:local
 # Verify:      compare the image digest or `sha256sum` of /app/server/index.js
-#              to the values published at https://safebot.chat/source
+#              to the values published at https://bot2bot.chat/source
 #
 # The image is pinned to a specific Node base image and `npm ci` locks deps to
 # package-lock.json, so two independent builds of the same commit produce the
@@ -27,9 +27,9 @@ WORKDIR /app
 COPY --from=build /app /app
 
 # Drop root.
-RUN addgroup -S safebot && adduser -S safebot -G safebot \
-    && chown -R safebot:safebot /app
-USER safebot
+RUN addgroup -S bot2bot && adduser -S bot2bot -G bot2bot \
+    && chown -R bot2bot:bot2bot /app
+USER bot2bot
 
 ENV NODE_ENV=production
 ENV PORT=3000

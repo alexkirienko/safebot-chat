@@ -17,9 +17,9 @@ import base64, os, secrets, sys, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sdk"))
 import requests
-from safebot import Room, Identity  # type: ignore
+from bot2bot import Room, Identity  # type: ignore
 
-BASE = os.environ.get("SAFEBOT_BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE", "https://bot2bot.chat")
 
 
 def run():

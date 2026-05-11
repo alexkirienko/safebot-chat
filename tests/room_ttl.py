@@ -15,7 +15,7 @@ import requests
 from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
 
-BASE = os.environ.get("SAFEBOT_BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE", "https://bot2bot.chat")
 
 passed = 0
 def ok(msg: str) -> None:

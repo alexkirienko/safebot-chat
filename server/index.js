@@ -7,11 +7,11 @@
 //   2. All room state is in-memory. When the last subscriber leaves a room,
 //      the room and its recent-message buffer are cleared after a short grace.
 //   3. Disk writes are narrowly scoped to operator state only:
-//        - /var/lib/safebot/metrics.json, metrics_history.json — aggregate counters
-//        - /var/lib/safebot/identities.json — public keys + inbox_seq counter
-//        - /var/lib/safebot/agent_profiles.json — opt-in public discovery
+//        - /var/lib/bot2bot/metrics.json, metrics_history.json — aggregate counters
+//        - /var/lib/bot2bot/identities.json — public keys + inbox_seq counter
+//        - /var/lib/bot2bot/agent_profiles.json — opt-in public discovery
 //          profiles. These are deliberately public metadata, not chat logs.
-//        - /var/log/safebot-bugs.jsonl — bug-report bodies submitted by users
+//        - /var/log/bot2bot-bugs.jsonl — bug-report bodies submitted by users
 //          (5 MiB cap, single rotation). Bug reports are user-submitted text
 //          and are explicitly NOT covered by invariant #1; submitters are
 //          told so via the /api/report endpoint contract.
@@ -31,8 +31,8 @@ const os = require('os');
 // independent observer who compared a reproducible docker build can detect it.
 const TRACKED_FILES = [
   ['server/index.js',                   path.join(__dirname, 'index.js')],
-  ['sdk/safebot.py',                    path.join(__dirname, '..', 'sdk', 'safebot.py')],
-  ['sdk/codex_safebot.py',              path.join(__dirname, '..', 'sdk', 'codex_safebot.py')],
+  ['sdk/bot2bot.py',                    path.join(__dirname, '..', 'sdk', 'bot2bot.py')],
+  ['sdk/codex_bot2bot.py',              path.join(__dirname, '..', 'sdk', 'codex_bot2bot.py')],
   ['public/js/room.js',                 path.join(__dirname, '..', 'public', 'js', 'room.js')],
   ['public/js/crypto.js',               path.join(__dirname, '..', 'public', 'js', 'crypto.js')],
   ['public/js/identity.js',             path.join(__dirname, '..', 'public', 'js', 'identity.js')],
@@ -52,7 +52,7 @@ for (const [label, full] of TRACKED_FILES) {
   } catch (_) { /* missing optional file: omit */ }
 }
 // Cache the full text of user-inspectable source for /source page.
-for (const label of ['server/index.js', 'sdk/safebot.py', 'public/js/crypto.js', 'Dockerfile']) {
+for (const label of ['server/index.js', 'sdk/bot2bot.py', 'public/js/crypto.js', 'Dockerfile']) {
   const entry = TRACKED_FILES.find((e) => e[0] === label);
   if (!entry) continue;
   try { SOURCE_BODIES[label] = fs.readFileSync(entry[1], 'utf8'); }
@@ -80,7 +80,7 @@ function safeReadJson(path) {
   if (st.size > STATE_FILE_MAX) throw new Error(`state file too large: ${path} (${st.size} > ${STATE_FILE_MAX})`);
   return JSON.parse(fs.readFileSync(path, 'utf8'));
 }
-const METRICS_STATE_PATH = process.env.METRICS_STATE_PATH || '/var/lib/safebot/metrics.json';
+const METRICS_STATE_PATH = process.env.METRICS_STATE_PATH || '/var/lib/bot2bot/metrics.json';
 
 const METRICS_DEFAULTS = {
   started_at: STARTED_AT,
@@ -125,10 +125,10 @@ function loadPersistedMetrics() {
 
 const METRICS = loadPersistedMetrics();
 // Recent per-minute history kept for short-range charts + sparklines.
-const METRICS_HISTORY_PATH = process.env.METRICS_HISTORY_PATH || '/var/lib/safebot/metrics_history.json';
-const METRICS_HOURLY_HISTORY_PATH = process.env.METRICS_HOURLY_HISTORY_PATH || '/var/lib/safebot/metrics_hourly.json';
-const METRICS_GEO_MINUTE_HISTORY_PATH = process.env.METRICS_GEO_MINUTE_HISTORY_PATH || '/var/lib/safebot/metrics_geo_minute.json';
-const METRICS_GEO_HOURLY_HISTORY_PATH = process.env.METRICS_GEO_HOURLY_HISTORY_PATH || '/var/lib/safebot/metrics_geo_hourly.json';
+const METRICS_HISTORY_PATH = process.env.METRICS_HISTORY_PATH || '/var/lib/bot2bot/metrics_history.json';
+const METRICS_HOURLY_HISTORY_PATH = process.env.METRICS_HOURLY_HISTORY_PATH || '/var/lib/bot2bot/metrics_hourly.json';
+const METRICS_GEO_MINUTE_HISTORY_PATH = process.env.METRICS_GEO_MINUTE_HISTORY_PATH || '/var/lib/bot2bot/metrics_geo_minute.json';
+const METRICS_GEO_HOURLY_HISTORY_PATH = process.env.METRICS_GEO_HOURLY_HISTORY_PATH || '/var/lib/bot2bot/metrics_geo_hourly.json';
 const METRICS_HISTORY_MAX = METRICS_HISTORY_RETENTION_MINUTES;
 function loadPersistedHistory() {
   try {
@@ -681,20 +681,27 @@ function buildGeoSeries(rangeKey) {
 // flight", not an archive, so the zero-chat-logs posture holds.
 
 const nacl = require('tweetnacl');
-const IDENTITIES_STATE_PATH = process.env.IDENTITIES_STATE_PATH || '/var/lib/safebot/identities.json';
+const IDENTITIES_STATE_PATH = process.env.IDENTITIES_STATE_PATH || '/var/lib/bot2bot/identities.json';
 const HANDLE_REGEX = /^[a-z0-9][a-z0-9_-]{1,31}$/;
-const RESERVED_HANDLES = new Set(['anon', 'admin', 'safebot', 'system', 'root', 'support', 'help', 'demo', 'echo']);
+const RESERVED_HANDLES = new Set(['anon', 'admin', 'bot2bot', 'system', 'root', 'support', 'help', 'demo', 'echo']);
 const DM_MAX_BYTES = 128 * 1024;          // ciphertext ceiling, matches room msgs
 const INBOX_MAX = 256;                    // undelivered per handle
+const INBOX_ANON_MAX = Math.max(0, Math.min(INBOX_MAX, Math.floor(finiteNumber(process.env.INBOX_ANON_MAX, 32))));
 const INBOX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SIG_MAX_SKEW_MS = 60 * 1000;        // signed-challenge clock drift tolerance
-const AGENT_DIRECTORY_STATE_PATH = process.env.AGENT_DIRECTORY_STATE_PATH || '/var/lib/safebot/agent_profiles.json';
+const IDENTITY_GC_MIN_INACTIVE_MS = 7 * 24 * 60 * 60 * 1000;
+const IDENTITY_GC_INACTIVE_MS = Math.max(
+  IDENTITY_GC_MIN_INACTIVE_MS,
+  finiteNumber(process.env.IDENTITY_GC_INACTIVE_MS, 180 * 24 * 60 * 60 * 1000),
+);
+const IDENTITY_TOUCH_MIN_MS = Math.max(0, finiteNumber(process.env.IDENTITY_TOUCH_MIN_MS, 60 * 1000));
+const AGENT_DIRECTORY_STATE_PATH = process.env.AGENT_DIRECTORY_STATE_PATH || '/var/lib/bot2bot/agent_profiles.json';
 const AGENT_PROFILE_MAX_BYTES = 8192;
 const AGENT_PROFILE_TTL_MS = Number(process.env.AGENT_PROFILE_TTL_MS || 7 * 24 * 60 * 60 * 1000);
 const AGENT_PROFILE_SIG_SKEW_MS = Number(process.env.AGENT_PROFILE_SIG_SKEW_MS || 5 * 60 * 1000);
 const AGENT_TAGS_MAX = 32;
 
-// identities: Map<handle, { box_pub, sign_pub, registered_at, meta, inbox_seq }>
+// identities: Map<handle, { box_pub, sign_pub, registered_at, updated_at, last_seen_at, meta, inbox_seq }>
 const identities = new Map();
 // agentProfiles: Map<handle, { handle, box_pub, sign_pub, profile, profile_json, profile_sig, updated_at, last_seen_at, expires_at, created_at }>
 const agentProfiles = new Map();
@@ -715,15 +722,17 @@ function loadIdentities() {
       if (!rec || typeof rec !== 'object' || Array.isArray(rec)) { dropped++; continue; }
       if (typeof rec.handle !== 'string' || !HANDLE_REGEX.test(rec.handle) || rec.handle !== handle) { dropped++; continue; }
       if (typeof rec.box_pub !== 'string' || typeof rec.sign_pub !== 'string') { dropped++; continue; }
-      try {
-        if (Buffer.from(rec.box_pub, 'base64').length !== 32) { dropped++; continue; }
-        if (Buffer.from(rec.sign_pub, 'base64').length !== 32) { dropped++; continue; }
-      } catch (_) { dropped++; continue; }
+      if (!isCanonicalBase64(rec.box_pub, 32) || !isCanonicalBase64(rec.sign_pub, 32)) { dropped++; continue; }
+      const registeredAt = Number.isFinite(rec.registered_at) ? rec.registered_at : Date.now();
+      const updatedAt = Number.isFinite(rec.updated_at) ? rec.updated_at : registeredAt;
+      const lastSeenAt = Number.isFinite(rec.last_seen_at) ? rec.last_seen_at : updatedAt;
       const clean = {
         handle: rec.handle,
         box_pub: rec.box_pub,
         sign_pub: rec.sign_pub,
-        registered_at: Number.isFinite(rec.registered_at) ? rec.registered_at : Date.now(),
+        registered_at: registeredAt,
+        updated_at: updatedAt,
+        last_seen_at: lastSeenAt,
         meta: (rec.meta && typeof rec.meta === 'object') ? { bio: String(rec.meta.bio || '').slice(0, 280) } : {},
         inbox_seq: Number.isFinite(rec.inbox_seq) && rec.inbox_seq > 0 ? rec.inbox_seq : 0,
       };
@@ -753,6 +762,74 @@ function schedulePersistIdentities() {
 }
 // (Single shutdown handler registered above now flushes both metrics and
 // identities. Leaving this block empty to preserve file line anchors.)
+
+function identityActivityAt(rec) {
+  return Math.max(
+    Number.isFinite(rec && rec.last_seen_at) ? rec.last_seen_at : 0,
+    Number.isFinite(rec && rec.updated_at) ? rec.updated_at : 0,
+    Number.isFinite(rec && rec.registered_at) ? rec.registered_at : 0,
+  );
+}
+
+function touchIdentity(handle, at = Date.now()) {
+  const rec = identities.get(handle);
+  if (!rec) return;
+  if (at - identityActivityAt(rec) < IDENTITY_TOUCH_MIN_MS) return;
+  rec.last_seen_at = at;
+  rec.updated_at = Math.max(Number.isFinite(rec.updated_at) ? rec.updated_at : 0, at);
+  schedulePersistIdentities();
+}
+
+function removeIdentity(handle) {
+  const inbox = inboxes.get(handle);
+  if (inbox) {
+    for (const msg of inbox) releaseBytes(msg);
+    inboxes.delete(handle);
+  }
+  identities.delete(handle);
+  agentProfiles.delete(handle);
+  dmWaiters.delete(handle);
+  if (typeof ROOM_CURSORS !== 'undefined') ROOM_CURSORS.delete(handle);
+  if (typeof INBOX_SIG_SEEN !== 'undefined') {
+    const inner = INBOX_SIG_SEEN.get(handle);
+    if (inner) { INBOX_SIG_SEEN_SIZE = Math.max(0, INBOX_SIG_SEEN_SIZE - inner.size); INBOX_SIG_SEEN.delete(handle); }
+  }
+  if (typeof ROOM_SIG_SEEN !== 'undefined') {
+    const inner = ROOM_SIG_SEEN.get(handle);
+    if (inner) { ROOM_SIG_SEEN_SIZE = Math.max(0, ROOM_SIG_SEEN_SIZE - inner.size); ROOM_SIG_SEEN.delete(handle); }
+  }
+  if (typeof DM_ENV_SEEN !== 'undefined') {
+    const inner = DM_ENV_SEEN.get(handle);
+    if (inner) { DM_ENV_SEEN_SIZE = Math.max(0, DM_ENV_SEEN_SIZE - inner.size); DM_ENV_SEEN.delete(handle); }
+  }
+}
+
+function gcInactiveIdentities(targetSize) {
+  if (!Number.isFinite(IDENTITY_GC_INACTIVE_MS)) return 0;
+  const now = Date.now();
+  const cutoff = now - IDENTITY_GC_INACTIVE_MS;
+  const goal = Math.max(0, Math.floor(targetSize));
+  const candidates = Array.from(identities.entries())
+    .filter(([handle, rec]) => {
+      if (RESERVED_HANDLES.has(handle)) return false;
+      const profile = agentProfiles.get(handle);
+      if (profile && profile.expires_at > now) return false;
+      return identityActivityAt(rec) < cutoff;
+    })
+    .sort((a, b) => identityActivityAt(a[1]) - identityActivityAt(b[1]) || a[0].localeCompare(b[0]));
+  let removed = 0;
+  for (const [handle] of candidates) {
+    if (identities.size <= goal) break;
+    removeIdentity(handle);
+    removed += 1;
+  }
+  if (removed) {
+    schedulePersistIdentities();
+    schedulePersistAgentProfiles();
+    METRICS.identities_gc_total = (METRICS.identities_gc_total || 0) + removed;
+  }
+  return removed;
+}
 
 function normalizeAgentToken(value, maxLen = 40) {
   return String(value || '')
@@ -943,12 +1020,38 @@ function isCanonicalBase64(s, expectedBytes) {
 }
 
 function releaseBytes(msg) { if (msg && msg._bytes) INBOX_GLOBAL_BYTES = Math.max(0, INBOX_GLOBAL_BYTES - msg._bytes); }
+function evictInboxAt(inbox, index) {
+  const msg = inbox.splice(index, 1)[0];
+  releaseBytes(msg);
+  return msg;
+}
+function evictOldestInboxMatching(inbox, predicate) {
+  for (let i = 0; i < inbox.length; i += 1) {
+    if (predicate(inbox[i])) {
+      evictInboxAt(inbox, i);
+      return true;
+    }
+  }
+  return false;
+}
 function pruneInbox(handle) {
   const inbox = inboxes.get(handle);
   if (!inbox) return;
   const cutoff = Date.now() - INBOX_TTL_MS;
   while (inbox.length && inbox[0].ts < cutoff) releaseBytes(inbox.shift());
-  while (inbox.length > INBOX_MAX) releaseBytes(inbox.shift());
+  let anonCount = 0;
+  for (const msg of inbox) if (!msg.from_verified) anonCount += 1;
+  while (anonCount > INBOX_ANON_MAX) {
+    if (!evictOldestInboxMatching(inbox, (msg) => !msg.from_verified)) break;
+    anonCount -= 1;
+  }
+  // Anonymous DMs have a small per-target pool. When the full inbox is over
+  // INBOX_MAX, evict anonymous messages first so an unsigned flood cannot push
+  // out verified sender envelopes. Verified floods are still bounded by the
+  // same total INBOX_MAX ring.
+  while (inbox.length > INBOX_MAX) {
+    if (!evictOldestInboxMatching(inbox, (msg) => !msg.from_verified)) releaseBytes(inbox.shift());
+  }
 }
 
 function wakeDmWaiters(handle, msgs) {
@@ -1079,13 +1182,13 @@ setInterval(() => {
 }, 5 * 60 * 1000).unref?.();
 
 function verifyInboxSig(req, handle) {
-  // Header:  Authorization: SafeBot ts=<ms>,n=<nonce>,sig=<base64>
+  // Header:  Authorization: Bot2Bot ts=<ms>,n=<nonce>,sig=<base64>
   // Signed blob: `<method> <originalUrl> <ts> <nonce>`.
   //   - originalUrl binds the sig to query params (can't swap ?after=).
   //   - nonce makes the signed payload per-request-unique so a captured
   //     header cannot be replayed verbatim during the 60 s skew window.
   const auth = String(req.headers.authorization || '');
-  if (!auth.startsWith('SafeBot ')) return false;
+  if (!auth.startsWith('Bot2Bot ')) return false;
   const parts = Object.fromEntries(auth.slice(8).split(',').map((kv) => {
     kv = kv.trim();
     const i = kv.indexOf('=');
@@ -1097,6 +1200,7 @@ function verifyInboxSig(req, handle) {
   if (!ts || !sig || !nonce) return false;
   if (nonce.length < 16 || nonce.length > 64) return false;
   if (!/^[A-Za-z0-9+/=_-]+$/.test(nonce)) return false;
+  if (!isCanonicalBase64(sig, 64)) return false;
   if (Math.abs(Date.now() - ts) > SIG_MAX_SKEW_MS) return false;
   const rec = identities.get(handle);
   if (!rec) return false;
@@ -1130,6 +1234,7 @@ function verifyInboxSig(req, handle) {
     if (!inner) INBOX_SIG_SEEN.set(handle, perInner);
     perInner.set(nonce, Date.now());
     INBOX_SIG_SEEN_SIZE++;
+    touchIdentity(handle);
     return true;
   } catch (_) { return false; }
 }
@@ -1238,6 +1343,7 @@ function verifyRoomSenderSig(body, roomId) {
   if (!ts || !nonce || !sig) return false;
   if (nonce.length < 16 || nonce.length > 64) return false;
   if (!/^[A-Za-z0-9+/=_-]+$/.test(nonce)) return false;
+  if (!isCanonicalBase64(sig, 64)) return false;
   if (Math.abs(Date.now() - ts) > SIG_MAX_SKEW_MS) return false;
   const rec = identities.get(handle);
   if (!rec) return false;
@@ -1269,6 +1375,7 @@ function verifyRoomSenderSig(body, roomId) {
     if (!inner) ROOM_SIG_SEEN.set(handle, perInner);
     perInner.set(nonce, Date.now());
     ROOM_SIG_SEEN_SIZE++;
+    touchIdentity(handle);
     return true;
   } catch (_) { return false; }
 }
@@ -1525,11 +1632,11 @@ function renderStatsPage(tokenForFetch) {
  // travels in plain URLs after the initial page load.
  const _initialToken = ${JSON.stringify(tokenForFetch)};
  if (_initialToken) {
-   try { sessionStorage.setItem('safebot:admintoken', _initialToken); } catch (_) {}
+   try { sessionStorage.setItem('bot2bot:admintoken', _initialToken); } catch (_) {}
    if (location.search) history.replaceState(null, '', location.pathname);
  }
  const TOKEN = (function() {
-   try { return sessionStorage.getItem('safebot:admintoken') || ''; } catch (_) { return _initialToken || ''; }
+   try { return sessionStorage.getItem('bot2bot:admintoken') || ''; } catch (_) { return _initialToken || ''; }
  })();
  const MINUTE_MS = 60_000;
  const HOUR_MS = 60 * MINUTE_MS;
@@ -1937,12 +2044,12 @@ function renderSourcePage() {
 <main class="doc-body">
   <span class="eyebrow-pill"><span class="dot"></span>Runtime transparency</span>
   <h1>Source &amp; hashes</h1>
-  <p class="doc-lead">This is what the server is actually running, right now. The hashes below are computed on process start; compare them against a reproducible build of <a href="https://github.com/alexkirienko/safebot-chat" class="link-u">the public repo</a> to verify nothing has been silently swapped. If you find a divergence, that's a finding worth publishing.</p>
+  <p class="doc-lead">This is what the server is actually running, right now. The hashes below are computed on process start; compare them against a reproducible build of <a href="https://github.com/alexkirienko/bot2bot-chat" class="link-u">the public repo</a> to verify nothing has been silently swapped. If you find a divergence, that's a finding worth publishing.</p>
 
   <h2>Build identity</h2>
   <p><strong>Started at:</strong> <code>${escHtml(STARTED_AT)}</code><br>
      <strong>Node:</strong> <code>${escHtml(process.version)}</code><br>
-     <strong>Repo:</strong> <a class="link-u" href="https://github.com/alexkirienko/safebot-chat">github.com/alexkirienko/safebot-chat</a><br>
+     <strong>Repo:</strong> <a class="link-u" href="https://github.com/alexkirienko/bot2bot-chat">github.com/alexkirienko/bot2bot-chat</a><br>
      <strong>License:</strong> MIT</p>
 
   <h2>Running-file hashes (SHA-256)</h2>
@@ -1950,13 +2057,13 @@ function renderSourcePage() {
   <p>Machine-readable at <code><a href="/api/status" class="link-u">/api/status</a></code>.</p>
 
   <h2>Reproduce</h2>
-  <pre><code>git clone https://github.com/alexkirienko/safebot-chat
-cd safebot-chat
-docker build --no-cache -t safebot:local .
+  <pre><code>git clone https://github.com/alexkirienko/bot2bot-chat
+cd bot2bot-chat
+docker build --no-cache -t bot2bot:local .
 
 # Compare against what's running in prod:
 curl -s https://bot2bot.chat/api/status | jq -r '.source_hashes."server/index.js"'
-docker run --rm safebot:local sh -c 'sha256sum /app/server/index.js'</code></pre>
+docker run --rm bot2bot:local sh -c 'sha256sum /app/server/index.js'</code></pre>
 
   <h2>What to look for when reading the source</h2>
   <ul>
@@ -2399,17 +2506,17 @@ app.get('/api/metrics/hourly', (req, res) => {
 // Serve the Python SDK so the copy-paste snippets in the UI and docs Just Work.
 const SDK_DIR = path.join(__dirname, '..', 'sdk');
 const JSVECTORMAP_DIST_DIR = path.join(__dirname, '..', 'node_modules', 'jsvectormap', 'dist');
-app.get('/sdk/safebot.py', (_req, res) => {
+app.get('/sdk/bot2bot.py', (_req, res) => {
   res.setHeader('Content-Type', 'text/x-python; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=60');
-  res.setHeader('Content-Disposition', 'inline; filename="safebot.py"');
-  res.sendFile(path.join(SDK_DIR, 'safebot.py'));
+  res.setHeader('Content-Disposition', 'inline; filename="bot2bot.py"');
+  res.sendFile(path.join(SDK_DIR, 'bot2bot.py'));
 });
-app.get('/sdk/codex_safebot.py', (_req, res) => {
+app.get('/sdk/codex_bot2bot.py', (_req, res) => {
   res.setHeader('Content-Type', 'text/x-python; charset=utf-8');
   res.setHeader('Cache-Control', 'public, max-age=60');
-  res.setHeader('Content-Disposition', 'inline; filename="codex_safebot.py"');
-  res.sendFile(path.join(SDK_DIR, 'codex_safebot.py'));
+  res.setHeader('Content-Disposition', 'inline; filename="codex_bot2bot.py"');
+  res.sendFile(path.join(SDK_DIR, 'codex_bot2bot.py'));
 });
 
 function serveVendorFile(route, filePath) {
@@ -2451,8 +2558,8 @@ app.get('/api/status', (_req, res) => {
     rooms: rooms.size,
     node_version: process.version,
     source_hashes: SOURCE_HASHES,
-    source: 'https://github.com/alexkirienko/safebot-chat',
-    reproducible_build: 'docker build --no-cache -t safebot:local . && docker run --rm safebot:local node -e "require(\'crypto\').createHash(\'sha256\').update(require(\'fs\').readFileSync(\'/app/server/index.js\')).digest(\'hex\')"',
+    source: 'https://github.com/alexkirienko/bot2bot-chat',
+    reproducible_build: 'docker build --no-cache -t bot2bot:local . && docker run --rm bot2bot:local node -e "require(\'crypto\').createHash(\'sha256\').update(require(\'fs\').readFileSync(\'/app/server/index.js\')).digest(\'hex\')"',
   });
 });
 
@@ -2572,7 +2679,7 @@ app.get('/api/rooms/:roomId/events', (req, res) => {
 // agent can post bug reports. Each report optionally fires an alert webhook
 // (Telegram / Discord) controlled by env vars on the operator's side.
 
-const BUGS_LOG = process.env.BUGS_LOG || '/var/log/safebot-bugs.jsonl';
+const BUGS_LOG = process.env.BUGS_LOG || '/var/log/bot2bot-bugs.jsonl';
 const BUGS_LOG_MAX_BYTES = Number(process.env.BUGS_LOG_MAX_BYTES || 5 * 1024 * 1024); // 5 MiB
 let bugLogTail = Promise.resolve(); // serialise rotate-then-append to avoid races
 
@@ -2668,7 +2775,7 @@ app.post('/api/report', async (req, res) => {
     severity: allowedSeverities.includes(body.severity) ? body.severity : 'medium',
     ua: sanitise(req.headers['user-agent'], 200),
     // Hashed+truncated IP so we can detect spam waves without storing actual IPs.
-    ip_hash: crypto.createHash('sha256').update(ip + '|safebot-bug-salt').digest('hex').slice(0, 12),
+    ip_hash: crypto.createHash('sha256').update(ip + '|bot2bot-bug-salt').digest('hex').slice(0, 12),
   };
   // Persist asynchronously — don't block the request handler. Rotate the
   // log when it crosses BUGS_LOG_MAX_BYTES. Serialise the rotate-then-append
@@ -2714,7 +2821,7 @@ app.post('/api/contact', async (req, res) => {
   }
   const id = crypto.randomUUID();
   const ua = sanitise(req.headers['user-agent'], 200);
-  const ip_hash = crypto.createHash('sha256').update(ip + '|safebot-contact-salt').digest('hex').slice(0, 12);
+  const ip_hash = crypto.createHash('sha256').update(ip + '|bot2bot-contact-salt').digest('hex').slice(0, 12);
   // Build a Telegram MarkdownV2 message. fireBugAlert can't be reused
   // directly (its template has severity + repro fields), but escMd is.
   if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
@@ -2755,12 +2862,6 @@ app.post('/api/identity/register', (req, res) => {
   if (!rateLimitOk(ip, 'register') || !globalRateLimitOk(ip)) {
     res.set('Retry-After', '5'); return res.status(429).json({ error: 'rate limited' });
   }
-  // Hard cap on total identities. Without this, a distributed attacker
-  // can grow the map and the persisted JSON file without bound.
-  if (identities.size >= IDENTITIES_MAX) {
-    res.set('Retry-After', '3600');
-    return res.status(503).json({ error: 'identity cap reached' });
-  }
   // Operators can bypass the RESERVED_HANDLES list only by presenting the
   // dedicated IDENTITY_ADMIN_TOKEN. No METRICS_TOKEN fallback: a leaked
   // dashboard/observability credential must NOT grant namespace squatting.
@@ -2796,7 +2897,21 @@ app.post('/api/identity/register', (req, res) => {
     }
     if (!verified) return res.status(409).json({ error: 'handle taken' });
     REGISTER_SIG_SEEN.set(register_sig, Date.now());
+    existing.last_seen_at = Date.now();
+    existing.updated_at = Date.now();
+    schedulePersistIdentities();
     return res.status(201).json({ ok: true, handle, registered_at: existing.registered_at });
+  }
+  // Hard cap on total identities. Under cap pressure, garbage-collect only
+  // inactive records (old last_seen_at/updated_at/registered_at) before
+  // rejecting. This preserves active/recent handles while bounding the
+  // persisted namespace file.
+  if (identities.size >= IDENTITIES_MAX) {
+    gcInactiveIdentities(IDENTITIES_MAX - 1);
+  }
+  if (identities.size >= IDENTITIES_MAX) {
+    res.set('Retry-After', '3600');
+    return res.status(503).json({ error: 'identity cap reached' });
   }
   // Require proof that the registrant actually holds sign_sk matching sign_pub:
   // sign `"register <handle> <register_ts>"`. Without this, a third party
@@ -2830,6 +2945,8 @@ app.post('/api/identity/register', (req, res) => {
   const rec = {
     handle, box_pub, sign_pub,
     registered_at: Date.now(),
+    updated_at: Date.now(),
+    last_seen_at: Date.now(),
     meta: (typeof meta === 'object' && meta) ? { bio: String(meta.bio || '').slice(0, 280) } : {},
   };
   identities.set(handle, rec);
@@ -2966,6 +3083,7 @@ app.put('/api/agents/:handle/profile', (req, res) => {
     created_at: existing ? existing.created_at : Date.now(),
   };
   agentProfiles.set(handle, rec);
+  touchIdentity(handle);
   schedulePersistAgentProfiles();
   res.status(201).json({ ok: true, handle, profile: publicAgentProfile(rec) });
 });
@@ -2979,6 +3097,7 @@ app.delete('/api/agents/:handle/profile', (req, res) => {
   }
   if (!verifyInboxSig(req, handle)) return res.status(401).json({ error: 'bad or missing signature' });
   agentProfiles.delete(handle);
+  touchIdentity(handle);
   schedulePersistAgentProfiles();
   res.json({ ok: true, handle });
 });
@@ -2994,6 +3113,7 @@ app.post('/api/agents/:handle/heartbeat', (req, res) => {
   const rec = agentProfiles.get(handle);
   if (!rec || rec.expires_at <= Date.now()) return res.status(404).json({ error: 'profile not found' });
   rec.last_seen_at = Date.now();
+  touchIdentity(handle);
   schedulePersistAgentProfiles();
   res.json({ ok: true, handle, expires_at: rec.expires_at });
 });
@@ -3076,6 +3196,7 @@ app.post('/api/dm/:handle', (req, res) => {
         if (!envInner) DM_ENV_SEEN.set(fh, envPer);
         envPer.set(envKey2, Date.now());
         DM_ENV_SEEN_SIZE++;
+        touchIdentity(fh);
         from_verified = true;
         canonical_from = fh;
       } catch (_) { return res.status(400).json({ error: 'bad from_handle signature' }); }
@@ -3403,7 +3524,7 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
 //
 // Goal: make "give me the next foreign message I haven't processed" a
 // single server-tracked primitive so client harnesses don't have to own
-// cursor state. Semantics per codex-safebot-20260419 spec:
+// cursor state. Semantics per codex-bot2bot-20260419 spec:
 //   /claim  — return the oldest seq > cursor whose sender != handle.
 //             If an unexpired inflight claim already exists, return the
 //             same envelope again (idempotent under retries). On empty,
@@ -3411,7 +3532,7 @@ app.get('/api/rooms/:roomId/wait', (req, res) => {
 //   /ack    — advance cursor to seq and clear inflight. Stale acks
 //             (seq <= cursor) are idempotent success; mismatched
 //             claim_id/seq is 409.
-// Both endpoints reuse the Authorization: SafeBot ts/n/sig header so the
+// Both endpoints reuse the Authorization: Bot2Bot ts/n/sig header so the
 // signed blob binds method+originalUrl+ts+nonce (verifyInboxSig). Body
 // fields aren't in the blob because a captured sig can't be re-signed
 // under a fresh nonce without the private key.
@@ -3598,7 +3719,7 @@ const openapiSpec = {
       post: {
         summary: 'Pull next foreign message via server-tracked cursor (Identity-signed)',
         description:
-          'At-least-once pull primitive. Returns the oldest seq > cursor whose sender is not the caller; promotes it to an inflight claim with a random claim_id and a 60-second lease. Re-calling while that claim is alive returns the SAME envelope + claim_id. On empty, blocks up to timeout like /wait. Requires Authorization: SafeBot ts=...,n=...,sig=... header signed by the handle\'s Ed25519 sign_sk over "<method> <url> <ts> <nonce>".',
+          'At-least-once pull primitive. Returns the oldest seq > cursor whose sender is not the caller; promotes it to an inflight claim with a random claim_id and a 60-second lease. Re-calling while that claim is alive returns the SAME envelope + claim_id. On empty, blocks up to timeout like /wait. Requires Authorization: Bot2Bot ts=...,n=...,sig=... header signed by the handle\'s Ed25519 sign_sk over "<method> <url> <ts> <nonce>".',
         parameters: [
           { name: 'roomId', in: 'path', required: true, schema: { type: 'string', pattern: '^[A-Za-z0-9_-]{4,64}$' } },
           { name: 'timeout', in: 'query', required: false, schema: { type: 'integer', default: 30, minimum: 1, maximum: 90 } },
@@ -3698,7 +3819,7 @@ const openapiSpec = {
       get: {
         summary: 'Long-poll the inbox for new DMs (owner only)',
         description:
-          'Authorization: SafeBot ts=<ms>,sig=<base64 Ed25519 signature of "GET <path> <ts>">. Server verifies against the registered sign_pub.',
+          'Authorization: Bot2Bot ts=<ms>,sig=<base64 Ed25519 signature of "GET <path> <ts>">. Server verifies against the registered sign_pub.',
         parameters: [
           { name: 'handle', in: 'path', required: true, schema: { type: 'string' } },
           { name: 'after', in: 'query', schema: { type: 'integer', default: 0 } },
@@ -3761,7 +3882,7 @@ const openapiSpec = {
       },
       delete: {
         summary: 'Unpublish an agent profile',
-        description: 'Requires Authorization: SafeBot signed by the profile handle, same request-signature format as DM inbox owner calls.',
+        description: 'Requires Authorization: Bot2Bot signed by the profile handle, same request-signature format as DM inbox owner calls.',
         parameters: [{ name: 'handle', in: 'path', required: true, schema: { type: 'string' } }],
         responses: { '200': { description: 'Unpublished' }, '401': { description: 'Bad or missing signature' } },
       },
@@ -3769,7 +3890,7 @@ const openapiSpec = {
     '/api/agents/{handle}/heartbeat': {
       post: {
         summary: 'Refresh last_seen_at/expires_at for an agent profile',
-        description: 'Requires Authorization: SafeBot signed by the profile handle.',
+        description: 'Requires Authorization: Bot2Bot signed by the profile handle.',
         parameters: [{ name: 'handle', in: 'path', required: true, schema: { type: 'string' } }],
         responses: { '200': { description: 'Heartbeat accepted' }, '401': { description: 'Bad or missing signature' }, '404': { description: 'Profile not found' } },
       },

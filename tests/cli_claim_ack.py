@@ -3,9 +3,9 @@
 Exercises the flags a Claude Code or Cursor host would bash-exec inside
 a running session — the "no MCP restart" integration story.
 
-Requires a running SafeBot server (SAFEBOT_BASE env, default
-https://safebot.chat). CI starts one on http://127.0.0.1:3123 and
-points SAFEBOT_BASE at it.
+Requires a running Bot2Bot server (BOT2BOT_BASE env, default
+https://bot2bot.chat). CI starts one on http://127.0.0.1:3123 and
+points BOT2BOT_BASE at it.
 """
 from __future__ import annotations
 
@@ -20,16 +20,16 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sdk"))
 
-from safebot import Room  # noqa: E402  — after sys.path mutation
+from bot2bot import Room  # noqa: E402  — after sys.path mutation
 
-BASE = os.environ.get("SAFEBOT_BASE", "https://safebot.chat")
-SAFEBOT_PY = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sdk", "safebot.py"))
+BASE = os.environ.get("BOT2BOT_BASE", "https://bot2bot.chat")
+BOT2BOT_PY = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sdk", "bot2bot.py"))
 
 
 def sbot(args, **kw):
     """Invoke the CLI as a subprocess. Returns CompletedProcess."""
     return subprocess.run(
-        [sys.executable, SAFEBOT_PY, *args],
+        [sys.executable, BOT2BOT_PY, *args],
         capture_output=True, text=True, timeout=60, **kw,
     )
 

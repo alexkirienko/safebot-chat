@@ -173,14 +173,14 @@ async function serverTests() {
     if (r.status !== 200) throw new Error('status ' + r.status);
     if (!/gents\. HTTP\. Ciphertext\./.test(r.body)) throw new Error('missing docs marker');
   });
-  await test('GET /sdk/safebot.py serves the SDK', async () => {
-    const r = await httpJson('GET', `${BASE}/sdk/safebot.py`);
+  await test('GET /sdk/bot2bot.py serves the SDK', async () => {
+    const r = await httpJson('GET', `${BASE}/sdk/bot2bot.py`);
     if (r.status !== 200) throw new Error('status ' + r.status);
-    if (!/from safebot import Room|class Room/.test(r.body)) throw new Error('does not look like the SDK');
+    if (!/from bot2bot import Room|class Room/.test(r.body)) throw new Error('does not look like the SDK');
     if (r.body.length < 1000) throw new Error('SDK body suspiciously small: ' + r.body.length);
   });
-  await test('GET /sdk/codex_safebot.py serves the Codex bootstrap', async () => {
-    const r = await httpJson('GET', `${BASE}/sdk/codex_safebot.py`);
+  await test('GET /sdk/codex_bot2bot.py serves the Codex bootstrap', async () => {
+    const r = await httpJson('GET', `${BASE}/sdk/codex_bot2bot.py`);
     if (r.status !== 200) throw new Error('status ' + r.status);
     if (!/codex mcp add|claim_task|launch a fresh Codex session/.test(r.body)) throw new Error('does not look like the Codex bootstrap');
     if (r.body.length < 1000) throw new Error('bootstrap body suspiciously small: ' + r.body.length);
@@ -565,7 +565,7 @@ async function pythonSdkTest() {
 
     // Chat is the main view now — no toggle needed.
     const cli = spawnSync(venvPython, [
-      path.join(ROOT, 'sdk', 'safebot.py'),
+      path.join(ROOT, 'sdk', 'bot2bot.py'),
       url,
       '--name', 'claude-opus',
       '--say', 'Hello from the Python SDK.',
@@ -611,14 +611,14 @@ async function e2eReplyConvergence() {
     const rid = 'RPLCONV' + crypto.randomBytes(3).toString('hex').toUpperCase();
     const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
     await page.goto(`${BASE}/room/${rid}#k=${key}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => !!(window.__safebotTest && window.__safebotTest.renderMessage), null, { timeout: 10000 });
+    await page.waitForFunction(() => !!(window.__bot2botTest && window.__bot2botTest.renderMessage), null, { timeout: 10000 });
 
     const ghost = crypto.randomUUID();
     const childId = crypto.randomUUID();
 
     // Case 1 — child first, parent unknown.
     await page.evaluate(({ childId, ghost }) => {
-      window.__safebotTest.renderMessage({
+      window.__bot2botTest.renderMessage({
         id: childId, seq: 1001, sender: 'bob', ts: Date.now(),
         text: 'replied before parent known', reply_to: ghost,
       });
@@ -638,7 +638,7 @@ async function e2eReplyConvergence() {
 
     // Case 2 — parent becomes known, ref upgrades.
     await page.evaluate((ghost) => {
-      window.__safebotTest.rememberMessage(
+      window.__bot2botTest.rememberMessage(
         { id: ghost, seq: 1000, sender: 'alice', ts: Date.now() - 1000 },
         'the original parent message text',
       );
@@ -657,7 +657,7 @@ async function e2eReplyConvergence() {
     pass('reply-ref: parent becomes known → upgrade to sender + snippet');
 
     // Case 3 — parent deleted, ref converges to deleted placeholder.
-    await page.evaluate((ghost) => window.__safebotTest.applyDelete(ghost, 1000), ghost);
+    await page.evaluate((ghost) => window.__bot2botTest.applyDelete(ghost, 1000), ghost);
     s = await page.evaluate((childId) => {
       const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(childId)}"] .bubble__reply-ref`);
       return {
@@ -676,7 +676,7 @@ async function e2eReplyConvergence() {
     // attach a dead reply_to id (codex-qa major on b46fdd1).
     const liveParentId = crypto.randomUUID();
     await page.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 999, sender: 'alice', ts: Date.now(), text: 'arm me for reply then die' });
+      window.__bot2botTest.renderMessage({ id, seq: 999, sender: 'alice', ts: Date.now(), text: 'arm me for reply then die' });
       // Arm the composer by clicking the Reply button.
       const rep = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__reply-btn`);
       rep.click();
@@ -686,7 +686,7 @@ async function e2eReplyConvergence() {
       return { hidden: pill ? pill.hidden : null, empty: pill ? pill.children.length === 0 : null };
     });
     if (armed.hidden !== false) throw new Error('precondition: composer should be armed before delete');
-    await page.evaluate((id) => window.__safebotTest.applyDelete(id, 999), liveParentId);
+    await page.evaluate((id) => window.__bot2botTest.applyDelete(id, 999), liveParentId);
     const cleared = await page.evaluate(() => {
       const pill = document.getElementById('replying-pill');
       const cs = window.getComputedStyle(pill);
@@ -713,17 +713,17 @@ async function e2eReactionsV1() {
     const rid = 'RXV1' + crypto.randomBytes(3).toString('hex').toUpperCase();
     const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
     await page.goto(`${BASE}/room/${rid}#k=${key}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => !!(window.__safebotTest_reactions), null, { timeout: 10000 });
+    await page.waitForFunction(() => !!(window.__bot2botTest_reactions), null, { timeout: 10000 });
 
     const parentId = crypto.randomUUID();
     // Render a parent bubble so the DOM has something to hang reactions on.
     await page.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'hello' });
+      window.__bot2botTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'hello' });
     }, parentId);
 
     // 1. Add two distinct actors with the same emoji → count = 2, no dupes.
     await page.evaluate((id) => {
-      const R = window.__safebotTest_reactions;
+      const R = window.__bot2botTest_reactions;
       R.applyReact(id, '👍', 'add', 'alice');
       R.applyReact(id, '👍', 'add', 'bob');
       R.applyReact(id, '👍', 'add', 'alice');        // idempotent add
@@ -742,7 +742,7 @@ async function e2eReactionsV1() {
     pass('reactions: two distinct actors → single pill, count=2, idempotent add');
 
     // 2. Remove one actor → count drops to 1.
-    await page.evaluate((id) => window.__safebotTest_reactions.applyReact(id, '👍', 'remove', 'bob'), parentId);
+    await page.evaluate((id) => window.__bot2botTest_reactions.applyReact(id, '👍', 'remove', 'bob'), parentId);
     s = await page.evaluate((id) => {
       const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
       const pills = el ? Array.from(el.querySelectorAll('.bubble__react-pill')) : [];
@@ -756,10 +756,10 @@ async function e2eReactionsV1() {
 
     // 3. Delete the target → react aggregate drops AND a later react
     //    envelope for the same id is ignored (deletedIds dominates).
-    await page.evaluate((id) => window.__safebotTest.applyDelete(id, 1), parentId);
-    await page.evaluate((id) => window.__safebotTest_reactions.applyReact(id, '❤️', 'add', 'eve'), parentId);
+    await page.evaluate((id) => window.__bot2botTest.applyDelete(id, 1), parentId);
+    await page.evaluate((id) => window.__bot2botTest_reactions.applyReact(id, '❤️', 'add', 'eve'), parentId);
     const post = await page.evaluate((id) => {
-      const R = window.__safebotTest_reactions;
+      const R = window.__bot2botTest_reactions;
       return {
         mapHas: R.reactionsByMsgId.has(id),
         bubbleStillInDom: !!document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`),
@@ -770,10 +770,10 @@ async function e2eReactionsV1() {
 
     // 4. Hydrate from hist-summary for an already-deleted target → rejected.
     await page.evaluate((id) => {
-      window.__safebotTest_reactions.hydrateReactions(id, { '🔥': ['carol'] });
+      window.__bot2botTest_reactions.hydrateReactions(id, { '🔥': ['carol'] });
     }, parentId);
     const afterHydrate = await page.evaluate((id) =>
-      window.__safebotTest_reactions.reactionsByMsgId.has(id), parentId);
+      window.__bot2botTest_reactions.reactionsByMsgId.has(id), parentId);
     if (afterHydrate) throw new Error('hist-summary hydrate must not resurrect reactions for deleted target');
     pass('reactions: hist-summary hydrate drops aggregate for already-deleted target');
 
@@ -799,38 +799,38 @@ async function e2eReactionsAdversarial() {
 
     // --- (a) TTL-expiry prunes reaction aggregate -----------------------
     await pageA.goto(url, { waitUntil: 'domcontentloaded' });
-    await pageA.waitForFunction(() => !!window.__safebotTest_reactions, null, { timeout: 10000 });
+    await pageA.waitForFunction(() => !!window.__bot2botTest_reactions, null, { timeout: 10000 });
     const ttlId = crypto.randomUUID();
     await pageA.evaluate((id) => {
       // Render a message with ttl_ms=0 (just for DOM) and set reactions
       // on it, then simulate TTL-triggered death by calling applyDelete
       // (which is the same convergence path real TTL expiry uses).
-      window.__safebotTest.renderMessage({ id, seq: 10, sender: 'alice', ts: Date.now(), text: 'ttl-target' });
-      window.__safebotTest_reactions.applyReact(id, '👍', 'add', 'bob');
+      window.__bot2botTest.renderMessage({ id, seq: 10, sender: 'alice', ts: Date.now(), text: 'ttl-target' });
+      window.__bot2botTest_reactions.applyReact(id, '👍', 'add', 'bob');
     }, ttlId);
-    let had = await pageA.evaluate((id) => window.__safebotTest_reactions.reactionsByMsgId.has(id), ttlId);
+    let had = await pageA.evaluate((id) => window.__bot2botTest_reactions.reactionsByMsgId.has(id), ttlId);
     if (!had) throw new Error('pre-TTL aggregate should be present');
-    await pageA.evaluate((id) => window.__safebotTest.applyDelete(id, 10), ttlId);
-    const aggGone = await pageA.evaluate((id) => window.__safebotTest_reactions.reactionsByMsgId.has(id), ttlId);
+    await pageA.evaluate((id) => window.__bot2botTest.applyDelete(id, 10), ttlId);
+    const aggGone = await pageA.evaluate((id) => window.__bot2botTest_reactions.reactionsByMsgId.has(id), ttlId);
     if (aggGone) throw new Error('TTL/delete convergence must drop aggregate state');
     // A react envelope that lands AFTER death must also be rejected.
-    await pageA.evaluate((id) => window.__safebotTest_reactions.applyReact(id, '🔥', 'add', 'eve'), ttlId);
-    const resurrected = await pageA.evaluate((id) => window.__safebotTest_reactions.reactionsByMsgId.has(id), ttlId);
+    await pageA.evaluate((id) => window.__bot2botTest_reactions.applyReact(id, '🔥', 'add', 'eve'), ttlId);
+    const resurrected = await pageA.evaluate((id) => window.__bot2botTest_reactions.reactionsByMsgId.has(id), ttlId);
     if (resurrected) throw new Error('late react envelope must not resurrect aggregate');
     pass('reactions: TTL/delete-expiry prunes aggregate AND rejects late envelopes');
 
     // --- (c) Rapid toggle add/remove/add converges ---------------------
     const toggleId = crypto.randomUUID();
     await pageA.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 11, sender: 'alice', ts: Date.now(), text: 'toggle' });
-      const R = window.__safebotTest_reactions;
+      window.__bot2botTest.renderMessage({ id, seq: 11, sender: 'alice', ts: Date.now(), text: 'toggle' });
+      const R = window.__bot2botTest_reactions;
       R.applyReact(id, '❤️', 'add', 'claude');
       R.applyReact(id, '❤️', 'remove', 'claude');
       R.applyReact(id, '❤️', 'add', 'claude');
       R.applyReact(id, '❤️', 'add', 'claude'); // idempotent
     }, toggleId);
     const st = await pageA.evaluate((id) => {
-      const m = window.__safebotTest_reactions.reactionsByMsgId.get(id);
+      const m = window.__bot2botTest_reactions.reactionsByMsgId.get(id);
       if (!m) return { emoji: null, count: 0 };
       const actors = m.get('❤️');
       return { emoji: '❤️', count: actors ? actors.size : 0, actors: actors ? Array.from(actors) : [] };
@@ -845,14 +845,14 @@ async function e2eReactionsAdversarial() {
     await pageA.evaluate((id) => {
       // Render + add two reactors, which persists to IDB via the
       // renderMessage save path (save with reactions field).
-      window.__safebotTest.renderMessage({ id, seq: 12, sender: 'alice', ts: Date.now(), text: 'replay' });
-      window.__safebotTest_reactions.applyReact(id, '🔥', 'add', 'alice');
-      window.__safebotTest_reactions.applyReact(id, '🔥', 'add', 'bob');
+      window.__bot2botTest.renderMessage({ id, seq: 12, sender: 'alice', ts: Date.now(), text: 'replay' });
+      window.__bot2botTest_reactions.applyReact(id, '🔥', 'add', 'alice');
+      window.__bot2botTest_reactions.applyReact(id, '🔥', 'add', 'bob');
     }, replayId);
     // Give IDB writes a moment to flush then reload the tab.
     await pageA.waitForTimeout(300);
     await pageA.reload({ waitUntil: 'domcontentloaded' });
-    await pageA.waitForFunction(() => !!window.__safebotTest_reactions, null, { timeout: 10000 });
+    await pageA.waitForFunction(() => !!window.__bot2botTest_reactions, null, { timeout: 10000 });
     // The IDB replay path in room.js renders cached records with their
     // `reactions` field → hydrateReactions → pill row.
     const replayState = await pageA.evaluate((id) => {
@@ -877,9 +877,9 @@ async function e2eReactionsAdversarial() {
     // picker. B sees the pill appear. A deletes the parent. B sees
     // pill + bubble gone.
     await pageA.goto(url, { waitUntil: 'domcontentloaded' });
-    await pageA.waitForFunction(() => !!window.__safebotTest_reactions, null, { timeout: 10000 });
+    await pageA.waitForFunction(() => !!window.__bot2botTest_reactions, null, { timeout: 10000 });
     await pageB.goto(url, { waitUntil: 'domcontentloaded' });
-    await pageB.waitForFunction(() => !!window.__safebotTest_reactions, null, { timeout: 10000 });
+    await pageB.waitForFunction(() => !!window.__bot2botTest_reactions, null, { timeout: 10000 });
 
     // A sends a normal chat message.
     await pageA.fill('#message', 'cross-client reactable');
@@ -899,7 +899,7 @@ async function e2eReactionsAdversarial() {
     });
     if (!bubbleIdOnA) throw new Error('A could not identify its own bubble');
     await pageA.evaluate((id) => {
-      window.__safebotTest_reactions.toggleOwnReaction(id, '👍');
+      window.__bot2botTest_reactions.toggleOwnReaction(id, '👍');
     }, bubbleIdOnA);
 
     // B waits for the pill to show up with count=1.
@@ -912,30 +912,30 @@ async function e2eReactionsAdversarial() {
     pass('reactions: cross-client — A reacts via UI, B observes pill=1 over real WS');
 
     // Now A deletes the parent. B's bubble + reactions both disappear.
-    await pageA.evaluate((id) => window.__safebotTest.applyDelete(id, 0), bubbleIdOnA);
+    await pageA.evaluate((id) => window.__bot2botTest.applyDelete(id, 0), bubbleIdOnA);
     // ^ local-only on A is fine for this check; the cross-client side is
     //   already exercised above. We do want to also verify B drops the
     //   aggregate on its side when a delete envelope arrives — re-trigger
     //   via the normal delete path (initiateDelete broadcasts).
     await pageA.evaluate((id) => {
-      const env = { safebot_delete_v1: true, target_id: id, target_seq: 0 };
-      // Broadcast via the app's own postProtocol equivalent: safebotDelete
+      const env = { bot2bot_delete_v1: true, target_id: id, target_seq: 0 };
+      // Broadcast via the app's own postProtocol equivalent: bot2botDelete
       // would confirm() — use the exposed hook instead.
-      return window.__safebotTest.applyDelete(id, 0);
+      return window.__bot2botTest.applyDelete(id, 0);
     }, bubbleIdOnA);
     // Real cross-client delete: click × with confirm stubbed. Instead
     // of wiring the UI, send a delete envelope via the app's
-    // initiateDelete by using window.safebotDelete AND auto-accepting
+    // initiateDelete by using window.bot2botDelete AND auto-accepting
     // the confirm dialog.
     await pageA.evaluate(() => { window.confirm = () => true; });
-    await pageA.evaluate((id) => window.safebotDelete(id, 0), bubbleIdOnA);
+    await pageA.evaluate((id) => window.bot2botDelete(id, 0), bubbleIdOnA);
     await pageB.waitForFunction((id) => {
       const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
       return !el; // bubble gone (or its delete envelope applied)
     }, bubbleIdOnA, { timeout: 6000 });
     const bState = await pageB.evaluate((id) => ({
       hasBubble: !!document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`),
-      hasAggregate: window.__safebotTest_reactions.reactionsByMsgId.has(id),
+      hasAggregate: window.__bot2botTest_reactions.reactionsByMsgId.has(id),
     }), bubbleIdOnA);
     if (bState.hasBubble) throw new Error('B did not drop bubble after cross-client delete');
     if (bState.hasAggregate) throw new Error('B did not drop reaction aggregate after cross-client delete');
@@ -957,17 +957,17 @@ async function e2eReactionsV2() {
     const rid = 'RXV2' + crypto.randomBytes(3).toString('hex').toUpperCase();
     const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
     await page.goto(`${BASE}/room/${rid}#k=${key}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => !!window.__safebotTest_reactions, null, { timeout: 10000 });
+    await page.waitForFunction(() => !!window.__bot2botTest_reactions, null, { timeout: 10000 });
 
     const id = crypto.randomUUID();
     await page.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'target' });
+      window.__bot2botTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'target' });
     }, id);
 
     // 1. Custom (non-preset) emoji aggregates like any other and orders
     //    after presets.
     await page.evaluate((id) => {
-      const R = window.__safebotTest_reactions;
+      const R = window.__bot2botTest_reactions;
       R.applyReact(id, '👍', 'add', 'alice');
       R.applyReact(id, '🎉', 'add', 'bob');       // not in REACTION_PRESETS
       R.applyReact(id, '🎉', 'add', 'carol');
@@ -994,8 +994,8 @@ async function e2eReactionsV2() {
     // 2. Actor tooltip formatting: singleton, small list, "N more" path.
     const tooltipId = crypto.randomUUID();
     await page.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 2, sender: 'alice', ts: Date.now(), text: 'tooltip' });
-      const R = window.__safebotTest_reactions;
+      window.__bot2botTest.renderMessage({ id, seq: 2, sender: 'alice', ts: Date.now(), text: 'tooltip' });
+      const R = window.__bot2botTest_reactions;
       // Singleton.
       R.applyReact(id, '🔥', 'add', 'solo');
       // Small list (3 names).
@@ -1026,8 +1026,8 @@ async function e2eReactionsV2() {
     const hostile = '<img src=x onerror=window.__xss=1>';
     const hostileSibling = '<script>window.__xss2=1</script>';
     await page.evaluate(({ id, hostile, hostileSibling }) => {
-      window.__safebotTest.renderMessage({ id, seq: 3, sender: 'alice', ts: Date.now(), text: 'xss-probe' });
-      const R = window.__safebotTest_reactions;
+      window.__bot2botTest.renderMessage({ id, seq: 3, sender: 'alice', ts: Date.now(), text: 'xss-probe' });
+      const R = window.__bot2botTest_reactions;
       R.applyReact(id, hostile, 'add', 'mallory');
       R.applyReact(id, hostileSibling, 'add', 'mallory');
     }, { id: hostileId, hostile, hostileSibling });
@@ -1065,7 +1065,7 @@ async function e2eReplyReactionsEdgeCases() {
     const rid = 'EDGE' + crypto.randomBytes(3).toString('hex').toUpperCase();
     const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
     await page.goto(`${BASE}/room/${rid}#k=${key}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => !!window.__safebotTest_reactions, null, { timeout: 10000 });
+    await page.waitForFunction(() => !!window.__bot2botTest_reactions, null, { timeout: 10000 });
 
     // --- 1. Deep reply chain (reply-to-reply-to-reply) ---
     // Each level's quoted preview points at its direct parent, not
@@ -1074,9 +1074,9 @@ async function e2eReplyReactionsEdgeCases() {
     const idL2 = crypto.randomUUID();
     const idL3 = crypto.randomUUID();
     await page.evaluate(({ idL1, idL2, idL3 }) => {
-      window.__safebotTest.renderMessage({ id: idL1, seq: 1, sender: 'alice', ts: Date.now(), text: 'root message' });
-      window.__safebotTest.renderMessage({ id: idL2, seq: 2, sender: 'bob',   ts: Date.now(), text: 'reply to alice', reply_to: idL1 });
-      window.__safebotTest.renderMessage({ id: idL3, seq: 3, sender: 'carol', ts: Date.now(), text: 'reply to bob',   reply_to: idL2 });
+      window.__bot2botTest.renderMessage({ id: idL1, seq: 1, sender: 'alice', ts: Date.now(), text: 'root message' });
+      window.__bot2botTest.renderMessage({ id: idL2, seq: 2, sender: 'bob',   ts: Date.now(), text: 'reply to alice', reply_to: idL1 });
+      window.__bot2botTest.renderMessage({ id: idL3, seq: 3, sender: 'carol', ts: Date.now(), text: 'reply to bob',   reply_to: idL2 });
     }, { idL1, idL2, idL3 });
     const chain = await page.evaluate(({ idL2, idL3 }) => {
       const l2 = document.querySelector(`.bubble[data-msg-id="${CSS.escape(idL2)}"] .bubble__reply-ref`);
@@ -1101,8 +1101,8 @@ async function e2eReplyReactionsEdgeCases() {
     const childId = crypto.randomUUID();
     const bigText = 'x'.repeat(500);
     await page.evaluate(({ bigId, childId, bigText }) => {
-      window.__safebotTest.renderMessage({ id: bigId, seq: 10, sender: 'alice', ts: Date.now(), text: bigText });
-      window.__safebotTest.renderMessage({ id: childId, seq: 11, sender: 'bob', ts: Date.now(), text: 'reply', reply_to: bigId });
+      window.__bot2botTest.renderMessage({ id: bigId, seq: 10, sender: 'alice', ts: Date.now(), text: bigText });
+      window.__bot2botTest.renderMessage({ id: childId, seq: 11, sender: 'bob', ts: Date.now(), text: 'reply', reply_to: bigId });
     }, { bigId, childId, bigText });
     const trunc = await page.evaluate((childId) => {
       const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(childId)}"] .bubble__reply-ref__preview`);
@@ -1118,17 +1118,17 @@ async function e2eReplyReactionsEdgeCases() {
     // must not mutate aggregate.
     const rxTarget = crypto.randomUUID();
     await page.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 20, sender: 'alice', ts: Date.now(), text: 'rx-target' });
+      window.__bot2botTest.renderMessage({ id, seq: 20, sender: 'alice', ts: Date.now(), text: 'rx-target' });
     }, rxTarget);
     const before = await page.evaluate((id) =>
-      window.__safebotTest_reactions.reactionsByMsgId.has(id), rxTarget);
+      window.__bot2botTest_reactions.reactionsByMsgId.has(id), rxTarget);
     if (before) throw new Error('seeded aggregate not empty');
 
     // Drive the protocol path directly: tryApplyReactEnvelope is not
     // exposed, but applyReact is — simulate the "hostile inner state"
     // by calling with bad arguments; the internals must not throw.
     await page.evaluate((id) => {
-      const R = window.__safebotTest_reactions;
+      const R = window.__bot2botTest_reactions;
       // bad emoji types — all rejected
       try { R.applyReact(id, null, 'add', 'mallory'); } catch (_) {}
       try { R.applyReact(id, '', 'add', 'mallory'); } catch (_) {}
@@ -1140,7 +1140,7 @@ async function e2eReplyReactionsEdgeCases() {
       try { R.applyReact(id, '👍', 'add', null); } catch (_) {}
     }, rxTarget);
     const after = await page.evaluate((id) => {
-      const m = window.__safebotTest_reactions.reactionsByMsgId.get(id);
+      const m = window.__bot2botTest_reactions.reactionsByMsgId.get(id);
       return m ? Object.fromEntries(Array.from(m.entries()).map(([k, v]) => [k, Array.from(v)])) : {};
     }, rxTarget);
     // Stricter contract since applyReact now rejects non-string emoji
@@ -1155,8 +1155,8 @@ async function e2eReplyReactionsEdgeCases() {
     // --- 4. A11y: aria-pressed on pill reflects is-mine state ---
     const a11yId = crypto.randomUUID();
     await page.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 30, sender: 'alice', ts: Date.now(), text: 'a11y' });
-      const R = window.__safebotTest_reactions;
+      window.__bot2botTest.renderMessage({ id, seq: 30, sender: 'alice', ts: Date.now(), text: 'a11y' });
+      const R = window.__bot2botTest_reactions;
       R.applyReact(id, '👍', 'add', 'bob'); // bystander
     }, a11yId);
     // Before self-react: pill exists but aria-pressed=false (not mine).
@@ -1166,7 +1166,7 @@ async function e2eReplyReactionsEdgeCases() {
     }, a11yId);
     if (aria !== 'false') throw new Error('bystander pill should be aria-pressed=false, got ' + aria);
     // Self-react → aria-pressed=true after the toggle.
-    await page.evaluate((id) => window.__safebotTest_reactions.toggleOwnReaction(id, '👍'), a11yId);
+    await page.evaluate((id) => window.__bot2botTest_reactions.toggleOwnReaction(id, '👍'), a11yId);
     aria = await page.evaluate((id) => {
       const p = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"] .bubble__react-pill`);
       return p ? p.getAttribute('aria-pressed') : null;
@@ -1177,7 +1177,7 @@ async function e2eReplyReactionsEdgeCases() {
     // --- 5. Picker keyboard a11y: arrow keys move focus, Escape closes + refocuses trigger ---
     const kbdId = crypto.randomUUID();
     await page.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 40, sender: 'alice', ts: Date.now(), text: 'kbd-target' });
+      window.__bot2botTest.renderMessage({ id, seq: 40, sender: 'alice', ts: Date.now(), text: 'kbd-target' });
     }, kbdId);
     // Open the picker by clicking the trigger.
     await page.evaluate((id) => {
@@ -1215,7 +1215,7 @@ async function e2eReplyReactionsEdgeCases() {
     //        viewport forces the picker to flip below-the-bubble. ---
     const flipId = crypto.randomUUID();
     await page.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 50, sender: 'alice', ts: Date.now(), text: 'flip-target' });
+      window.__bot2botTest.renderMessage({ id, seq: 50, sender: 'alice', ts: Date.now(), text: 'flip-target' });
       const el = document.querySelector(`.bubble[data-msg-id="${CSS.escape(id)}"]`);
       // Force the bubble above the viewport so the picker's default
       // top:28px anchor is BELOW viewport top = 4 (i.e., picker's
@@ -1260,12 +1260,12 @@ async function e2ePermalink() {
     const ctx = await browser.newContext();
     const page = await ctx.newPage();
     await page.goto(roomUrl, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
+    await page.waitForFunction(() => typeof window.__bot2botTest !== 'undefined', null, { timeout: 10000 });
     // Render a known bubble and compute its link via the debug hook.
     const tgtId = crypto.randomUUID();
     const link = await page.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'permalink target' });
-      return window.__safebotTest.buildMessageLink(id);
+      window.__bot2botTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'permalink target' });
+      return window.__bot2botTest.buildMessageLink(id);
     }, tgtId);
     if (!link) throw new Error('buildMessageLink returned empty');
     if (!link.includes(`k=${key}`)) throw new Error('link dropped k fragment: ' + link);
@@ -1287,10 +1287,10 @@ async function e2ePermalink() {
     // first — but since the test room is fresh, we need the target
     // to arrive AFTER page load. The observer should catch it.
     await page2.goto(link, { waitUntil: 'domcontentloaded' });
-    await page2.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
+    await page2.waitForFunction(() => typeof window.__bot2botTest !== 'undefined', null, { timeout: 10000 });
     // Simulate the message arriving via the real render path.
     await page2.evaluate((id) => {
-      window.__safebotTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'permalink target' });
+      window.__bot2botTest.renderMessage({ id, seq: 1, sender: 'alice', ts: Date.now(), text: 'permalink target' });
     }, tgtId);
     // The MutationObserver in room.js should flash it + clear m= from URL.
     await page2.waitForFunction((id) => {
@@ -1311,7 +1311,7 @@ async function e2ePermalink() {
     const ghostId = crypto.randomUUID();
     const ghostLink = `${BASE}/room/${roomId}#k=${key}&m=${ghostId}`;
     await page3.goto(ghostLink, { waitUntil: 'domcontentloaded' });
-    await page3.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
+    await page3.waitForFunction(() => typeof window.__bot2botTest !== 'undefined', null, { timeout: 10000 });
     // Don't render the target. Wait past the 6s cap and verify toast + URL cleared.
     await page3.waitForFunction(() => {
       const t = document.getElementById('toast');
@@ -1338,7 +1338,7 @@ async function e2ePermalink() {
     ];
     for (const { bad, expectFragment } of hostileLinks) {
       await page4.goto(bad, { waitUntil: 'domcontentloaded' });
-      await page4.waitForFunction(() => !!(window.__safebotTest && window.__safebotTest.pendingJumpId), null, { timeout: 10000 });
+      await page4.waitForFunction(() => !!(window.__bot2botTest && window.__bot2botTest.pendingJumpId), null, { timeout: 10000 });
       const state = await page4.evaluate(() => ({
         hash: location.hash,
         flashed: !!document.querySelector('.bubble.is-flash'),
@@ -1352,7 +1352,7 @@ async function e2ePermalink() {
         // there's nothing to time out on later. If it's non-empty, the
         // regex MIS-accepted and the test should fail even if the 6 s
         // miss timer hasn't fired yet.
-        pending: window.__safebotTest.pendingJumpId(),
+        pending: window.__bot2botTest.pendingJumpId(),
       }));
       if (state.pending) {
         throw new Error(`malformed m= armed the jump machinery (pendingJumpId=${JSON.stringify(state.pending)}); regex accepted it: ${bad}`);
@@ -1380,19 +1380,19 @@ async function e2eRoomPowerups() {
     const key = crypto.randomBytes(32).toString('base64url').replace(/=+$/, '');
     const page = await (await browser.newContext()).newPage();
     await page.goto(`${BASE}/room/${roomId}#k=${key}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => typeof window.__safebotTest !== 'undefined', null, { timeout: 10000 });
+    await page.waitForFunction(() => typeof window.__bot2botTest !== 'undefined', null, { timeout: 10000 });
 
     const rootId = crypto.randomUUID();
     const childId = crypto.randomUUID();
     await page.evaluate(({ rootId, childId }) => {
-      window.__safebotTest.renderMessage({
+      window.__bot2botTest.renderMessage({
         id: rootId,
         seq: 1,
         sender: 'alice',
         ts: Date.now() - 1500,
         text: '**Bold** and *italic* with `code`\n- first item\n- second item\n\n```js\nconst x = 1;\n```\n[docs](https://example.com/docs)',
       });
-      window.__safebotTest.renderMessage({
+      window.__bot2botTest.renderMessage({
         id: childId,
         seq: 2,
         sender: 'bob',
@@ -1448,9 +1448,9 @@ async function e2eRoomPowerups() {
     pass('room powerups: historical transcript authors do not appear in the live participants rail');
 
     await page.evaluate(() => {
-      window.__safebotTest.setPeerLastSeen('active-bot', 5_000);
-      window.__safebotTest.setPeerLastSeen('idle-bot', 90_000);
-      window.__safebotTest.setPeerLastSeen('silent-bot', 8 * 60_000);
+      window.__bot2botTest.setPeerLastSeen('active-bot', 5_000);
+      window.__bot2botTest.setPeerLastSeen('idle-bot', 90_000);
+      window.__bot2botTest.setPeerLastSeen('silent-bot', 8 * 60_000);
     });
     const presenceRows = await page.evaluate(() => {
       return Array.from(document.querySelectorAll('#people-list .people__row')).map((row) => row.textContent.replace(/\s+/g, ' ').trim());
@@ -1461,7 +1461,7 @@ async function e2eRoomPowerups() {
     pass('room powerups: presence rail distinguishes active / idle / silent listeners');
 
     await page.evaluate(() => {
-      window.__safebotTest.applyPresenceSnapshot(['active-bot']);
+      window.__bot2botTest.applyPresenceSnapshot(['active-bot']);
     });
     const reconciledRows = await page.evaluate(() => {
       return Array.from(document.querySelectorAll('#people-list .people__row')).map((row) => row.textContent.replace(/\s+/g, ' ').trim());

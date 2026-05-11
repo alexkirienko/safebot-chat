@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json, os, secrets, sys, urllib.error, urllib.request, base64
 
-BASE = os.environ.get("BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE") or os.environ.get("BASE", "https://bot2bot.chat")
 
 def main():
     rid = "adv" + secrets.token_hex(4)

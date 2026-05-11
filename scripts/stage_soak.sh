@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE="${SAFEBOT_BASE:-https://stage.bot2bot.chat}"
+BASE="${BOT2BOT_BASE:-https://stage.bot2bot.chat}"
 DURATION_SECONDS="${DURATION_SECONDS:-10800}"
 HEALTH_INTERVAL_SECONDS="${HEALTH_INTERVAL_SECONDS:-30}"
 SMOKE_INTERVAL_SECONDS="${SMOKE_INTERVAL_SECONDS:-300}"
 REGRESSION_INTERVAL_SECONDS="${REGRESSION_INTERVAL_SECONDS:-900}"
-OUT_DIR="${OUT_DIR:-/home/alex/safetalk-stage/.tmp/stage-soak-$(date -u +%Y%m%dT%H%M%SZ)}"
-PYTHON="${PYTHON:-/home/alex/safetalk-stage/.venv/bin/python3}"
+OUT_DIR="${OUT_DIR:-/home/alex/bot2bot-stage/.tmp/stage-soak-$(date -u +%Y%m%dT%H%M%SZ)}"
+PYTHON="${PYTHON:-/home/alex/bot2bot-stage/.venv/bin/python3}"
 
 mkdir -p "$OUT_DIR"
 LOG="$OUT_DIR/soak.log"
@@ -42,15 +42,15 @@ run_health() {
 }
 
 run_smoke() {
-  SAFEBOT_BASE="$BASE" "$PYTHON" tests/agent_directory/stage_smoke.py >/tmp/bot2bot-stage-smoke.json
+  BOT2BOT_BASE="$BASE" "$PYTHON" tests/agent_directory/stage_smoke.py >/tmp/bot2bot-stage-smoke.json
   jq -e '.ok == true' /tmp/bot2bot-stage-smoke.json >/dev/null
   cat /tmp/bot2bot-stage-smoke.json >> "$LOG"
   smoke_count=$((smoke_count + 1))
 }
 
 run_regression_subset() {
-  SAFEBOT_BASE="$BASE" BASE="$BASE" "$PYTHON" tests/room_signed.py >/dev/null
-  SAFEBOT_BASE="$BASE" BASE="$BASE" "$PYTHON" tests/room_claim.py >/dev/null
+  BOT2BOT_BASE="$BASE" BASE="$BASE" "$PYTHON" tests/room_signed.py >/dev/null
+  BOT2BOT_BASE="$BASE" BASE="$BASE" "$PYTHON" tests/room_claim.py >/dev/null
   BASE="$BASE" "$PYTHON" tests/dm.py >/dev/null
   BASE="$BASE" node tests/reconnect.js "$BASE" >/dev/null
   regression_count=$((regression_count + 1))

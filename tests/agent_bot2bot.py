@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke tests for sdk/agent_safebot.py (host-agnostic listener launcher).
+"""Smoke tests for sdk/agent_bot2bot.py (host-agnostic listener launcher).
 
 Covers:
   1. --host custom --cmd template exec's the right argv and receives the prompt
@@ -23,7 +23,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "sdk" / "agent_safebot.py"
+SCRIPT = ROOT / "sdk" / "agent_bot2bot.py"
 
 
 FAKE_HOST = r"""#!/usr/bin/env python3
@@ -38,10 +38,10 @@ log = os.environ["TEST_LOG"]
 with open(log, "a", encoding="utf-8") as f:
     f.write(json.dumps(sys.argv[1:]) + "\n")
 if os.environ.get("TEST_HOST_RELEASE") == "1":
-    print(os.environ.get("TEST_RELEASE_SENTINEL", "SAFEBOT_RELEASED_BY_ROOM"))
+    print(os.environ.get("TEST_RELEASE_SENTINEL", "BOT2BOT_RELEASED_BY_ROOM"))
     sys.exit(0)
 if os.environ.get("TEST_HOST_EMBED_RELEASE") == "1":
-    print(f"summary contains {os.environ.get('TEST_RELEASE_SENTINEL', 'SAFEBOT_RELEASED_BY_ROOM')} but is not a release")
+    print(f"summary contains {os.environ.get('TEST_RELEASE_SENTINEL', 'BOT2BOT_RELEASED_BY_ROOM')} but is not a release")
     sys.exit(int(os.environ.get("TEST_HOST_EXIT_RC", "0")))
 cf = os.environ.get("TEST_HOST_COUNT")
 if cf:
@@ -89,7 +89,7 @@ def case_custom_once() -> None:
             "--host", "custom",
             "--cmd", "fake-host --mode listener {room_url}",
             "--once",
-            "https://safebot.chat/room/ABC#k=xyz",
+            "https://bot2bot.chat/room/ABC#k=xyz",
         ], env)
         assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
         lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
@@ -97,7 +97,7 @@ def case_custom_once() -> None:
         argv = lines[0]
         # Template rendered room_url and appended the prompt as final arg.
         assert argv[0] == "--mode" and argv[1] == "listener", argv
-        assert argv[2] == "https://safebot.chat/room/ABC#k=xyz", argv
+        assert argv[2] == "https://bot2bot.chat/room/ABC#k=xyz", argv
         ok("custom host + --once launches once with rendered template")
 
 
@@ -115,7 +115,7 @@ def case_release_sentinel() -> None:
         proc = run([
             "--host", "custom",
             "--cmd", "fake-host",
-            "https://safebot.chat/room/ABC#k=xyz",
+            "https://bot2bot.chat/room/ABC#k=xyz",
         ], env, timeout=15)
         assert proc.returncode == 0, (proc.returncode, proc.stderr)
         lines = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
@@ -143,12 +143,12 @@ def case_embedded_sentinel_does_not_release() -> None:
         env["TEST_LOG"] = str(log)
         env["TEST_HOST_EMBED_RELEASE"] = "1"         # print sentinel *embedded* in a longer line
         env["TEST_HOST_EXIT_RC"] = "9"
-        env["SAFEBOT_FAST_FAIL_PLATEAU_SEC"] = "1"   # keep CI fast
+        env["BOT2BOT_FAST_FAIL_PLATEAU_SEC"] = "1"   # keep CI fast
         timed_out = False
         try:
             subprocess.run(
                 [sys.executable, str(SCRIPT), "--host", "custom", "--cmd", "fake-host",
-                 "https://safebot.chat/room/ABC#k=xyz"],
+                 "https://bot2bot.chat/room/ABC#k=xyz"],
                 cwd=ROOT, env=env, text=True, capture_output=True, timeout=12,
             )
             raise AssertionError("wrapper exited on its own after seeing an embedded sentinel string")
@@ -185,8 +185,8 @@ def case_fast_fail_plateau_never_exits() -> None:
         env["HOME"] = str(lockhome)
         env["TEST_LOG"] = str(log)
         env["TEST_HOST_EXIT_RC"] = "7"           # immediate non-zero exit each time
-        env["SAFEBOT_MAX_FAST_FAILS"] = "3"      # old cap value — must be IGNORED now
-        env["SAFEBOT_FAST_FAIL_PLATEAU_SEC"] = "1"  # keep CI fast (≤1s plateau)
+        env["BOT2BOT_MAX_FAST_FAILS"] = "3"      # old cap value — must be IGNORED now
+        env["BOT2BOT_FAST_FAIL_PLATEAU_SEC"] = "1"  # keep CI fast (≤1s plateau)
         timed_out = False
         stderr_text = ""
         try:
@@ -196,7 +196,7 @@ def case_fast_fail_plateau_never_exits() -> None:
             # MUST hit our TimeoutExpired guard instead of returning.
             subprocess.run(
                 [sys.executable, str(SCRIPT), "--host", "custom", "--cmd", "fake-host",
-                 "https://safebot.chat/room/ABC#k=xyz"],
+                 "https://bot2bot.chat/room/ABC#k=xyz"],
                 cwd=ROOT, env=env, text=True, capture_output=True, timeout=12,
             )
             raise AssertionError("wrapper exited on its own — persistent contract violated")
@@ -224,14 +224,14 @@ def case_print_prompt() -> None:
         "--cmd", "fake-host",
         "--custom-handle", "my-bot",
         "--print-prompt",
-        "https://safebot.chat/room/ABC#k=xyz",
+        "https://bot2bot.chat/room/ABC#k=xyz",
     ], {})
     assert proc.returncode == 0, (proc.returncode, proc.stderr)
     out = proc.stdout
     assert "Receive loop" in out, out
     assert "@my-bot" in out, "custom handle should appear in prompt"
-    assert "SAFEBOT_RELEASED_BY_ROOM" in out, out
-    assert "https://safebot.chat/room/ABC#k=xyz" in out
+    assert "BOT2BOT_RELEASED_BY_ROOM" in out, out
+    assert "https://bot2bot.chat/room/ABC#k=xyz" in out
     assert "Do NOT send a startup" in out, out
     ok("--print-prompt emits prompt with room URL + custom @handle")
 
@@ -243,7 +243,7 @@ def case_claude_code_addendum() -> None:
     proc = run([
         "--host", "claude-code",
         "--print-prompt",
-        "https://safebot.chat/room/ABC#k=xyz",
+        "https://bot2bot.chat/room/ABC#k=xyz",
     ], {"PATH": "/nonexistent"})
     assert proc.returncode == 0, f"--print-prompt must not invoke ensure_ready, got rc={proc.returncode}: {proc.stderr}"
     out = proc.stdout
@@ -282,7 +282,7 @@ def case_custom_sentinel_honoured() -> None:
             "--host", "custom",
             "--cmd", "echo-host marker={release_sentinel}",
             "--release-sentinel", "CUSTOM_STOP_42",
-            "https://safebot.chat/room/ABC#k=xyz",
+            "https://bot2bot.chat/room/ABC#k=xyz",
         ], env, timeout=15)
         assert proc.returncode == 0, (proc.returncode, proc.stderr)
         assert "CUSTOM_STOP_42" in proc.stdout, proc.stdout
@@ -310,7 +310,7 @@ def case_lock_refuses_second_listener() -> None:
         # other test rooms or stale locks from developer machines.
         import secrets
         room = "LOCK" + secrets.token_hex(3).upper()
-        url = f"https://safebot.chat/room/{room}#k=xyz"
+        url = f"https://bot2bot.chat/room/{room}#k=xyz"
         # First launcher: runs fake-host which hangs until we kill it.
         # Easiest: use TEST_HOST_COUNT so it exits with rc=0 after 1
         # invocation, then keeps respawning every 2s. Spawn and wait

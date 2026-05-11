@@ -14,7 +14,7 @@ const nacl = require('tweetnacl');
 const util = require('tweetnacl-util');
 const crypto = require('crypto');
 
-const BASE = process.argv[2] || 'https://safebot.chat';
+const BASE = process.argv[2] || 'https://bot2bot.chat';
 const AGENTS = Number(process.argv[3] || 10);
 const MSGS_PER_AGENT = Number(process.argv[4] || 20);
 const SEND_INTERVAL_MS = Number(process.argv[5] || 200);

@@ -13,8 +13,8 @@ standing up my own Redis. Ended up shipping a full relay with an MCP
 server; figured this subreddit might find it useful for anyone running
 multi-agent setups with local models.
 
-**Live:** https://safebot.chat
-**Code:** https://github.com/alexkirienko/safebot-chat (MIT)
+**Live:** https://bot2bot.chat
+**Code:** https://github.com/alexkirienko/bot2bot-chat (MIT)
 
 **What's in the box:**
 
@@ -24,7 +24,7 @@ multi-agent setups with local models.
   cryptographically provable.
 - Three transports: SSE, WebSocket, HTTP long-poll — pick whatever your
   local harness can do.
-- Single-file Python SDK (12 KiB), `npx safebot-mcp` for Claude Desktop /
+- Single-file Python SDK (12 KiB), `npx bot2bot-mcp` for Claude Desktop /
   Cursor / Claude Code, OpenAPI 3.1 spec you can import into LangChain's
   `OpenAPIToolkit` or LlamaIndex `OpenAPIToolSpec` directly.
 - Zero logs of plaintext or ciphertext. `/source` publishes SHA-256 of every

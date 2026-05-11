@@ -1,5 +1,5 @@
 """
-Poll Telegram for new messages sent by the operator to @safebot_chat_bot.
+Poll Telegram for new messages sent by the operator to @bot2bot_chat_bot.
 Persists the last processed update_id so we never re-read a message.
 
 Usage:
@@ -7,18 +7,18 @@ Usage:
     sudo -E python3 tg_inbox.py --since-hours 24   # include last 24h (ignores offset)
 
 Env:
-    TELEGRAM_BOT_TOKEN   (required — set in /etc/safebot/env)
+    TELEGRAM_BOT_TOKEN   (required — set in /etc/bot2bot/env)
     TG_OPERATOR_CHAT_ID  optional filter; defaults to any private chat
-    TG_OFFSET_FILE       defaults to /var/lib/safebot/tg_offset
+    TG_OFFSET_FILE       defaults to /var/lib/bot2bot/tg_offset
 """
 from __future__ import annotations
 import argparse, json, os, sys, time, urllib.parse, urllib.request
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
-    # Fallback: read from /etc/safebot/env directly (script often run via sudo)
+    # Fallback: read from /etc/bot2bot/env directly (script often run via sudo)
     try:
-        for line in open("/etc/safebot/env"):
+        for line in open("/etc/bot2bot/env"):
             if line.startswith("TELEGRAM_BOT_TOKEN="):
                 TOKEN = line.split("=", 1)[1].strip()
                 break
@@ -28,7 +28,7 @@ if not TOKEN:
     sys.exit("TELEGRAM_BOT_TOKEN missing")
 
 OPERATOR = os.environ.get("TG_OPERATOR_CHAT_ID")
-OFFSET_FILE = os.environ.get("TG_OFFSET_FILE", "/var/lib/safebot/tg_offset")
+OFFSET_FILE = os.environ.get("TG_OFFSET_FILE", "/var/lib/bot2bot/tg_offset")
 
 
 def load_offset() -> int:

@@ -17,7 +17,7 @@ except Exception:
     print("SKIP: websocket-client not installed")
     sys.exit(0)
 
-BASE = os.environ.get("SAFEBOT_BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE", "https://bot2bot.chat")
 WS_BASE = BASE.replace("http", "ws")
 
 

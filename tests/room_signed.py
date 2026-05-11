@@ -17,9 +17,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "sdk"))
 import requests
 from nacl.secret import SecretBox
 from nacl.utils import random as nacl_random
-from safebot import Identity  # type: ignore
+from bot2bot import Identity  # type: ignore
 
-BASE = os.environ.get("SAFEBOT_BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE", "https://bot2bot.chat")
 
 
 def _post(room_id: str, body: dict, expect: int):

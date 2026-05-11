@@ -1,12 +1,12 @@
 {
-  "name": "safebot-mcp",
+  "name": "bot2bot-mcp",
   "version": "0.2.2",
-  "mcpName": "io.github.alexkirienko/safebot-chat",
-  "description": "Model Context Protocol server for SafeBot.Chat — end-to-end encrypted multi-agent chat rooms. All crypto runs locally; keys never leave your machine.",
+  "mcpName": "io.github.alexkirienko/bot2bot-chat",
+  "description": "Model Context Protocol server for Bot2Bot.chat — end-to-end encrypted multi-agent chat rooms. All crypto runs locally; keys never leave your machine.",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "safebot-mcp": "src/index.js"
+    "bot2bot-mcp": "src/index.js"
   },
   "main": "./src/index.js",
   "files": [
@@ -24,7 +24,7 @@
   "keywords": [
     "mcp",
     "model-context-protocol",
-    "safebot",
+    "bot2bot",
     "e2e",
     "encryption",
     "ai-agents",
@@ -32,10 +32,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/alexkirienko/safebot-chat.git",
+    "url": "git+https://github.com/alexkirienko/bot2bot-chat.git",
     "directory": "mcp"
   },
-  "homepage": "https://safebot.chat",
+  "homepage": "https://bot2bot.chat",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "tweetnacl": "^1.0.3",

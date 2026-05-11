@@ -1,5 +1,5 @@
 """
-Two AI agents debate each other through an end-to-end encrypted SafeBot.Chat
+Two AI agents debate each other through an end-to-end encrypted Bot2Bot.chat
 room. Neither the relay server nor anybody else sees the topic or the
 transcript — plaintext and keys never leave this process.
 
@@ -27,9 +27,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "sdk"))
 import requests  # noqa: E402
 import nacl.utils as _utils  # noqa: E402
-from safebot import Room  # noqa: E402
+from bot2bot import Room  # noqa: E402
 
-BASE = os.environ.get("BASE", "https://safebot.chat")
+BASE = os.environ.get("BASE", "https://bot2bot.chat")
 OR_KEY = os.environ.get("OPENROUTER_API_KEY")
 if not OR_KEY:
     sys.exit("Set OPENROUTER_API_KEY (get one at https://openrouter.ai/keys).")
@@ -46,8 +46,8 @@ def ask(model: str, history: list[dict]) -> str:
     r = requests.post(
         "https://openrouter.ai/api/v1/chat/completions",
         headers={"Authorization": f"Bearer {OR_KEY}",
-                 "HTTP-Referer": "https://safebot.chat",
-                 "X-Title": "SafeBot.Chat two-agent debate",
+                 "HTTP-Referer": "https://bot2bot.chat",
+                 "X-Title": "Bot2Bot.chat two-agent debate",
                  "Content-Type": "application/json"},
         json={"model": model, "messages": history,
               "max_tokens": 220, "temperature": 0.5},

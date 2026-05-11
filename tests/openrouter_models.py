@@ -1,5 +1,5 @@
 """
-Test 4 OpenRouter LLMs driving the SafeBot.Chat Python SDK.
+Test 4 OpenRouter LLMs driving the Bot2Bot.chat Python SDK.
 
 For each model we:
   1. Mint a fresh room URL client-side (so the server never sees the key).
@@ -15,7 +15,7 @@ Pass criteria per model:
   - 10/10 turns produced a non-empty reply
   - replies arrived in seq-monotonic order
   - zero exceptions / HTTP errors
-  - p95 round-trip ≤ 15 s (OpenRouter latency + SafeBot relay)
+  - p95 round-trip ≤ 15 s (OpenRouter latency + Bot2Bot relay)
 """
 from __future__ import annotations
 import base64, json, os, secrets, sys, threading, time
@@ -24,10 +24,10 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
 import requests
-from safebot import Room  # noqa: E402
+from bot2bot import Room  # noqa: E402
 import nacl.utils as _utils
 
-BASE = os.environ.get("BASE", "https://safebot.chat")
+BASE = os.environ.get("BOT2BOT_BASE") or os.environ.get("BASE", "https://bot2bot.chat")
 OR_KEY = os.environ["OPENROUTER_API_KEY"]
 OR_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -75,8 +75,8 @@ def call_openrouter(model: str, history: list[dict], timeout: float = 60.0) -> s
         OR_URL,
         headers={
             "Authorization": f"Bearer {OR_KEY}",
-            "HTTP-Referer": "https://safebot.chat",
-            "X-Title": "SafeBot.Chat multi-model test",
+            "HTTP-Referer": "https://bot2bot.chat",
+            "X-Title": "Bot2Bot.chat multi-model test",
             "Content-Type": "application/json",
         },
         json={"model": model, "messages": history, "max_tokens": 220, "temperature": 0.4},
@@ -100,7 +100,7 @@ def run_one(label: str, model: str) -> dict:
     bot = Room(url, name=label)
 
     sys_prompt = (
-        f"You are {label} joining an end-to-end encrypted group chat via SafeBot.Chat. "
+        f"You are {label} joining an end-to-end encrypted group chat via Bot2Bot.chat. "
         "The server only sees ciphertext — plaintext lives in the participants' clients. "
         "Keep replies short (≤ 80 words), plain text, no markdown headers, no code blocks. "
         "Reply in character as a helpful agent. If you don't know, say so."

@@ -7,11 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.join(__dirname, '..', 'src', 'index.js');
-// Prefer SAFEBOT_BASE (matches server and all other test suites); fall
+// Prefer BOT2BOT_BASE (matches server and all other test suites); fall
 // back to legacy BASE for local dev callers, then prod. In CI this will
-// pick up SAFEBOT_BASE=http://127.0.0.1:3123 so the self-echo assertion
+// pick up BOT2BOT_BASE=http://127.0.0.1:3123 so the self-echo assertion
 // runs against a fresh server, not prod where state may already be dirty.
-const BASE = process.env.SAFEBOT_BASE || process.env.BASE || 'https://safebot.chat';
+const BASE = process.env.BOT2BOT_BASE || process.env.BASE || 'https://bot2bot.chat';
 
 function jsonrpc(id, method, params) {
   return JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
@@ -20,7 +20,7 @@ function jsonrpc(id, method, params) {
 function startServer() {
   const p = spawn('node', [BIN], {
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, SAFEBOT_BASE: BASE },
+    env: { ...process.env, BOT2BOT_BASE: BASE },
   });
   p.stderr.on('data', (chunk) => process.stderr.write('[mcp stderr] ' + chunk));
   return p;
@@ -87,8 +87,8 @@ async function main() {
   // 2. List tools
   const list = await rpc(server, 2, 'tools/list', {});
   const names = (list.tools || []).map((t) => t.name).sort();
-  expect(names.length === 8, `tools/list returns 8 tools (got ${names.length})`);
-  for (const wanted of ['create_room', 'send_message', 'wait_for_messages', 'get_transcript', 'room_status', 'next_task', 'claim_task', 'ack_task']) {
+  expect(names.length === 10, `tools/list returns 10 tools (got ${names.length})`);
+  for (const wanted of ['create_room', 'send_message', 'add_reaction', 'remove_reaction', 'wait_for_messages', 'get_transcript', 'room_status', 'next_task', 'claim_task', 'ack_task']) {
     expect(names.includes(wanted), `tool "${wanted}" is listed`);
   }
   const sendTool = (list.tools || []).find((t) => t.name === 'send_message');
@@ -114,10 +114,24 @@ async function main() {
   // 5. send_message
   const sent = await callTool(server, 5, 'send_message', { url: roomUrl, text: 'smoke test hello', name: 'smoke-sender' });
   const sentText = extractText(sent);
+  const messageIdMatch = sentText.match(/message_id=([A-Za-z0-9_-]{8,64})/);
+  const messageId = messageIdMatch ? messageIdMatch[1] : '';
+  expect(!!messageId, 'send_message returns an explicit message_id');
   expect(/seq=\d+/.test(sentText), 'send_message returns a seq');
 
-  // 6. wait_for_messages with include_self=true should see our own message.
-  const got = await callTool(server, 6, 'wait_for_messages', {
+  // 6. add_reaction / remove_reaction should post protocol envelopes without
+  // forcing the caller to craft raw JSON manually.
+  const addReact = await callTool(server, 6, 'add_reaction', { url: roomUrl, target_id: messageId, emoji: '👍', name: 'smoke-sender' });
+  const addReactText = extractText(addReact);
+  expect(/reaction added: target_id=/.test(addReactText), 'add_reaction acknowledges the target_id it mutated');
+  expect(/message_id=[A-Za-z0-9_-]{8,64}/.test(addReactText), 'add_reaction returns the reaction envelope message id');
+
+  const removeReact = await callTool(server, 7, 'remove_reaction', { url: roomUrl, target_id: messageId, emoji: '👍', name: 'smoke-sender' });
+  const removeReactText = extractText(removeReact);
+  expect(/reaction removed: target_id=/.test(removeReactText), 'remove_reaction acknowledges the target_id it mutated');
+
+  // 7. wait_for_messages with include_self=true should see our own message.
+  const got = await callTool(server, 11, 'wait_for_messages', {
     url: roomUrl,
     after_seq: 0,
     timeout_seconds: 5,
@@ -127,16 +141,18 @@ async function main() {
   const gotText = extractText(got);
   expect(gotText.includes('smoke test hello'), 'wait_for_messages round-trips the plaintext');
 
-  // 7. get_transcript also sees it
-  const tr = await callTool(server, 7, 'get_transcript', { url: roomUrl });
-  expect(extractText(tr).includes('smoke test hello'), 'get_transcript round-trips the plaintext');
+  // 8. get_transcript also sees it, plus the reaction envelopes.
+  const tr = await callTool(server, 12, 'get_transcript', { url: roomUrl });
+  const trText = extractText(tr);
+  expect(trText.includes('smoke test hello'), 'get_transcript round-trips the plaintext');
+  expect(/"bot2bot_react_v1"\s*:\s*true/.test(trText), 'get_transcript exposes the reaction protocol envelope for auditing');
 
-  // 8. Self-echo guard: send_message under a custom name, then claim_task must
+  // 9. Self-echo guard: send_message under a custom name, then claim_task must
   // NOT return our own message as foreign. This proves the session-senders
   // auto-exclude works (pre-fix: the custom name wasn't on the server's
   // auto-exclude list, so claim_task looped on our own posts forever).
-  await callTool(server, 8, 'send_message', { url: roomUrl, text: 'echo guard payload', name: 'alice-via-mcp' });
-  const claim = await callTool(server, 9, 'claim_task', { url: roomUrl, timeout_seconds: 2 });
+  await callTool(server, 13, 'send_message', { url: roomUrl, text: 'echo guard payload', name: 'alice-via-mcp' });
+  const claim = await callTool(server, 14, 'claim_task', { url: roomUrl, timeout_seconds: 2 });
   const claimText = extractText(claim);
   expect(
     /\(no new messages/.test(claimText) && !claimText.includes('echo guard payload'),

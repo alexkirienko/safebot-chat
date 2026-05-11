@@ -1,21 +1,21 @@
 """
 One-shot provisioner for the greeter service.
 
-  1. Generates the @safebot Identity (box + sign keypairs) and registers it on
+  1. Generates the @bot2bot Identity (box + sign keypairs) and registers it on
      the live server using the operator IDENTITY_ADMIN_TOKEN to bypass the
      reserved handle list.
   2. Mints a persistent demo room URL (client-generated 256-bit key) and saves
      it alongside the identity.
 
 Writes:
-  /etc/safebot/greeter/identity.key   (600, owner alex)
-  /etc/safebot/greeter/demo_room.url  (600, owner alex)
+  /etc/bot2bot/greeter/identity.key   (600, owner alex)
+  /etc/bot2bot/greeter/demo_room.url  (600, owner alex)
 
 Environment:
-  SAFEBOT_BASE            defaults to https://safebot.chat
-  IDENTITY_ADMIN_TOKEN    required to claim reserved handles — read from env or /etc/safebot/env.
-  SAFEBOT_GREETER_DIR     defaults to /etc/safebot/greeter
-  SAFEBOT_HANDLE          defaults to 'safebot'
+  BOT2BOT_BASE            defaults to https://bot2bot.chat
+  IDENTITY_ADMIN_TOKEN    required to claim reserved handles — read from env or /etc/bot2bot/env.
+  BOT2BOT_GREETER_DIR     defaults to /etc/bot2bot/greeter
+  BOT2BOT_HANDLE          defaults to 'bot2bot'
 """
 from __future__ import annotations
 
@@ -28,11 +28,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "sdk"))
 
 import requests
-from safebot import Identity  # noqa: E402
+from bot2bot import Identity  # noqa: E402
 
-BASE = os.environ.get("SAFEBOT_BASE", "https://safebot.chat")
-CONFIG_DIR = os.environ.get("SAFEBOT_GREETER_DIR", "/etc/safebot/greeter")
-HANDLE = os.environ.get("SAFEBOT_HANDLE", "safebot")
+BASE = os.environ.get("BOT2BOT_BASE", "https://bot2bot.chat")
+CONFIG_DIR = os.environ.get("BOT2BOT_GREETER_DIR", "/etc/bot2bot/greeter")
+HANDLE = os.environ.get("BOT2BOT_HANDLE", "bot2bot")
 ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 
@@ -40,7 +40,7 @@ def _env_or_envfile(name: str) -> str:
     tok = os.environ.get(name)
     if tok: return tok
     try:
-        with open("/etc/safebot/env") as f:
+        with open("/etc/bot2bot/env") as f:
             for line in f:
                 if line.startswith(f"{name}="):
                     return line.split("=", 1)[1].strip()
@@ -56,7 +56,7 @@ def load_admin_token() -> str:
     # and preserving it here would let a leaked dashboard credential mint
     # reserved identities via the operator workflow. Fail loud instead.
     raise RuntimeError(
-        "IDENTITY_ADMIN_TOKEN must be set (env or /etc/safebot/env) to claim a reserved handle"
+        "IDENTITY_ADMIN_TOKEN must be set (env or /etc/bot2bot/env) to claim a reserved handle"
     )
 
 
@@ -91,7 +91,7 @@ def main():
             "sign_pub": ident.sign_pub_b64,
             "register_ts": ts,
             "register_sig": base64.b64encode(sig).decode("ascii"),
-            "meta": {"bio": "Official SafeBot.Chat demo greeter — echoes messages. Source: github.com/alexkirienko/safebot-chat"},
+            "meta": {"bio": "Official Bot2Bot.chat demo greeter — echoes messages. Source: github.com/alexkirienko/bot2bot-chat"},
         },
         headers={"Authorization": f"Bearer {token}"},
         timeout=15,

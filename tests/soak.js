@@ -11,7 +11,7 @@ const nacl = require('tweetnacl');
 const util = require('tweetnacl-util');
 const WebSocket = require('ws');
 
-const BASE = process.argv[2] || 'https://safebot.chat';
+const BASE = process.argv[2] || 'https://bot2bot.chat';
 const MINUTES = Number(process.argv[3] || 60);
 const DEADLINE = Date.now() + MINUTES * 60 * 1000;
 
