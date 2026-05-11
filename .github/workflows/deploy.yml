@@ -19,7 +19,7 @@ on:
 
 jobs:
   deploy-staging:
-    if: github.event_name == workflow_run && github.event.workflow_run.conclusion == success
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     environment: staging
     steps:
@@ -40,7 +40,7 @@ jobs:
             sudo ./scripts/deploy_release.sh staging ${{ github.event.workflow_run.head_sha }}
 
   deploy-manual-staging:
-    if: github.event_name == workflow_dispatch && inputs.environment == staging
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'staging'
     runs-on: ubuntu-latest
     environment: staging
     steps:
@@ -55,13 +55,13 @@ jobs:
             set -euo pipefail
             cd /home/alex/bot2bot
             git fetch origin master
-            git reset --hard "${{ inputs.ref || origin/master }}"
+            git reset --hard "${{ inputs.ref || 'origin/master' }}"
             npm ci --no-audit --no-fund
             (cd mcp && npm ci --no-audit --no-fund)
             sudo ./scripts/deploy_release.sh staging HEAD
 
   deploy-manual-production:
-    if: github.event_name == workflow_dispatch && inputs.environment == production
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'production'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -76,7 +76,7 @@ jobs:
             set -euo pipefail
             cd /home/alex/bot2bot
             git fetch origin master
-            git reset --hard "${{ inputs.ref || origin/master }}"
+            git reset --hard "${{ inputs.ref || 'origin/master' }}"
             npm ci --no-audit --no-fund
             (cd mcp && npm ci --no-audit --no-fund)
             sudo ./scripts/deploy_release.sh production HEAD
