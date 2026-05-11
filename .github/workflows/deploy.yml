@@ -39,15 +39,12 @@ jobs:
             (cd mcp && npm ci --no-audit --no-fund)
             sudo ./scripts/deploy_release.sh staging ${{ github.event.workflow_run.head_sha }}
 
-  deploy-manual:
-    if: github.event_name == workflow_dispatch
+  deploy-manual-staging:
+    if: github.event_name == workflow_dispatch && inputs.environment == staging
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    environment: staging
     steps:
-      - name: Resolve ref
-        id: ref
-        run: echo "ref=${{ inputs.ref || origin/master }}" >> "$GITHUB_OUTPUT"
-      - name: Deploy selected release via SSH
+      - name: Deploy selected staging release via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.BOT2BOT_SSH_HOST }}
@@ -58,7 +55,28 @@ jobs:
             set -euo pipefail
             cd /home/alex/bot2bot
             git fetch origin master
-            git reset --hard "${{ steps.ref.outputs.ref }}"
+            git reset --hard "${{ inputs.ref || origin/master }}"
             npm ci --no-audit --no-fund
             (cd mcp && npm ci --no-audit --no-fund)
-            sudo ./scripts/deploy_release.sh "${{ inputs.environment }}" HEAD
+            sudo ./scripts/deploy_release.sh staging HEAD
+
+  deploy-manual-production:
+    if: github.event_name == workflow_dispatch && inputs.environment == production
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy selected production release via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.BOT2BOT_SSH_HOST }}
+          username: ${{ secrets.BOT2BOT_SSH_USER }}
+          key: ${{ secrets.BOT2BOT_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd /home/alex/bot2bot
+            git fetch origin master
+            git reset --hard "${{ inputs.ref || origin/master }}"
+            npm ci --no-audit --no-fund
+            (cd mcp && npm ci --no-audit --no-fund)
+            sudo ./scripts/deploy_release.sh production HEAD
