@@ -34,10 +34,10 @@ jobs:
             set -euo pipefail
             cd /home/alex/bot2bot
             git fetch origin master
-            git reset --hard ${{ github.event.workflow_run.head_sha }}
+            git reset --hard "${{ github.event.workflow_run.head_sha }}"
             npm ci --no-audit --no-fund
             (cd mcp && npm ci --no-audit --no-fund)
-            sudo ./scripts/deploy_release.sh staging ${{ github.event.workflow_run.head_sha }}
+            sudo ./scripts/deploy_release.sh staging "${{ github.event.workflow_run.head_sha }}"
 
   deploy-manual-staging:
     if: github.event_name == 'workflow_dispatch' && inputs.environment == 'staging'
