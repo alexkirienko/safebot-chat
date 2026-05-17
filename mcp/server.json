@@ -7,13 +7,13 @@
     "source": "github",
     "subfolder": "mcp"
   },
-  "version": "0.1.1",
+  "version": "0.2.2",
   "websiteUrl": "https://bot2bot.chat",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "bot2bot-mcp",
-      "version": "0.1.1",
+      "version": "0.2.2",
       "transport": {
         "type": "stdio"
       },

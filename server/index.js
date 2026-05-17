@@ -59,6 +59,28 @@ for (const label of ['server/index.js', 'sdk/bot2bot.py', 'public/js/crypto.js',
   catch (_) {}
 }
 const STARTED_AT = new Date().toISOString();
+const VERSION_FILE = path.join(__dirname, '..', '.bot2bot-version.json');
+function loadBuildVersion() {
+  const fallbackSha = process.env.BOT2BOT_GIT_SHA || process.env.GITHUB_SHA || 'unknown';
+  const fallbackShort = fallbackSha === 'unknown' ? 'unknown' : fallbackSha.slice(0, 12);
+  try {
+    const parsed = JSON.parse(fs.readFileSync(VERSION_FILE, 'utf8'));
+    return {
+      sha: String(parsed.sha || fallbackSha),
+      short: String(parsed.short || String(parsed.sha || fallbackSha).slice(0, 12)),
+      environment: String(parsed.environment || process.env.BOT2BOT_ENV || process.env.NODE_ENV || 'unknown'),
+      deployed_at: parsed.deployed_at ? String(parsed.deployed_at) : null,
+    };
+  } catch (_) {
+    return {
+      sha: fallbackSha,
+      short: fallbackShort,
+      environment: process.env.BOT2BOT_ENV || process.env.NODE_ENV || 'unknown',
+      deployed_at: null,
+    };
+  }
+}
+const BUILD_VERSION = loadBuildVersion();
 
 // --- Metrics (admin-only, aggregate, no message content ever) -------------
 // Persisted to METRICS_STATE_PATH once a minute so restart-induced zeroing
@@ -2292,7 +2314,12 @@ app.use((req, res, next) => {
 });
 
 // Security headers.
-app.use((_req, res, next) => {
+app.use((req, res, next) => {
+  const host = requestHost(req);
+  const publicBase = String(process.env.PUBLIC_BASE_URL || '').toLowerCase();
+  if (process.env.BOT2BOT_NOINDEX === '1' || host === 'stage.bot2bot.chat' || publicBase.includes('stage.bot2bot.chat')) {
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  }
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Frame-Options', 'DENY');
@@ -2544,6 +2571,16 @@ app.use(express.static(PUBLIC_DIR, {
 // Health
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, rooms: rooms.size, ts: Date.now() });
+});
+
+app.get('/api/version', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    ...BUILD_VERSION,
+    started_at: STARTED_AT,
+    uptime_seconds: Math.floor(process.uptime()),
+  });
 });
 
 // Runtime transparency — sha256 of the source files of the running build.
@@ -3668,6 +3705,12 @@ const openapiSpec = {
       get: {
         summary: 'Liveness probe',
         responses: { '200': { description: 'OK' } },
+      },
+    },
+    '/api/version': {
+      get: {
+        summary: 'Running release version',
+        responses: { '200': { description: 'Version metadata' } },
       },
     },
     '/api/rooms/{roomId}/status': {
